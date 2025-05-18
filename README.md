@@ -1,11 +1,3 @@
-# DOPE (DetectiOn and Pose Estimation)
-
-This repository serves as a central hub for multiple object detectors and pose estimators.
-
-- PUT YCBV DATASET IN datasets
-- smth regarding prepare templates stuff for zs6d
-- smth regarding setup.sh for cnos
-
 ## Cloning the repository
 
 To clone this repository with all its submodules:
@@ -26,27 +18,10 @@ bash scripts/download_ycbv_gdrnpp_weights.sh
 ```
 
 ## Building and running the containers
-### yolov8 and gdrnpp
-Start the containers with the following command:
+### Grounding DINO
 ```bash
-xhost local:docker
-DATASET=ycbv CONFIG=params_sasha.yaml docker-compose -f docker_compose/gdrnpp_yolov8.yml up
+cd ~/HSR_workspace/DOPE/ && docker-compose -f docker_compose/gsam2.yml up --build
 ```
-For YCB-ichores:
 ```bash
-xhost local:docker
-DATASET=ycb_ichores CONFIG=params_sasha.yaml docker-compose -f docker_compose/gdrnpp_yolov8.yml up
-```
-
-To test Gdr-net:
-```bash
-xhost local:docker
-DATASET=ycbv CONFIG=params_sasha.yaml docker-compose -f docker_compose/gdrnpp_yolov8_test.yml up
-```
-
-### cnos and zs6d
-Start the containers with the following command:
-```bash
-xhost local:docker
-docker-compose -f docker_compose/cnos_zs6d.yml up
+cd ~/HSR_workspace/DOPE/ && docker-compose -f docker_compose/gsam2.yml up
 ```
