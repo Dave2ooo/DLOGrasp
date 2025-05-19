@@ -13,3 +13,6 @@
 [submodule "object_detectors/grounded_sam2_ros"]
 	path = object_detectors/grounded_sam2_ros
 	url = git@github.com:v4r-tuwien/grounded_sam2_ros.git
+[submodule "object_detectors/Depth-Anything-V2"]
+	path = object_detectors/Depth-Anything-V2
+	url = https://github.com/DepthAnything/Depth-Anything-V2
