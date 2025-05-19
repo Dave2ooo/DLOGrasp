@@ -92,9 +92,9 @@ RUN mkdir -p /root/grounded_sam2
 COPY . /root/grounded_sam2
 WORKDIR /root/grounded_sam2
 
-RUN python3.10 -m pip install ./
+RUN python3.10 -m pip install ./object_detectors/grounded_sam2_ros
 # RUN python3.10 -m pip install --no-build-isolation -e grounding_dino
-RUN python3.10 -m pip install --no-build-isolation --no-use-pep517 ./grounding_dino
+RUN python3.10 -m pip install --no-build-isolation --no-use-pep517 ./object_detectors/grounded_sam2_ros/grounding_dino
 
 COPY ./object_detectors/grounded_sam2_ros/ros_wrapper /root/catkin_ws/src/grounded_sam_2
 RUN /bin/bash -c '. /opt/ros/noetic/setup.bash; cd /root/catkin_ws; catkin build'
@@ -104,5 +104,10 @@ RUN /bin/bash -c '. /opt/ros/noetic/setup.bash; cd /root/catkin_ws; catkin build
 # New start
 WORKDIR /root
 # WORKDIR /root/grounded_sam2/grounding_dino
-RUN python3.10 -m pip install .
+# RUN python3.10 -m pip install .
 # New end
+
+
+RUN echo 'alias dope="xhost local:docker && cd ~/HSR_workspace/DOPE/ && docker-compose -f docker_compose/gsam2.yml up"' >> ~/.bashrc
+RUN echo 'alias dope-build="xhost local:docker && cd ~/HSR_workspace/DOPE/ && docker-compose -f docker_compose/gsam2.yml up --build"' >> ~/.bashrc
+RUN echo 'alias dope-attach="xhost local:docker && docker exec -it docker_compose-grounded_sam2_ros-1 bash"' >> ~/.bashrc

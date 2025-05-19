@@ -14,7 +14,7 @@ services:
       - ../torch_cache/gsam2/:/root/.cache/torch
       - ../object_detectors/grounded_sam2_ros:/root/grounded_sam2
       - ../object_detectors/Depth-Anything-V2:/root/Depth-Anything-V2
-      - ../object_detectors/workspace:/root/workspace
+      - ../workspace:/root/workspace
     environment: 
       - DISPLAY
       - QT_X11_NO_MITSHM=1
