@@ -4,7 +4,7 @@ services:
     image: grounded_sam2_ros
     privileged: true
     build:
-      context: ../object_detectors/grounded_sam2_ros
+      context: ..
       dockerfile: Dockerfile_ros
     network_mode: "host"
     runtime: "nvidia"
@@ -12,11 +12,14 @@ services:
       - /dev/bus/usb:/dev/bus/usb
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - ../torch_cache/gsam2/:/root/.cache/torch
+      - ../object_detectors/grounded_sam2_ros:/root/grounded_sam2
+      - ../object_detectors/Depth-Anything-V2:/root/Depth-Anything-V2
+      - ../object_detectors/workspace:/root/workspace
     environment: 
       - DISPLAY
       - QT_X11_NO_MITSHM=1
       - NVIDIA_DRIVER_CAPABILITIES=all
     env_file: ../config/ros.env
-    command: bash -c "source /opt/ros/noetic/setup.bash; source /root/catkin_ws/devel/setup.bash; python3.10 -m pip install --no-build-isolation -e grounding_dino; rosrun grounded_sam_2 grounded_sam_2_ros.py"
+    command: bash -c "source /opt/ros/noetic/setup.bash; source /root/catkin_ws/devel/setup.bash; rosrun grounded_sam_2 grounded_sam_2_ros.py"
     stdin_open: true
     tty: true 
