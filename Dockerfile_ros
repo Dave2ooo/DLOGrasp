@@ -106,8 +106,3 @@ WORKDIR /root
 # WORKDIR /root/grounded_sam2/grounding_dino
 # RUN python3.10 -m pip install .
 # New end
-
-
-RUN echo 'alias dope="xhost local:docker && cd ~/HSR_workspace/DOPE/ && docker-compose -f docker_compose/gsam2.yml up"' >> ~/.bashrc
-RUN echo 'alias dope-build="xhost local:docker && cd ~/HSR_workspace/DOPE/ && docker-compose -f docker_compose/gsam2.yml up --build"' >> ~/.bashrc
-RUN echo 'alias dope-attach="xhost local:docker && docker exec -it docker_compose-grounded_sam2_ros-1 bash"' >> ~/.bashrc
