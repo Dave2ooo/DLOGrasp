@@ -1,6 +1,11 @@
+import os
 import sys
 import cv2
 import torch
+import numpy as np
+
+script_path = os.path.abspath(__file__)
+print(script_path)
 
 depth_anything_directory = '/root/Depth-Anything-V2'
 sys.path.insert(1, depth_anything_directory)
@@ -28,3 +33,8 @@ depth_anything = depth_anything.to(DEVICE).eval()
 raw_img = cv2.imread('./images/image1_crop.jpg')
 depth = depth_anything.infer_image(raw_img) # HxW depth map in meters in numpy
 
+depth = (depth - depth.min()) / (depth.max() - depth.min()) * 255.0
+depth = depth.astype(np.uint8)
+
+cv2.imshow("image", depth)
+cv2.waitKey(0)

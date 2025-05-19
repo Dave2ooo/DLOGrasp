@@ -91,83 +91,58 @@ elif masks.ndim == 4:
 
 
 
-# Try to switch to an interactive backend (if a GUI is available). If none work, we fall back to Agg.
-for _backend in ("QtAgg", "TkAgg", "GTK3Agg", "MacOSX"):
-    try:
-        matplotlib.use(_backend, force=True)
-        break
-    except Exception:
-        pass  # backend not available; continue searching
 
-import matplotlib.pyplot as plt  # noqa: E402  # must come **after** backend selection
+# --- Visualisation with OpenCV (no Matplotlib required) ----------------------
+# Paste this after you already have `masks`, `input_boxes`, and `image`.
 
+import cv2
+import numpy as np
+import os
 
-def visualise_and_save(img_pil, masks, boxes, out_dir="visualisations", alpha: float = 0.45):
-    """Create visualisations (segmented overlay, raw mask, bbox image), display them if possible,
-    and always save them to *out_dir*.
+# Convert PIL → NumPy RGB
+img_np = np.array(image.convert("RGB"))  # (H, W, 3)
+H, W = img_np.shape[:2]
 
-    Args:
-        img_pil (PIL.Image): Input image.
-        masks (np.ndarray): Boolean/integer mask array with shape (N, H, W).
-        boxes (np.ndarray): Bounding boxes, shape (N, 4) in (x0, y0, x1, y1).
-        out_dir (str): Folder where images will be written.
-        alpha (float): Transparency of the mask overlay when composing the segmented view.
-    """
+# ---------- NORMALISE MASKS --------------------------------------------------
+mask_list: list[np.ndarray] = []
+if masks.ndim == 2:
+    mask_list = [masks]
+elif masks.ndim == 3:
+    mask_list = [m for m in masks]
+elif masks.ndim == 4:
+    mask_list = [m.squeeze(0) for m in masks]
+else:
+    raise ValueError(f"Unexpected mask ndim {masks.ndim}")
 
-    os.makedirs(out_dir, exist_ok=True)
+mask_list_resized = []
+for m in mask_list:
+    if m.shape != (H, W):
+        m_resized = cv2.resize(m.astype(np.uint8), (W, H), interpolation=cv2.INTER_NEAREST)
+    else:
+        m_resized = m.astype(np.uint8)
+    mask_list_resized.append(m_resized)
 
-    img_np = np.array(img_pil.convert("RGB"))
+# ---------- 1️⃣  SEGMENTED OVERLAY ------------------------------------------
+segmented = img_np.copy()
+overlay_color = np.array([0, 255, 0], dtype=np.uint8)  # green
+alpha = 0.45
+for m in mask_list_resized:
+    mask_bool = m.astype(bool)
+    segmented[mask_bool] = ((1 - alpha) * segmented[mask_bool] + alpha * overlay_color).astype(np.uint8)
 
-    # ── 1️⃣  segmented overlay ────────────────────────────────────────────────
-    overlay_colour = np.array([0, 255, 0], dtype=np.uint8)  # green
-    segmented = img_np.copy()
-    for m in masks:
-        segmented[m.astype(bool)] = (
-            (1 - alpha) * segmented[m.astype(bool)] + alpha * overlay_colour
-        ).astype(np.uint8)
+# ---------- 2️⃣  BOUNDING-BOX IMAGE -----------------------------------------
+box_img = img_np.copy()
+for box in input_boxes:
+    x0, y0, x1, y1 = map(int, box)
+    cv2.rectangle(box_img, (x0, y0), (x1, y1), (0, 0, 255), 2)  # red
 
-    # ── 2️⃣  bounding‑box image ───────────────────────────────────────────────
-    box_img = img_np.copy()
-    for (x0, y0, x1, y1) in boxes.astype(int):
-        cv2.rectangle(box_img, (x0, y0), (x1, y1), (255, 0, 0), 2)  # red box
+# ---------- 3️⃣  MASK VISUAL (first mask) -----------------------------------
+mask_vis = cv2.cvtColor(mask_list_resized[0] * 255, cv2.COLOR_GRAY2BGR)  # white mask
 
-    # ── 3️⃣  raw mask (first mask only for display) ───────────────────────────
-    mask_img = (masks[0] * 255).astype(np.uint8)
-
-    # ── Save individual outputs ───────────────────────────────────────────────
-    cv2.imwrite(os.path.join(out_dir, "segmented.png"), cv2.cvtColor(segmented, cv2.COLOR_RGB2BGR))
-    cv2.imwrite(os.path.join(out_dir, "bbox.png"), cv2.cvtColor(box_img, cv2.COLOR_RGB2BGR))
-    cv2.imwrite(os.path.join(out_dir, "mask.png"), mask_img)
-
-    # ── Create and save combined figure ───────────────────────────────────────
-    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
-    axes[0].imshow(segmented)
-    axes[0].set_title("Segmented Overlay")
-    axes[0].axis("off")
-
-    axes[1].imshow(mask_img, cmap="gray")
-    axes[1].set_title("Mask")
-    axes[1].axis("off")
-
-    axes[2].imshow(box_img)
-    axes[2].set_title("Bounding Boxes")
-    axes[2].axis("off")
-
-    plt.tight_layout()
-    combined_path = os.path.join(out_dir, "summary.png")
-    fig.savefig(combined_path, dpi=300)
-
-    # Attempt to display if we're on an interactive backend --------------------
-    try:
-        plt.show(block=False)
-        plt.pause(0.001)  # give the window a chance to render
-    except Exception:
-        print("Non‑interactive Matplotlib backend detected; figure saved to:", combined_path)
-
-    print("\n[✓] Outputs written to:")
-    for f in ("segmented.png", "bbox.png", "mask.png", "summary.png"):
-        print(" └─", os.path.join(out_dir, f))
-
-
-# ── Call the helper with your results ─────────────────────────────────────────
-visualise_and_save(image, masks, input_boxes)
+# ---------- DISPLAY WITH OPENCV --------------------------------------------
+cv2.imshow("Segmented", cv2.cvtColor(segmented, cv2.COLOR_RGB2BGR))
+cv2.imshow("Bounding Boxes", cv2.cvtColor(box_img, cv2.COLOR_RGB2BGR))
+cv2.imshow("Mask", mask_vis)
+print("[Info] Press any key in an image window to close...")
+cv2.waitKey(0)
+cv2.destroyAllWindows()

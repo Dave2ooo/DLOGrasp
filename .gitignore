@@ -3,3 +3,5 @@ ZS6D_template_rendering/
 datasets/
 torch_cache/
 data/
+object_detectors/
+workspace/images/

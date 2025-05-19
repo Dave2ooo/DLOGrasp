@@ -106,3 +106,13 @@ WORKDIR /root
 # WORKDIR /root/grounded_sam2/grounding_dino
 # RUN python3.10 -m pip install .
 # New end
+
+# --- for displaying images (matplotlib) ----
+# --- add to Dockerfile_ros ---
+    RUN apt-get update && \
+    apt-get install -y python3-tk libxrender1 libxext6 libsm6 && \
+    rm -rf /var/lib/apt/lists/*
+
+# Tell matplotlib to use it by default
+ENV MPLBACKEND=TkAgg
+
