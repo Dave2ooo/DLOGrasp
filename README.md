@@ -2,7 +2,7 @@
 
 To clone this repository with all its submodules:
 ```bash
-git clone --recurse-submodules git@github.com:lexihaberl/DOPE.git
+git clone --recurse-submodules https://github.com/Dave2ooo/DOPE.git
 ```
 
 If you have already cloned the repository without the submodules, you can initialize and update them with:
