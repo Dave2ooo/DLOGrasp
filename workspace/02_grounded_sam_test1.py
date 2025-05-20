@@ -46,9 +46,9 @@ grounding_model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id).
 
 # setup the input image and text prompt for SAM 2 and Grounding DINO
 # VERY important: text queries need to be lowercased + end with a dot
-text = "tube."
+text = "tube.cable."
 
-img_path = '/root/workspace/images/image1.jpg'
+img_path = '/root/workspace/images/moves/cable0.jpg'
 image = Image.open(img_path)
 
 # run Grounding DINO on the image

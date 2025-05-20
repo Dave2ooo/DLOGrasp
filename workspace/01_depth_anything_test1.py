@@ -30,7 +30,7 @@ depth_anything.load_state_dict(torch.load(checkpoint_path, map_location='cpu'))
 depth_anything = depth_anything.to(DEVICE).eval()
 
 
-raw_img = cv2.imread('./images/image1_crop.jpg')
+raw_img = cv2.imread('./images/moves/cable0.jpg')
 depth = depth_anything.infer_image(raw_img) # HxW depth map in meters in numpy
 
 depth = (depth - depth.min()) / (depth.max() - depth.min()) * 255.0
