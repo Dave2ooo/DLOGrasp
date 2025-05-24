@@ -452,7 +452,7 @@ class DepthAnythingWrapper():
 
     def show_pointclouds_with_frames_and_grid(self,
                                               pointclouds: list[o3d.geometry.PointCloud],
-                                              frames: list[TransformStamped],
+                                              frames: list[TransformStamped] = None,
                                               grid_size: float = 5.0,
                                               grid_step: float = 0.5,
                                               title: str = 'Point Clouds (Z-up)'):
@@ -466,13 +466,14 @@ class DepthAnythingWrapper():
         # origin
         geometries.append(o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.2))
         # camera frames
-        for tf in frames:
-            t = tf.transform.translation; q = tf.transform.rotation
-            T = quaternion_matrix((q.x, q.y, q.z, q.w))
-            T[:3,3] = (t.x, t.y, t.z)
-            mesh = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
-            mesh.transform(T)
-            geometries.append(mesh)
+        if frames is not None:
+            for tf in frames:
+                t = tf.transform.translation; q = tf.transform.rotation
+                T = quaternion_matrix((q.x, q.y, q.z, q.w))
+                T[:3,3] = (t.x, t.y, t.z)
+                mesh = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
+                mesh.transform(T)
+                geometries.append(mesh)
 
         # colored pointclouds
         palette = [[1,0,0],[0,1,0],[0,0,1],[1,1,0],[1,0,1],[0,1,1]]
@@ -520,8 +521,6 @@ class DepthAnythingWrapper():
             vis.update_renderer()
 
         vis.destroy_window()
-
-
 
     def scale_depth_map(self,
                         depth: np.ndarray,
@@ -1030,6 +1029,31 @@ class DepthAnythingWrapper():
 
         cv2.destroyWindow(window)
         return result['scale'], result['shift'], result['inliers']
+
+    def get_highest_point(self, pointcloud: o3d.geometry.PointCloud) -> np.ndarray:
+        """
+        Return the 3D point in the point cloud with the largest Z coordinate.
+
+        Parameters
+        ----------
+        pointcloud : o3d.geometry.PointCloud
+            The input point cloud.
+
+        Returns
+        -------
+        np.ndarray
+            A length-3 array [x, y, z] of the point with the maximum z value.
+        """
+        if not isinstance(pointcloud, o3d.geometry.PointCloud):
+            raise TypeError("pointcloud must be an open3d.geometry.PointCloud")
+
+        pts = np.asarray(pointcloud.points, dtype=np.float64)
+        if pts.size == 0:
+            raise ValueError("Point cloud is empty")
+
+        # find the index of the maximum Z
+        idx = np.argmax(pts[:, 2])
+        return pts[idx]
 
 
 
