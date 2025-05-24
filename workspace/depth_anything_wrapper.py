@@ -17,6 +17,8 @@ depth_anything_directory = '/root/Depth-Anything-V2'
 sys.path.insert(1, depth_anything_directory)
 from metric_depth.depth_anything_v2.dpt import DepthAnythingV2
 
+import copy
+
 model_configs = {
     'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
     'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
@@ -377,48 +379,149 @@ class DepthAnythingWrapper():
 
         return cam_hom[:3]
 
-    def show_pointclouds_with_frames(self, pointclouds, frames, title='DepthAnything – Point Cloud') -> None:
+    def show_pointclouds_with_frames(self,
+                                     pointclouds: list[o3d.geometry.PointCloud],
+                                     frames: list[TransformStamped],
+                                     title: str = 'DepthAnything – Point Clouds') -> None:
         """
-        Display a point cloud together with coordinate frames.
+        Display multiple point clouds (each colored differently) together with coordinate frames.
 
         Parameters
         ----------
-        pointcloud : o3d.geometry.PointCloud
-            The point cloud to display.
-        frames : Sequence[TransformStamped]
-            A list of transforms (camera/world frames) to draw.
+        pointclouds : list of o3d.geometry.PointCloud
+            The point clouds to display.
+        frames : list of TransformStamped
+            A list of camera/world frames to draw as coordinate triads.
+        title : str
+            Window title for the visualizer.
         """
-        # base origin frame
-        geometries = [o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.2, origin=[0, 0, 0])]
+        import numpy as np
+        import copy
+        import open3d as o3d
+        from tf.transformations import quaternion_matrix
+        from geometry_msgs.msg import TransformStamped
 
-        # convert each TransformStamped into a mesh frame
+        # origin frame
+        geometries: list = [
+            o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.2, origin=[0,0,0])
+        ]
+
+        # draw each frame
         for tf in frames:
             if not isinstance(tf, TransformStamped):
                 raise TypeError("Each frame must be a geometry_msgs.msg.TransformStamped")
-            # extract translation & rotation
             t = tf.transform.translation
             q = tf.transform.rotation
-            trans = np.array([t.x, t.y, t.z], dtype=np.float64)
-            quat = np.array([q.x, q.y, q.z, q.w], dtype=np.float64)
-            # build homogeneous transform
-            T = quaternion_matrix(quat)
-            T[:3, 3] = trans
-            # create and transform a coordinate frame
+            T = quaternion_matrix([q.x, q.y, q.z, q.w])
+            T[:3,3] = [t.x, t.y, t.z]
             frame_mesh = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
             frame_mesh.transform(T)
             geometries.append(frame_mesh)
 
-        # add the pointcloud and render
-        for pc in pointclouds:
-            geometries.append(pc)
+        # pick distinct colors (RGB) for each cloud
+        palette = [
+            [1.0, 0.0, 0.0],   # red
+            [0.0, 1.0, 0.0],   # green
+            [0.0, 0.0, 1.0],   # blue
+            [1.0, 1.0, 0.0],   # yellow
+            [1.0, 0.0, 1.0],   # magenta
+            [0.0, 1.0, 1.0],   # cyan
+        ]
+
+        # color and add each pointcloud
+        for idx, pc in enumerate(pointclouds):
+            if not isinstance(pc, o3d.geometry.PointCloud):
+                raise TypeError("Each entry in pointclouds must be an Open3D PointCloud")
+            # clone so we don't overwrite the original
+            pc_colored = copy.deepcopy(pc)
+            color = palette[idx % len(palette)]
+            # assign a uniform color per point
+            colors = np.tile(color, (len(pc_colored.points), 1))
+            pc_colored.colors = o3d.utility.Vector3dVector(colors)
+            geometries.append(pc_colored)
+
+        # launch viewer
         o3d.visualization.draw_geometries(
             geometries,
             window_name=title,
-            width=1280,
-            height=720,
+            width=1280, height=720,
             point_show_normal=False,
             mesh_show_wireframe=False,
-            mesh_show_back_face=False)
+            mesh_show_back_face=False
+        )
+
+    def show_pointclouds_with_frames_and_grid(self,
+                                              pointclouds: list[o3d.geometry.PointCloud],
+                                              frames: list[TransformStamped],
+                                              grid_size: float = 5.0,
+                                              grid_step: float = 0.5,
+                                              title: str = 'Point Clouds (Z-up)'):
+        """
+        Display point clouds + frames with Z always up, and a ground‐plane grid at z=0.
+        Locks Z as vertical by resetting the up‐vector each frame.
+        """
+        # --- build all geometries ---
+        geometries = []
+
+        # origin
+        geometries.append(o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.2))
+        # camera frames
+        for tf in frames:
+            t = tf.transform.translation; q = tf.transform.rotation
+            T = quaternion_matrix((q.x, q.y, q.z, q.w))
+            T[:3,3] = (t.x, t.y, t.z)
+            mesh = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
+            mesh.transform(T)
+            geometries.append(mesh)
+
+        # colored pointclouds
+        palette = [[1,0,0],[0,1,0],[0,0,1],[1,1,0],[1,0,1],[0,1,1]]
+        for idx, pc in enumerate(pointclouds):
+            if not isinstance(pc, o3d.geometry.PointCloud):
+                raise TypeError("Expected PointCloud")
+            pc2 = copy.deepcopy(pc)
+            color = palette[idx % len(palette)]
+            pc2.colors = o3d.utility.Vector3dVector(
+                np.tile(color, (len(pc2.points),1)))
+            geometries.append(pc2)
+
+        # ground-plane grid
+        pts, lines = [], []
+        n = 0
+        for x in np.arange(-grid_size, grid_size+1e-6, grid_step):
+            pts += [[x,-grid_size,0],[x,grid_size,0]]
+            lines += [[n,n+1]]; n+=2
+        for y in np.arange(-grid_size, grid_size+1e-6, grid_step):
+            pts += [[-grid_size,y,0],[grid_size,y,0]]
+            lines += [[n,n+1]]; n+=2
+        grid = o3d.geometry.LineSet(
+            points=o3d.utility.Vector3dVector(pts),
+            lines=o3d.utility.Vector2iVector(lines))
+        grid.colors = o3d.utility.Vector3dVector([[0.5,0.5,0.5]]*len(lines))
+        geometries.append(grid)
+
+        # --- manual visualizer loop with up-vector reset ---
+        vis = o3d.visualization.Visualizer()
+        vis.create_window(window_name=title, width=1024, height=768)
+        for geo in geometries:
+            vis.add_geometry(geo)
+
+        ctr = vis.get_view_control()
+        ctr.set_front((0, -0.5, -0.5))
+        ctr.set_lookat((0, 0, 0))
+        # initial up
+        ctr.set_up((0, 0, 1))
+
+        while True:
+            if not vis.poll_events():
+                break
+            # enforce Z-up every frame
+            ctr.set_up((0, 0, 1))
+            vis.update_renderer()
+
+        vis.destroy_window()
+
+
 
     def scale_depth_map(self,
                         depth: np.ndarray,
@@ -550,9 +653,7 @@ class DepthAnythingWrapper():
             # print(mask_bw)
         return depth_map, mask_bw
 
-    def get_closest_points(self,
-                           pointcloud1: o3d.geometry.PointCloud,
-                           pointcloud2: o3d.geometry.PointCloud) -> np.ndarray:
+    def get_closest_points(self, pointcloud1: o3d.geometry.PointCloud, pointcloud2: o3d.geometry.PointCloud) -> np.ndarray:
         """
         Find closest‐point correspondences from pointcloud1 to pointcloud2.
 
@@ -580,6 +681,50 @@ class DepthAnythingWrapper():
             corres.append([i, idx[0]])
 
         return np.array(corres, dtype=np.int64)
+
+    def get_closest_points_from_masks(self, mask1: np.ndarray, mask2: np.ndarray) -> np.ndarray:
+        """
+        Find closest‐point correspondences between two binary masks.
+
+        Parameters
+        ----------
+        mask1, mask2 : np.ndarray, shape (H, W)
+            Binary or boolean masks (non‐zero pixels are “on”). Must be same shape.
+
+        Returns
+        -------
+        np.ndarray, shape (N, 4), dtype=int
+            Each row is [r1, c1, r2, c2], where (r1,c1) is a pixel from mask1
+            and (r2,c2) is its nearest neighbor in mask2.
+        """
+        if mask1.shape != mask2.shape:
+            raise ValueError("mask1 and mask2 must have the same shape")
+
+        # Extract nonzero pixel coordinates (row, col)
+        coords1 = np.column_stack(np.nonzero(mask1.astype(bool)))
+        coords2 = np.column_stack(np.nonzero(mask2.astype(bool)))
+
+        # No correspondences if either mask is empty
+        if coords1.size == 0 or coords2.size == 0:
+            return np.zeros((0, 4), dtype=int)
+
+        # Build a 2D KD‐tree on coords2 (embed in 3D with z=0)
+        pts2 = np.zeros((coords2.shape[0], 3), dtype=float)
+        pts2[:, 0] = coords2[:, 1]  # x = col
+        pts2[:, 1] = coords2[:, 0]  # y = row
+        pc2 = o3d.geometry.PointCloud()
+        pc2.points = o3d.utility.Vector3dVector(pts2)
+        kdtree = o3d.geometry.KDTreeFlann(pc2)
+
+        # For each point in mask1, find nearest in mask2
+        corres = []
+        for r1, c1 in coords1:
+            query = [float(c1), float(r1), 0.0]
+            _, idx, _ = kdtree.search_knn_vector_3d(query, 1)
+            r2, c2 = coords2[idx[0]]
+            corres.append([r1, c1, r2, c2])
+
+        return np.array(corres, dtype=int)
 
     def project_point(self, point):
         """
@@ -783,6 +928,108 @@ class DepthAnythingWrapper():
 
         # count where both are True
         return int(np.count_nonzero(m1 & m2))
+
+    def interactive_scale_shift(self,
+                                depth1: np.ndarray,
+                                mask2: np.ndarray,
+                                pose1: TransformStamped,
+                                pose2: TransformStamped,
+                                scale_limits: tuple[float, float] = (0.005, 0.4),
+                                shift_limits: tuple[float, float] = (-1.0, 1.0)
+                                ) -> tuple[float, float, int]:
+        """
+        Open an OpenCV window with two trackbars (“scale” and “shift”) that lets you
+        interactively adjust the scaling and offset of `depth1`, regenerate the point
+        cloud from camera1, project it into camera2, compare against `mask2`, and
+        display the count of inliers as well as the current scale and shift.
+
+        Parameters
+        ----------
+        depth1 : np.ndarray
+            Original depth map from camera1 (H×W).
+        mask2 : np.ndarray
+            Binary mask from camera2 (H×W).
+        pose1 : TransformStamped
+            camera1→world transform.
+        pose2 : TransformStamped
+            camera2→world transform.
+        scale_limits : tuple(float, float)
+            (min_scale, max_scale) for the scale slider.
+        shift_limits : tuple(float, float)
+            (min_shift, max_shift) for the shift slider.
+
+        Returns
+        -------
+        (scale, shift, inliers) : Tuple[float, float, int]
+            The final slider values and number of inliers when the window is closed.
+        """
+        import cv2
+        import numpy as np
+
+        H, W = depth1.shape
+        window = "Scale/Shift Tuner"
+        cv2.namedWindow(window, cv2.WINDOW_NORMAL)
+
+        # unpack limits and compute slider resolution
+        smin, smax = scale_limits
+        scale_res = 0.001
+        s_steps = max(1, int(round((smax - smin) / scale_res)))
+        scale_res = (smax - smin) / s_steps
+
+        tmin, tmax = shift_limits
+        t_steps = 200
+        shift_res = (tmax - tmin) / t_steps
+
+        result = {'scale': None, 'shift': None, 'inliers': None}
+
+        def update(_=0):
+            v_s = cv2.getTrackbarPos("scale", window)
+            v_t = cv2.getTrackbarPos("shift", window)
+
+            scale = smin + v_s * scale_res
+            shift = tmin + v_t * shift_res
+            # 1) scale & shift depth1
+            d1 = self.scale_depth_map(depth1, scale, shift)
+            # 2) to world pointcloud
+            pc1 = self.get_pointcloud(d1)
+            pc1_world = self.transform_pointcloud_to_world(pc1, pose1)
+            # 3) project into cam2
+            _, reproj_mask = self.project_pointcloud(pc1_world, pose2)
+            # 4) overlay masks
+            m2 = (mask2.astype(bool)).astype(np.uint8) * 255
+            rm = (reproj_mask.astype(bool)).astype(np.uint8) * 255
+            overlay = np.zeros((H, W, 3), dtype=np.uint8)
+            overlay[m2 > 0]               = (0,   0, 255)
+            overlay[rm > 0]               = (0, 255,   0)
+            overlay[(m2 > 0) & (rm > 0)]  = (0, 255, 255)
+            # 5) count inliers
+            inliers = self.count_inliers(reproj_mask, mask2)
+
+            # 6) annotate scale, shift, inliers
+            cv2.putText(overlay, f"Scale: {scale:.3f}", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
+            cv2.putText(overlay, f"Shift: {shift:.3f}", (10, 60),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
+            cv2.putText(overlay, f"Inliers: {inliers}", (10, 90),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
+
+            result['scale'], result['shift'], result['inliers'] = scale, shift, inliers
+            cv2.imshow(window, overlay)
+
+        # create trackbars
+        cv2.createTrackbar("scale", window, int(s_steps//2), s_steps, update)
+        cv2.createTrackbar("shift", window, int(t_steps//2), t_steps, update)
+
+        update()  # initial draw
+
+        # loop until Esc or window closed
+        while True:
+            key = cv2.waitKey(50) & 0xFF
+            if key == 27 or cv2.getWindowProperty(window, cv2.WND_PROP_VISIBLE) < 1:
+                break
+
+        cv2.destroyWindow(window)
+        return result['scale'], result['shift'], result['inliers']
 
 
 

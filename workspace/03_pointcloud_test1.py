@@ -1,5 +1,6 @@
 from depth_anything_wrapper import DepthAnythingWrapper
 from grounded_sam_wrapper import GroundedSamWrapper
+from ROS_handler import ROSHandler
 from geometry_msgs.msg import TransformStamped
 from tf.transformations import quaternion_matrix, quaternion_from_matrix
 import numpy as np
@@ -132,8 +133,29 @@ def get_homogeneous_matrix(transform: TransformStamped) -> np.ndarray:
 
     return M
 
+def test2():
+    depth_anything_wrapper = DepthAnythingWrapper(intrinsics=camera_intrinsics)
+    grounded_sam_wrapper = GroundedSamWrapper()
+    image = cv2.imread(f'/root/workspace/images/moves/cable0.jpg')
+
+    depth_orig = depth_anything_wrapper.get_depth_map(image)
+    depth_scale = depth_anything_wrapper.scale_depth_map(depth_orig, scale=0.1, shift=0.0)
+
+    pointcloud_orig = depth_anything_wrapper.get_pointcloud(depth_orig)
+    pointcloud_scaled = depth_anything_wrapper.get_pointcloud(depth_scale)
+    
+    mask = grounded_sam_wrapper.get_mask(image)[0][0]
+    
+    pointcloud_orig_masked = depth_anything_wrapper.mask_pointcloud(pointcloud_orig, mask)
+    pointcloud_scaled_masked = depth_anything_wrapper.mask_pointcloud(pointcloud_scaled, mask)
+    depth_anything_wrapper.show_pointclouds([pointcloud_orig_masked, pointcloud_scaled_masked])
+
+    pointcloud_orig_masked_world = depth_anything_wrapper.transform_pointcloud_to_world(pointcloud_orig_masked, transform_stamped0)
+    pointcloud_scaled_masked_world = depth_anything_wrapper.transform_pointcloud_to_world(pointcloud_scaled_masked, transform_stamped0)
+    depth_anything_wrapper.show_pointclouds_with_frames([pointcloud_orig_masked_world, pointcloud_scaled_masked_world], [transform_stamped0])
 
 def test_least_squares():
+    
     depth_anything_wrapper = DepthAnythingWrapper(intrinsics=camera_intrinsics)
     grounded_sam_wrapper = GroundedSamWrapper()
 
@@ -419,7 +441,7 @@ def ransac2():
     pointclouds_masked = []
     pointclouds_masked_world = []
 
-    for i, transform in enumerate(transforms[0:2]):
+    for i, transform in enumerate(transforms[0:7]):
         print(f'Processing image {i}')
         image = cv2.imread(f'/root/workspace/images/moves/cable{i}.jpg')
         images.append(image)
@@ -444,12 +466,13 @@ def ransac2():
         # depth_anything_wrapper.show_pointclouds([pointcloud_world])
 
 
-    index_pointcloud = 0
+    index_pointcloud = 5
     current_pointcloud_masked_world = pointclouds_masked_world[index_pointcloud]
     max_inliers_counter = 0
     best_alpha, best_beta = 0, 0
     best_pointcloud = None
     best_projection = None
+    num_skips = 0
     # Loop N times
     for i in range(len(current_pointcloud_masked_world.points)):
         # Pick two random points from pointcloud 1
@@ -490,7 +513,8 @@ def ransac2():
             projected_triangulated2_A = depth_anything_wrapper.project_point_from_world(trtiangulated0_A, transforms[index_pointcloud+1])
             projected_triangulated2_B = depth_anything_wrapper.project_point_from_world(trtiangulated0_B, transforms[index_pointcloud+1])
         except Exception as e:
-            print(f'{e}, Skipping to next iteration')
+            # print(f'{e}, Skipping to next iteration')
+            num_skips += 1
             continue
         
         # Show mask 2 and triangulated points
@@ -545,42 +569,399 @@ def ransac2():
 
         # Count the number of inliers between mask 2 and projection of scaled pointcloud
         num_inliers = depth_anything_wrapper.count_inliers(projection_new_pc2_mask, masks[index_pointcloud+1])
-        print(f'{i}: num_inliers: {num_inliers}')
+        # print(f'{i}: num_inliers: {num_inliers}')
 
-        if num_inliers > max_inliers_counter:
+        if num_inliers > max_inliers_counter and alpha < 1:
             max_inliers_counter = num_inliers
             best_alpha = alpha
             best_beta = beta
             best_pointcloud = new_pc0
             best_projection = projection_new_pc2_depth
 
-    print(f'Max inliers: {max_inliers_counter}, alpha: {best_alpha:.2f}, beta: {best_beta:.2f}')
+    print(f'Max inliers: {max_inliers_counter}, alpha: {best_alpha:.2f}, beta: {best_beta:.2f}, Skipped points: {num_skips}')
     # Show original and scaled depth maps and masks
     grounded_sam_wrapper.show_masks([best_projection, masks[index_pointcloud+1]], title="Scaled depth map and mask")
     # Show original and scaled pointclouds in world coordinates
-    depth_anything_wrapper.show_pointclouds_with_frames([pointclouds_masked_world[index_pointcloud], best_pointcloud], [transforms[index_pointcloud]], title="Original and scaled pointcloud")
+    depth_anything_wrapper.show_pointclouds_with_frames_and_grid([pointclouds_masked_world[index_pointcloud], best_pointcloud], [transforms[index_pointcloud]], title="Original and scaled pointcloud")
 
-
-def test2():
+def ransac3():
     depth_anything_wrapper = DepthAnythingWrapper(intrinsics=camera_intrinsics)
     grounded_sam_wrapper = GroundedSamWrapper()
-    image = cv2.imread(f'/root/workspace/images/moves/cable0.jpg')
 
-    depth_orig = depth_anything_wrapper.get_depth_map(image)
-    depth_scale = depth_anything_wrapper.scale_depth_map(depth_orig, scale=0.1, shift=0.0)
+    images = []
+    # depths = []
+    depths_masked = []
+    # pointclouds = []
+    masks = []
+    pointclouds_masked = []
+    pointclouds_masked_world = []
 
-    pointcloud_orig = depth_anything_wrapper.get_pointcloud(depth_orig)
-    pointcloud_scaled = depth_anything_wrapper.get_pointcloud(depth_scale)
+    for i, transform in enumerate(transforms[0:7]):
+        print(f'Processing image {i}')
+        image = cv2.imread(f'/root/workspace/images/moves/cable{i}.jpg')
+        images.append(image)
+
+        depth = depth_anything_wrapper.get_depth_map(image)
+        # depth_anything_wrapper.show_depth_map(depth)
+
+        mask = grounded_sam_wrapper.get_mask(image)[0][0]
+        masks.append(mask)
+        # grounded_sam_wrapper.show_mask(mask)
+
+        depth_masked = grounded_sam_wrapper.mask_depth_map(depth, mask)
+        depths_masked.append(depth_masked)
+        # depth_anything_wrapper.show_depth_map(depth_masked)
+
+        pointcloud_masked = depth_anything_wrapper.get_pointcloud(depth_masked)
+        pointclouds_masked.append(pointcloud_masked)
+        # depth_anything_wrapper.show_pointclouds([pointcloud_masked])
+
+        pointcloud_masked_world = depth_anything_wrapper.transform_pointcloud_to_world(pointcloud_masked, transform)
+        pointclouds_masked_world.append(pointcloud_masked_world)
+        # depth_anything_wrapper.show_pointclouds([pointcloud_masked_world])
+
+
+    best_pointclouds_world = []
+    for index_pointcloud, transform in enumerate(transforms[0:6]):
+        # print(f'Processing Pointcloud {iteration}')
+        current_pointcloud_masked_world = pointclouds_masked_world[index_pointcloud]
+        max_inliers_counter = 0
+        best_alpha, best_beta = 0, 0
+        best_pointcloud = None
+        best_projection = None
+        num_skips = 0
+        # Loop N times
+        for i in range(len(current_pointcloud_masked_world.points)):
+        # for i in range(1000):
+            # Pick two random points from pointcloud 1
+            point0_A = random.choice(current_pointcloud_masked_world.points)
+            point0_B = random.choice(current_pointcloud_masked_world.points)
+            if np.all(point0_A == point0_B):
+                # print(f'point0_A: {point0_A}')
+                # print(f'point0_B: {point0_B}')
+                # print('Points are the same')
+                continue
+
+            # Project the points into coordinates of camera 2
+            projection2_A = depth_anything_wrapper.project_point_from_world(point0_A, transforms[index_pointcloud+1])
+            projection2_B = depth_anything_wrapper.project_point_from_world(point0_B, transforms[index_pointcloud+1])
+
+            # Project the pointcloud into coordinates of camera 2
+            projected_pointcloud_depth, projected_pointcloud_mask_2 = depth_anything_wrapper.project_pointcloud(pointclouds_masked_world[index_pointcloud], transforms[index_pointcloud+1])
+            # grounded_sam_wrapper.show_mask_and_points(projected_pointcloud_mask_2, [projection2_A, projection2_B], title="Pointcloud 1 projected onto camera 2 with rand points")
+
+            # Get the closest points between single point (from pointcloud 1) and mask 2
+            closest2_A = grounded_sam_wrapper.get_closest_point(masks[index_pointcloud+1], projection2_A)
+            closest2_B = grounded_sam_wrapper.get_closest_point(masks[index_pointcloud+1], projection2_B)
+
+            # Show the closest points
+            # grounded_sam_wrapper.show_mask_and_points(masks[index_pointcloud+1], [closest2_A, closest2_B], title="Mask 2 in camera 2 with closest points")
+            # grounded_sam_wrapper.show_mask_and_points(projected_pointcloud_mask_2, [closest2_A, closest2_B], title="Pointcloud 1 projected onto camera 2 with closest points")
+
+            # grounded_sam_wrapper.show_mask_and_points(masks[index_pointcloud+1], [closest2_A, projection2_A], title="projection and closest point A")
+            # grounded_sam_wrapper.show_mask_and_points(masks[index_pointcloud+1], [closest2_B, projection2_B], title="projection and closest point B")
+
+            # Triangulate
+            trtiangulated0_A = depth_anything_wrapper.triangulate(point0_A, transforms[index_pointcloud], closest2_A, transforms[index_pointcloud+1])
+            trtiangulated0_B = depth_anything_wrapper.triangulate(point0_B, transforms[index_pointcloud], closest2_B, transforms[index_pointcloud+1])
+            # print(f'trtiangulated0_A: {trtiangulated0_A}')
+            # print(f'trtiangulated0_B: {trtiangulated0_B}')
+            try:
+                # Project the triangulated points into coordinates of camera 2
+                projected_triangulated2_A = depth_anything_wrapper.project_point_from_world(trtiangulated0_A, transforms[index_pointcloud+1])
+                projected_triangulated2_B = depth_anything_wrapper.project_point_from_world(trtiangulated0_B, transforms[index_pointcloud+1])
+            except Exception as e:
+                # print(f'{e}, Skipping to next iteration')
+                num_skips += 1
+                continue
+            
+            # Show mask 2 and triangulated points
+            # grounded_sam_wrapper.show_mask_and_points(masks[index_pointcloud+1], [projected_triangulated2_A, projected_triangulated2_B], title="Mask 2 with triangulated points")
+            # Show pointcloud 1 and triangulated points in camera 2
+            # grounded_sam_wrapper.show_mask_and_points(projected_pointcloud_mask_2, [projected_triangulated2_A, projected_triangulated2_B], title="Pointcloud 1 projected onto camera 2 with triangulated points")
+            
+            # Transform triangulated point into camera 1 coordinates
+            triangulated1_A = depth_anything_wrapper.transform_point_from_world(trtiangulated0_A, transforms[index_pointcloud])
+            triangulated1_B = depth_anything_wrapper.transform_point_from_world(trtiangulated0_B, transforms[index_pointcloud])
+
+            # Get  distance of original point0_A and point0_B
+            z_A_orig = depth_anything_wrapper.transform_point_from_world(point0_A, transforms[index_pointcloud])[2]
+            z_B_orig = depth_anything_wrapper.transform_point_from_world(point0_B, transforms[index_pointcloud])[2]
+
+            # Get distance id triangulated point
+            z_A_triangulated = triangulated1_A[2]
+            z_B_triangulated = triangulated1_B[2]
+            # print(f'depth_A_orig: {z_A_orig}')
+            # print(f'depth_A_triangulated: {z_A_triangulated}')
+            # print(f'depth_B_orig: {z_B_orig}')
+            # print(f'depth_B_triangulated: {z_B_triangulated}')
+            
+            # Calculate scale and shift
+            alpha = (z_A_triangulated - z_B_triangulated) / (z_A_orig - z_B_orig)
+            beta = z_A_triangulated - alpha * z_A_orig
+            # print(f'alpha: {alpha:.2f}, beta: {beta:.2f}')
+
+            # Scale and shift
+            depth_new = depth_anything_wrapper.scale_depth_map(depths_masked[index_pointcloud], scale=alpha, shift=beta)
+
+            # Show original and scaled depth maps
+            # depth_anything_wrapper.show_depth_map(depths_masked[index_pointcloud], title="Original depth map")
+            # depth_anything_wrapper.show_depth_map(depth_new, title="Scaled depth map")
+
+            # Get scaled/shifted pointcloud
+            new_pc1 = depth_anything_wrapper.get_pointcloud(depth_new)
+
+            # Transform scaled pointcloud into world coordinates
+            new_pc0 = depth_anything_wrapper.transform_pointcloud_to_world(new_pc1, transforms[index_pointcloud])
+
+            # Get projection of scaled pointcloud into camera 2
+            projection_new_pc2_depth, projection_new_pc2_mask = depth_anything_wrapper.project_pointcloud(new_pc0, transforms[index_pointcloud+1])
+        
+            # Show projection of scaled pointcloud in camera 2 and closest points
+            # grounded_sam_wrapper.show_mask_and_points(projection_new_pc2_depth, [closest2_A, closest2_B], title="Scaled pointcloud with closest points")
+
+            # # Show original and scaled depth maps and masks
+            # grounded_sam_wrapper.show_masks([projection_new_pc2_mask, masks[index_pointcloud+1]], title="Scaled depth map and mask")
+            # # Show original and scaled pointclouds in world coordinates
+            # depth_anything_wrapper.show_pointclouds_with_frames([pointclouds_masked_world[index_pointcloud], new_pc0], [transforms[index_pointcloud]], title="Original and scaled pointcloud")
+
+            # Count the number of inliers between mask 2 and projection of scaled pointcloud
+            num_inliers = depth_anything_wrapper.count_inliers(projection_new_pc2_mask, masks[index_pointcloud+1])
+            # print(f'{i}: num_inliers: {num_inliers}')
+
+            if num_inliers > max_inliers_counter:
+                max_inliers_counter = num_inliers
+                best_alpha = alpha
+                best_beta = beta
+                best_pointcloud = new_pc0
+                best_projection = projection_new_pc2_depth
+
+        print(f'Max inliers: {max_inliers_counter}, alpha: {best_alpha:.2f}, beta: {best_beta:.2f}, Skipped points: {num_skips}')
+        # # Show original and scaled depth maps and masks
+        # grounded_sam_wrapper.show_masks([best_projection, masks[index_pointcloud+1]], title="Scaled depth map and mask")
+        # # Show original and scaled pointclouds in world coordinates
+        # depth_anything_wrapper.show_pointclouds_with_frames([pointclouds_masked_world[index_pointcloud], best_pointcloud], [transforms[index_pointcloud]], title="Original and scaled pointcloud")
+        best_pointclouds_world.append(best_pointcloud)
+
+    depth_anything_wrapper.show_pointclouds_with_frames_and_grid(best_pointclouds_world, transforms, title='Best pointclouds')
+
+def icp():
+    depth_anything_wrapper = DepthAnythingWrapper(intrinsics=camera_intrinsics)
+    grounded_sam_wrapper = GroundedSamWrapper()
+
+    images = []
+    # depths = []
+    depths_masked = []
+    # pointclouds = []
+    masks = []
+    pointclouds_masked = []
+    pointclouds_masked_world = []
+
+    for i, transform in enumerate(transforms[0:2]):
+        print(f'Processing image {i}')
+        image = cv2.imread(f'/root/workspace/images/moves/cable{i}.jpg')
+        images.append(image)
+
+        depth = depth_anything_wrapper.get_depth_map(image)
+        # depth_anything_wrapper.show_depth_map(depth)
+
+        mask = grounded_sam_wrapper.get_mask(image)[0][0]
+        masks.append(mask)
+        # grounded_sam_wrapper.show_mask(mask)
+
+        depth_masked = grounded_sam_wrapper.mask_depth_map(depth, mask)
+        depths_masked.append(depth_masked)
+        # depth_anything_wrapper.show_depth_map(depth_masked)
+
+        pointcloud_masked = depth_anything_wrapper.get_pointcloud(depth_masked)
+        pointclouds_masked.append(pointcloud_masked)
+        # depth_anything_wrapper.show_pointclouds([pointcloud_masked])
+
+        pointcloud_masked_world = depth_anything_wrapper.transform_pointcloud_to_world(pointcloud_masked, transform)
+        pointclouds_masked_world.append(pointcloud_masked_world)
+        # depth_anything_wrapper.show_pointclouds([pointcloud_world])
+
+
+    index_pointcloud = 0
+    max_inliers_counter = 0
+    best_alpha, best_beta = 0, 0
+    best_pointcloud = None
+    best_projection = None
+    A = None
+    b = []
+    icp_depths = [depths_masked[index_pointcloud]]
+    icp_pointclouds0 = [pointclouds_masked_world[index_pointcloud]]
+    # Loop N times
+    for i in range(10):
+        for pc_point_index, pc_point in enumerate(icp_pointclouds0[-1].points):
+            # print(f'Index: {pc_point_index}, pc_point: {pc_point}')
+
+            # Project the point into coordinates of camera 2
+            projection2 = depth_anything_wrapper.project_point_from_world(pc_point, transforms[index_pointcloud+1])
+            # grounded_sam_wrapper.show_mask_and_points(projection2, [projection2], title="Pointcloud 1 projected onto camera 2 with rand points")
+
+            # Get the closest points between single point (from pointcloud 1) and mask 2
+            closest2 = grounded_sam_wrapper.get_closest_point(masks[index_pointcloud+1], projection2)
+
+            # Show the closest points
+            # grounded_sam_wrapper.show_mask_and_points(masks[index_pointcloud+1], [closest2], title="Mask 2 in camera 2 with closest points")
+            # grounded_sam_wrapper.show_mask_and_points(masks[index_pointcloud+1], [closest2, projection2], title="Projection and closest point A")
+
+            # Triangulate
+            trtiangulated0 = depth_anything_wrapper.triangulate(pc_point, transforms[index_pointcloud], closest2, transforms[index_pointcloud+1])
+            # print(f'trtiangulated0_A: {trtiangulated0}')
+            try:
+                # Project the triangulated points into coordinates of camera 2
+                projected_triangulated2 = depth_anything_wrapper.project_point_from_world(trtiangulated0, transforms[index_pointcloud+1])
+            except Exception as e:
+                print(f'{e}, Skipping to next iteration')
+                continue
+        
+            # Show mask 2 and triangulated points
+            # grounded_sam_wrapper.show_mask_and_points(masks[index_pointcloud+1], [projected_triangulated2, projected_triangulated2], title="Mask 2 with triangulated points")
+            # Show pointcloud 1 and triangulated points in camera 2
+            # grounded_sam_wrapper.show_mask_and_points(projected_pointcloud_mask_2, [projected_triangulated2, projected_triangulated2], title="Pointcloud 1 projected onto camera 2 with triangulated points")
+        
+            # Transform triangulated point into camera 1 coordinates
+            triangulated1 = depth_anything_wrapper.transform_point_from_world(trtiangulated0, transforms[index_pointcloud])
+
+            # Get  distance of original point0_A and point0_B
+            z_orig = depth_anything_wrapper.transform_point_from_world(pc_point, transforms[index_pointcloud])[2]
+
+            # Get distance id triangulated point
+            z_triangulated = triangulated1[2]
+            # print(f'depth_orig: {z_orig}')
+            # print(f'depth_triangulated: {z_triangulated}')
+        
+            # Construct A and b
+            A_temp = np.matrix([[z_orig, 1]])
+            # print(f'A_temp: {A_temp}')
+
+            A = np.row_stack((A, A_temp)) if A is not None else A_temp
+            # b = np.concatenate((b, z_triangulated)) if b is not None else [z_triangulated]
+            b.append(z_triangulated)
+            # print(f'A.shape: {A.shape}')
+            # print(f'b.shape: {len(b)}')
+
+        x, res, rank, s = np.linalg.lstsq(A, b)
+        alpha, beta = x[0], x[1]
+        print(f'alpha: {alpha}')
+        print(f'beta: {beta}')
+
+        # Scale and shift
+        depth_new = depth_anything_wrapper.scale_depth_map(icp_depths[-1], scale=alpha, shift=beta)
+        icp_depths.append(depth_new)
+
+        # Show original and scaled depth maps
+        # depth_anything_wrapper.show_depth_map(depths_masked[index_pointcloud], title="Original depth map")
+        # depth_anything_wrapper.show_depth_map(depth_new, title="Scaled depth map")
+
+        # Get scaled/shifted pointcloud
+        new_pc1 = depth_anything_wrapper.get_pointcloud(depth_new)
+
+        # Transform scaled pointcloud into world coordinates
+        new_pc0 = depth_anything_wrapper.transform_pointcloud_to_world(new_pc1, transforms[index_pointcloud])
+        icp_pointclouds0.append(new_pc0)
+
+        # Get projection of scaled pointcloud into camera 2
+        projection_new_pc2_depth, projection_new_pc2_mask = depth_anything_wrapper.project_pointcloud(new_pc0, transforms[index_pointcloud+1])
     
-    mask = grounded_sam_wrapper.get_mask(image)[0][0]
-    
-    pointcloud_orig_masked = depth_anything_wrapper.mask_pointcloud(pointcloud_orig, mask)
-    pointcloud_scaled_masked = depth_anything_wrapper.mask_pointcloud(pointcloud_scaled, mask)
-    depth_anything_wrapper.show_pointclouds([pointcloud_orig_masked, pointcloud_scaled_masked])
+        # Show projection of scaled pointcloud in camera 2 and closest points
+        # grounded_sam_wrapper.show_mask_and_points(projection_new_pc2_depth, [closest2_A, closest2_B], title="Scaled pointcloud with closest points")
 
-    pointcloud_orig_masked_world = depth_anything_wrapper.transform_pointcloud_to_world(pointcloud_orig_masked, transform_stamped0)
-    pointcloud_scaled_masked_world = depth_anything_wrapper.transform_pointcloud_to_world(pointcloud_scaled_masked, transform_stamped0)
-    depth_anything_wrapper.show_pointclouds_with_frames([pointcloud_orig_masked_world, pointcloud_scaled_masked_world], [transform_stamped0])
+        # # Show original and scaled depth maps and masks
+        # grounded_sam_wrapper.show_masks([projection_new_pc2_mask, masks[index_pointcloud+1]], title="Scaled depth map and mask")
+        # # Show original and scaled pointclouds in world coordinates
+        # depth_anything_wrapper.show_pointclouds_with_frames([pointclouds_masked_world[index_pointcloud], new_pc0], [transforms[index_pointcloud]], title="Original and scaled pointcloud")
+
+        # Count the number of inliers between mask 2 and projection of scaled pointcloud
+        num_inliers = depth_anything_wrapper.count_inliers(projection_new_pc2_mask, masks[index_pointcloud+1])
+        print(f'{i}: num_inliers: {num_inliers}')
+
+    depth_anything_wrapper.show_pointclouds(icp_pointclouds0, title="ICP pointclouds")
+
+def interactive_scale_shift():
+    depth_anything_wrapper = DepthAnythingWrapper(intrinsics=camera_intrinsics)
+    grounded_sam_wrapper = GroundedSamWrapper()
+
+    images = []
+    # depths = []
+    depths_masked = []
+    # pointclouds = []
+    masks = []
+    pointclouds_masked = []
+    pointclouds_masked_world = []
+
+    for i, transform in enumerate(transforms[0:7]):
+        print(f'Processing image {i}')
+        image = cv2.imread(f'/root/workspace/images/moves/cable{i}.jpg')
+        images.append(image)
+
+        depth = depth_anything_wrapper.get_depth_map(image)
+        # depth_anything_wrapper.show_depth_map(depth)
+
+        mask = grounded_sam_wrapper.get_mask(image)[0][0]
+        masks.append(mask)
+        # grounded_sam_wrapper.show_mask(mask)
+
+        depth_masked = grounded_sam_wrapper.mask_depth_map(depth, mask)
+        depths_masked.append(depth_masked)
+        # depth_anything_wrapper.show_depth_map(depth_masked)
+
+        pointcloud_masked = depth_anything_wrapper.get_pointcloud(depth_masked)
+        pointclouds_masked.append(pointcloud_masked)
+        # depth_anything_wrapper.show_pointclouds([pointcloud_masked])
+
+        pointcloud_masked_world = depth_anything_wrapper.transform_pointcloud_to_world(pointcloud_masked, transform)
+        pointclouds_masked_world.append(pointcloud_masked_world)
+        # depth_anything_wrapper.show_pointclouds([pointcloud_world])
+
+    scale, shift, num_inliers = depth_anything_wrapper.interactive_scale_shift(depths_masked[5], masks[6], transforms[5], transforms[6])
+    print(f'scale: {scale:.3f}, shift: {shift:.3f}, num_inliers: {num_inliers}')
+    depth_new = depth_anything_wrapper.scale_depth_map(depths_masked[0], scale=scale, shift=shift)
+    pc_new1 = depth_anything_wrapper.get_pointcloud(depth_new)
+    pc_new0 = depth_anything_wrapper.transform_pointcloud_to_world(pc_new1, transforms[5])
+    depth_anything_wrapper.show_pointclouds_with_frames_and_grid([pc_new0], [transforms[5]])
+
+def test3():
+    depth_anything_wrapper = DepthAnythingWrapper(intrinsics=camera_intrinsics)
+    grounded_sam_wrapper = GroundedSamWrapper()
+    ROS_handler = ROSHandler()
+
+    images = []
+    # depths = []
+    depths_masked = []
+    # pointclouds = []
+    masks = []
+    pointclouds_masked = []
+    pointclouds_masked_world = []
+
+    for i, transform in enumerate(transforms[0:7]):
+        print(f'Processing image {i}')
+        image = cv2.imread(f'/root/workspace/images/moves/cable{i}.jpg')
+        images.append(image)
+
+        depth = depth_anything_wrapper.get_depth_map(image)
+        # depth_anything_wrapper.show_depth_map(depth)
+
+        mask = grounded_sam_wrapper.get_mask(image)[0][0]
+        masks.append(mask)
+        # grounded_sam_wrapper.show_mask(mask)
+
+        depth_masked = grounded_sam_wrapper.mask_depth_map(depth, mask)
+        depths_masked.append(depth_masked)
+        # depth_anything_wrapper.show_depth_map(depth_masked)
+
+        pointcloud_masked = depth_anything_wrapper.get_pointcloud(depth_masked)
+        pointclouds_masked.append(pointcloud_masked)
+        # depth_anything_wrapper.show_pointclouds([pointcloud_masked])
+
+        pointcloud_masked_world = depth_anything_wrapper.transform_pointcloud_to_world(pointcloud_masked, transform)
+        pointclouds_masked_world.append(pointcloud_masked_world)
+        # depth_anything_wrapper.show_pointclouds([pointcloud_masked_world])
+
+        pointcloud_message = ROS_handler.create_pointcloud_message(pointcloud_masked_world, "odom")
+        print(f'pointcloud_message: {pointcloud_message}')
 
 
 if __name__ == '__main__':
@@ -596,7 +977,11 @@ if __name__ == '__main__':
     # test_least_squares()
     # test2()
     # ransac()
-    ransac2()
+    # ransac2()
+    # ransac3()
+    # icp()
+    # interactive_scale_shift()
+    test3()
 
 
     cv2.waitKey(0)
