@@ -102,7 +102,7 @@ RUN /bin/bash -c '. /opt/ros/noetic/setup.bash; cd /root/catkin_ws; catkin build
 
 
 # New start
-WORKDIR /root
+WORKDIR /root/workspace
 # WORKDIR /root/grounded_sam2/grounding_dino
 # RUN python3.10 -m pip install .
 # New end

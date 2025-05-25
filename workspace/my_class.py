@@ -2,7 +2,7 @@
 # from grounded_sam_wrapper import GroundedSamWrapper
 from ROS_handler import ROSHandler
 from camera_handler import ImageSubscriber
-from geometry_msgs.msg import TransformStamped, Pose
+from geometry_msgs.msg import TransformStamped, Pose, PoseStamped
 from tf.transformations import quaternion_matrix, quaternion_from_matrix
 import numpy as np
 import rospy
@@ -172,7 +172,7 @@ class MyClass:
 
         return best_alpha, best_beta, best_pointcloud_world
     
-    def get_desired_pose(self, position):
+    def get_desired_pose(self, position, frame="map"):
         # build Pose
         p = Pose()
         p.position.x = float(position[0])
@@ -182,7 +182,11 @@ class MyClass:
         p.orientation.y = float(0)
         p.orientation.z = float(0)
         p.orientation.w = float(0)
-        return p
+        ps = PoseStamped()
+        ps.header.stamp = rospy.Time.now()
+        ps.header.frame_id = frame
+        ps.pose = p
+        return ps
 
 
 def test1():
@@ -244,16 +248,30 @@ def pipeline():
     # Process image
     # Estimate scale and shift
     # Get desired Pose
+    desired_pose = ros_handler.convert_pose_to_pose_stamped(my_class.get_desired_pose([1, 1, 1]))
     # Calculate Path
+    ros_handler.interpolate_poses(transforms[-1], desired_pose, num_steps=10)
     # Move arm a step
     # Loop End
 
 
 if __name__ == "__main__":
     rospy.init_node("MyClass", anonymous=True)
-    pipeline()
+    # pipeline()
 
 
+    my_class = MyClass()
+    ros_handler = ROSHandler()
 
+    transforms = []
+    transforms.append(ros_handler.get_current_pose("hand_camera_frame", "map"))
+    desired_pose = my_class.get_desired_pose([1, 1, 1])
+    path = ros_handler.interpolate_poses(transforms[-1], desired_pose, num_steps=10)
+    next_pose = path[1]
+
+    while not rospy.is_shutdown():
+        ros_handler.publish_path(path, "/my_path")
+        ros_handler.publish_pose(next_pose, "/next_pose")
+        rospy.sleep(1)
 
 

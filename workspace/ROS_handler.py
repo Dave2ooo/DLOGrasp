@@ -17,73 +17,82 @@ class ROSHandler():
         self.tf_buffer = tf2_ros.Buffer()
         self.listener = tf2_ros.TransformListener(self.tf_buffer)
 
-    def get_stamped_pose(self, target_frame, reference_frame):
-        rospy.sleep(1)  # Allow time for buffer to fill
-        
-        try:
-            transform = self.tf_buffer.lookup_transform(reference_frame, target_frame, rospy.Time(0), rospy.Duration(1.0))
-            return transform
-        except tf2_ros.LookupException as e:
-            rospy.logerr("Transform lookup failed: {}".format(e))
-            return None
-        except tf2_ros.ExtrapolationException as e:
-            rospy.logerr("Transform extrapolation error: {}".format(e))
-            return None
-        
-    def interpolate_poses(self, pose_start, pose_end, num_steps: int = 10) -> list:
+    def get_current_pose(self, target_frame, reference_frame):
+        print(f"Waiting for transform from {reference_frame} to {target_frame}...")
+        transform = None
+        while transform is None and not rospy.is_shutdown():
+            rospy.sleep(0.2)
+            try:
+                transform = self.tf_buffer.lookup_transform(reference_frame, target_frame, rospy.Time(0), rospy.Duration(1.0))
+                return transform
+            except tf2_ros.LookupException as e:
+                rospy.logerr("Transform lookup failed: {}".format(e))
+            except tf2_ros.ExtrapolationException as e:
+                rospy.logerr("Transform extrapolation error: {}".format(e))
+
+    def interpolate_poses(self, pose_start, pose_end, num_steps: int) -> list[PoseStamped]:
         """
-        Generate a linear‐in‐translation, slerp‐in‐rotation path between two poses,
-        where inputs can be either TransformStamped or geometry_msgs.msg.Pose.
-        Returns a list of Pose messages.
+        Generate a smooth path of PoseStamped messages interpolating between two poses.
+        Inputs can be either PoseStamped or TransformStamped. Outputs are PoseStamped.
 
         Parameters
         ----------
-        pose_start : TransformStamped or Pose
-            The starting gripper pose.
-        pose_end : TransformStamped or Pose
-            The desired end gripper pose.
+        pose_start : PoseStamped or TransformStamped
+            Starting pose.
+        pose_end : PoseStamped or TransformStamped
+            Ending pose.
         num_steps : int
-            Number of intermediate steps (excluding start), so total poses = num_steps+1.
+            Number of intermediate steps (inclusive of end). Returned list length = num_steps+1.
 
         Returns
         -------
-        List[Pose]
-            A list of geometry_msgs.msg.Pose for the interpolated path.
+        List[PoseStamped]
+            The interpolated sequence from start to end.
         """
-        def extract(p):
-            # returns (t: np.array[3], q: np.array[4])
-            if isinstance(p, TransformStamped):
-                t = p.transform.translation
-                q = p.transform.rotation
-                return np.array([t.x, t.y, t.z]), np.array([q.x, q.y, q.z, q.w])
-            elif isinstance(p, Pose):
-                pos = p.position
-                ori = p.orientation
-                return np.array([pos.x, pos.y, pos.z]), np.array([ori.x, ori.y, ori.z, ori.w])
+        def extract(t):
+            # Return (translation: np.ndarray(3), quaternion: np.ndarray(4), header: Header)
+            if isinstance(t, TransformStamped):
+                trans = t.transform.translation
+                rot = t.transform.rotation
+                hdr = copy.deepcopy(t.header)
+                return (np.array([trans.x, trans.y, trans.z], dtype=float),
+                        np.array([rot.x, rot.y, rot.z, rot.w], dtype=float),
+                        hdr)
+            elif isinstance(t, PoseStamped):
+                pos = t.pose.position
+                ori = t.pose.orientation
+                hdr = copy.deepcopy(t.header)
+                return (np.array([pos.x, pos.y, pos.z], dtype=float),
+                        np.array([ori.x, ori.y, ori.z, ori.w], dtype=float),
+                        hdr)
             else:
-                raise TypeError("pose must be TransformStamped or Pose")
+                raise TypeError("pose_start and pose_end must be PoseStamped or TransformStamped")
 
-        t_start, q_start = extract(pose_start)
-        t_end,   q_end   = extract(pose_end)
+        t0, q0, hdr0 = extract(pose_start)
+        t1, q1, hdr1 = extract(pose_end)
+        # Use start header frame_id; keep stamp constant (or update if desired)
+        frame_id = hdr0.frame_id
+        stamp = hdr0.stamp
 
-        path: list = []
+        path = []
         for i in range(num_steps + 1):
             alpha = i / float(num_steps)
-            # lerp translation
-            t_i = (1 - alpha) * t_start + alpha * t_end
+            # linear translation
+            ti = (1 - alpha) * t0 + alpha * t1
             # slerp rotation
-            q_i = quaternion_slerp(q_start, q_end, alpha)
+            qi = quaternion_slerp(q0, q1, alpha)
 
-            # build Pose
-            p = Pose()
-            p.position.x = float(t_i[0])
-            p.position.y = float(t_i[1])
-            p.position.z = float(t_i[2])
-            p.orientation.x = float(q_i[0])
-            p.orientation.y = float(q_i[1])
-            p.orientation.z = float(q_i[2])
-            p.orientation.w = float(q_i[3])
-            path.append(p)
+            ps = PoseStamped()
+            ps.header.frame_id = frame_id
+            ps.header.stamp = stamp
+            ps.pose.position.x = float(ti[0])
+            ps.pose.position.y = float(ti[1])
+            ps.pose.position.z = float(ti[2])
+            ps.pose.orientation.x = float(qi[0])
+            ps.pose.orientation.y = float(qi[1])
+            ps.pose.orientation.z = float(qi[2])
+            ps.pose.orientation.w = float(qi[3])
+            path.append(ps)
 
         return path
 
@@ -118,7 +127,7 @@ class ROSHandler():
         pc2_msg = point_cloud2.create_cloud_xyz32(header, xyz)
         return pc2_msg
 
-    def publish_pose(self, pose, topic: str, frame: str = "map") -> None:
+    def publish_pose(self, pose: PoseStamped, topic: str, frame: str = "map") -> None:
         """
         Publish a Pose or PoseStamped message to a ROS topic.
 
@@ -137,58 +146,65 @@ class ROSHandler():
 
         # Build a PoseStamped if necessary
         if isinstance(pose, PoseStamped):
-            ps = pose
-        elif isinstance(pose, Pose):
-            ps = PoseStamped()
-            ps.header.stamp = rospy.Time.now()
-            ps.header.frame_id = frame
-            ps.pose = pose
+            pub.publish(pose)
         else:
             raise TypeError("publish_pose requires a Pose or PoseStamped")
 
-        # Publish once
-        pub.publish(ps)
+        return
 
-    def publish_path(self, path: list, topic: str, frame: str = "map") -> None:
+    def publish_path(self,
+                     path: list[PoseStamped],
+                     topic: str,
+                     frame: str = "map") -> None:
         """
-        Publish a sequence of Pose messages as a nav_msgs/Path on a ROS topic.
+        Publish a sequence of PoseStamped messages as a nav_msgs/Path on a ROS topic.
 
         Parameters
         ----------
-        path : list of geometry_msgs.msg.Pose
-            The ordered list of poses to publish.
+        path : list of geometry_msgs.msg.PoseStamped
+            The ordered list of stamped poses to publish.
         topic : str
             The ROS topic name to publish the Path message on.
         frame : str
             The frame_id to stamp the Path header with.
         """
+        import rospy
+        from nav_msgs.msg import Path
+        from geometry_msgs.msg import PoseStamped
+
         # Validate inputs
         if not isinstance(path, (list, tuple)):
-            raise TypeError("path must be a list or tuple of Pose messages")
-        for p in path:
-            if not isinstance(p, Pose):
-                raise TypeError("each element of path must be a geometry_msgs.msg.Pose")
+            raise TypeError("path must be a list or tuple of PoseStamped messages")
+        for ps in path:
+            if not isinstance(ps, PoseStamped):
+                raise TypeError("each element of path must be a geometry_msgs.msg.PoseStamped")
 
-        # Create publisher (latched so it stays around)
+        # Create a latched publisher so the path persists
         pub = rospy.Publisher(topic, Path, queue_size=1, latch=True)
-        # wait briefly to register
-        rospy.sleep(0.1)
+        rospy.sleep(0.1)  # allow registration
 
-        # Build the Path message
+        # Build Path message
         path_msg = Path()
         path_msg.header.stamp = rospy.Time.now()
         path_msg.header.frame_id = frame
 
-        # Convert each Pose into a stamped Pose
-        for pose in path:
-            ps = PoseStamped()
-            ps.header = path_msg.header  # same timestamp and frame for all
-            ps.pose = pose
-            path_msg.poses.append(ps)
+        # Append each stamped pose (overwrite header to unify frame/time if desired)
+        for ps in path:
+            ps_out = PoseStamped()
+            ps_out.header = path_msg.header
+            ps_out.pose = ps.pose
+            path_msg.poses.append(ps_out)
 
-        # Publish once
         pub.publish(path_msg)
 
+
+    def convert_pose_to_pose_stamped(self, pose: Pose, frame: str = "map") -> PoseStamped:
+        ps = PoseStamped()
+        ps.header.stamp = rospy.Time.now()
+        ps.header.frame_id = frame
+        ps.pose = pose
+        return ps
+    
 
 if __name__ == '__main__':
     ros_handler = ROSHandler()
