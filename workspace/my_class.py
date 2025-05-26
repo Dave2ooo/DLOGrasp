@@ -1,7 +1,8 @@
-# from depth_anything_wrapper import DepthAnythingWrapper
-# from grounded_sam_wrapper import GroundedSamWrapper
+from depth_anything_wrapper import DepthAnythingWrapper
+from grounded_sam_wrapper import GroundedSamWrapper
 from ROS_handler import ROSHandler
 from camera_handler import ImageSubscriber
+from publisher import *
 from geometry_msgs.msg import TransformStamped, Pose, PoseStamped
 from tf.transformations import quaternion_matrix, quaternion_from_matrix
 import numpy as np
@@ -10,13 +11,14 @@ import cv2
 
 import random
 
-camera_intrinsics = (203.71833, 203.71833, 319.5, 239.5)
+# camera_intrinsics = (203.71833, 203.71833, 319.5, 239.5) # old/wrong
+camera_intrinsics = (149.09148, 187.64966, 334.87706, 268.23742)
 
 
 class MyClass:
     def __init__(self):
-        # self.depth_anything_wrapper = DepthAnythingWrapper(intrinsics=camera_intrinsics)
-        # self.grounded_sam_wrapper = GroundedSamWrapper()
+        self.depth_anything_wrapper = DepthAnythingWrapper(intrinsics=camera_intrinsics)
+        self.grounded_sam_wrapper = GroundedSamWrapper()
         pass
 
     def get_stamped_transform(self, translation, rotation):
@@ -55,12 +57,14 @@ class MyClass:
         _, mask2, _, _, _ = data2
 
         max_inliers_counter = 0
+        best_num_union = None
         best_alpha, best_beta = 0, 0
         best_pointcloud_world = None
         best_projection = None
         num_skips = 0
         # Loop N times
         for i in range(1000):
+            if rospy.is_shutdown(): exit()
             # Pick two random points from pointcloud 1
             pointA_world = random.choice(pointcloud_masked_world1.points)
             pointB_world = random.choice(pointcloud_masked_world1.points)
@@ -152,21 +156,24 @@ class MyClass:
             # self.depth_anything_wrapper.show_pointclouds_with_frames([pointcloud_masked_world1, new_pc_world], [transform1], title="Original and scaled pointcloud")
 
             # Count the number of inliers between mask 2 and projection of scaled pointcloud
-            num_inliers = self.depth_anything_wrapper.count_inliers(projection_new_pc2_mask, mask2)
+            num_inliers, num_union = self.depth_anything_wrapper.count_inliers(projection_new_pc2_mask, mask2)
             # print(f'{i}: num_inliers: {num_inliers}')
 
-            if num_inliers > max_inliers_counter:
+            if num_inliers > max_inliers_counter and alpha < 0.5 and alpha > 0 and beta < 0.5 and beta > -0.5:
                 max_inliers_counter = num_inliers
+                best_num_union = num_union
                 best_alpha = alpha
                 best_beta = beta
                 best_pointcloud_world = new_pc_world
                 best_projection = projection_new_pc2_depth
 
-        print(f'Max inliers: {max_inliers_counter}, alpha: {best_alpha:.2f}, beta: {best_beta:.2f}, Skipped points: {num_skips}')
+        print(f'Max inliers: {max_inliers_counter}, Inliers ratio: {max_inliers_counter/best_num_union} alpha: {best_alpha:.2f}, beta: {best_beta:.2f}, Skipped points: {num_skips}')
 
         if show: 
             # Show original and scaled depth maps and masks
-            self.grounded_sam_wrapper.show_masks([best_projection, mask2], title="Scaled depth map and mask")
+            # self.grounded_sam_wrapper.show_masks([best_projection, mask2], title="Scaled depth map and mask")
+            self.grounded_sam_wrapper.show_mask_union(best_projection, mask2)
+            
             # Show original and scaled pointclouds in world coordinates
             self.depth_anything_wrapper.show_pointclouds_with_frames([pointcloud_masked_world1, best_pointcloud_world], [transform1], title="Original and scaled pointcloud")
 
@@ -187,6 +194,31 @@ class MyClass:
         ps.header.frame_id = frame
         ps.pose = p
         return ps
+    
+    def get_highest_point(self, pointcloud: o3d.geometry.PointCloud) -> np.ndarray:
+        """
+        Return the 3D point in the point cloud with the largest Z coordinate.
+
+        Parameters
+        ----------
+        pointcloud : o3d.geometry.PointCloud
+            The input point cloud.
+
+        Returns
+        -------
+        np.ndarray
+            A length-3 array [x, y, z] of the point with the maximum z value.
+        """
+        if not isinstance(pointcloud, o3d.geometry.PointCloud):
+            raise TypeError("pointcloud must be an open3d.geometry.PointCloud")
+
+        pts = np.asarray(pointcloud.points, dtype=np.float64)
+        if pts.size == 0:
+            raise ValueError("Point cloud is empty")
+
+        # find the index of the maximum Z
+        idx = np.argmax(pts[:, 2])
+        return pts[idx]
 
 
 def test1():
@@ -229,49 +261,86 @@ def pipeline():
     my_class = MyClass()
     ros_handler = ROSHandler()
     image_subscriber = ImageSubscriber('/hsrb/hand_camera/image_rect_color')
+    pose_publisher = PosePublisher("/next_pose")
+    path_publisher = PathPublisher("/my_path")
 
     images = []
     transforms = []
+    data = []
+    desired_poses = []
+    best_alphas = []
+    best_betas = []
+    best_pcs_world = []
 
     # Take image
     images.append(image_subscriber.get_current_image())
     # Get current transform
-    transforms.append(ros_handler.get_stamped_pose("hand_camera_frame", "map"))
+    transforms.append(ros_handler.get_current_pose("hand_camera_frame", "map"))
     # Process image
-    my_class.process_image(images[-1], transforms[-1], show=True)
-
+    data.append(my_class.process_image(images[-1], transforms[-1], show=False))
     # Move arm
-    
+    next_pose = Pose()
+    next_pose.position.z = 0.1
+    # next_pose.orientation.y = -0.087
+    # next_pose.orientation.w =  0.996
+    next_pose_stamped = ros_handler.convert_pose_to_pose_stamped(next_pose, "hand_palm_link")
+    pose_publisher.publish(next_pose_stamped)
+    # input("Press Enter when moves are finished…")
+    rospy.sleep(2)
 
-    # Loop
-    # Take image
-    # Process image
-    # Estimate scale and shift
-    # Get desired Pose
-    desired_pose = ros_handler.convert_pose_to_pose_stamped(my_class.get_desired_pose([1, 1, 1]))
-    # Calculate Path
-    ros_handler.interpolate_poses(transforms[-1], desired_pose, num_steps=10)
-    # Move arm a step
+    while not rospy.is_shutdown(): 
+        # Take image
+        images.append(image_subscriber.get_current_image())
+        # Get current transform
+        transforms.append(ros_handler.get_current_pose("hand_camera_frame", "map"))
+        # Process image
+        data.append(my_class.process_image(images[-1], transforms[-1], show=False))
+        # Estimate scale and shift
+        best_alpha, best_beta, best_pc_world = my_class.estimate_scale_shift(data[-2], data[-1], transforms[-2], transforms[-1], show=True)
+        best_alphas.append(best_alpha)
+        best_betas.append(best_beta)
+        best_pcs_world.append(best_pc_world)
+        # Get highest Point in pointcloud
+        target_point = my_class.get_highest_point(best_pcs_world[-1])
+        # target_point[2] += 0.1 # Make target Pose hover above actual target pose
+        # Convert to Pose
+        target_pose = my_class.get_desired_pose(target_point)
+        # Calculate Path
+        target_path = ros_handler.interpolate_poses(transforms[-1], target_pose, num_steps=3)
+        # Move arm a step
+        path_publisher.publish(target_path)
+        usr_input = input("Press Enter to accept next Pose, Type y to go to last Pose")
+        if usr_input == "y":
+            pose_publisher.publish(target_path[-1])
+        else:
+            pose_publisher.publish(target_path[1])
+        # input("Press Enter when moves are finished…")
+        rospy.sleep(2)
     # Loop End
 
 
 if __name__ == "__main__":
     rospy.init_node("MyClass", anonymous=True)
-    # pipeline()
+    pipeline()
 
 
-    my_class = MyClass()
-    ros_handler = ROSHandler()
+    # my_class = MyClass()
+    # ros_handler = ROSHandler()
 
-    transforms = []
-    transforms.append(ros_handler.get_current_pose("hand_camera_frame", "map"))
-    desired_pose = my_class.get_desired_pose([1, 1, 1])
-    path = ros_handler.interpolate_poses(transforms[-1], desired_pose, num_steps=10)
-    next_pose = path[1]
 
-    while not rospy.is_shutdown():
-        ros_handler.publish_path(path, "/my_path")
-        ros_handler.publish_pose(next_pose, "/next_pose")
-        rospy.sleep(1)
+    # pose_publisher = PosePublisher("/next_pose")
+    # path_publisher = PathPublisher("/my_path")
+    # transforms = []
+    # transforms.append(ros_handler.get_current_pose("hand_camera_frame", "map"))
+    # desired_pose = my_class.get_desired_pose([1, 1, 1])
+    # path = ros_handler.interpolate_poses(transforms[-1], desired_pose, num_steps=10)
+    # next_pose = path[1]
+
+    # print("Publishing...")
+    # rate = rospy.Rate(1)          # 1 Hz
+    # while not rospy.is_shutdown():
+    #     pose_publisher.publish(next_pose)
+    #     path_publisher.publish(path)
+    #     rate.sleep()
 
 

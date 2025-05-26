@@ -425,7 +425,7 @@ def ransac():
 
         grounded_sam_wrapper.show_mask_and_points(projection_pointcloud_new_cam2_depth, [closest2_A, closest2_B], title="Scaled pointcloud with closest points")
 
-        num_inliers = depth_anything_wrapper.count_inliers(projection_new_pc_2_cam2_depth, masks[index_pointcloud+1])
+        num_inliers, _ = depth_anything_wrapper.count_inliers(projection_new_pc_2_cam2_depth, masks[index_pointcloud+1])
         print(f'num_inliers: {num_inliers}')
         grounded_sam_wrapper.show_masks([projection_new_pc_2_cam2_depth, masks[index_pointcloud+1]], title="Scaled depth map and mask")
 
@@ -568,7 +568,7 @@ def ransac2():
         # depth_anything_wrapper.show_pointclouds_with_frames([pointclouds_masked_world[index_pointcloud], new_pc0], [transforms[index_pointcloud]], title="Original and scaled pointcloud")
 
         # Count the number of inliers between mask 2 and projection of scaled pointcloud
-        num_inliers = depth_anything_wrapper.count_inliers(projection_new_pc2_mask, masks[index_pointcloud+1])
+        num_inliers, _ = depth_anything_wrapper.count_inliers(projection_new_pc2_mask, masks[index_pointcloud+1])
         # print(f'{i}: num_inliers: {num_inliers}')
 
         if num_inliers > max_inliers_counter and alpha < 1:
@@ -726,7 +726,7 @@ def ransac3():
             # depth_anything_wrapper.show_pointclouds_with_frames([pointclouds_masked_world[index_pointcloud], new_pc0], [transforms[index_pointcloud]], title="Original and scaled pointcloud")
 
             # Count the number of inliers between mask 2 and projection of scaled pointcloud
-            num_inliers = depth_anything_wrapper.count_inliers(projection_new_pc2_mask, masks[index_pointcloud+1])
+            num_inliers, _ = depth_anything_wrapper.count_inliers(projection_new_pc2_mask, masks[index_pointcloud+1])
             # print(f'{i}: num_inliers: {num_inliers}')
 
             if num_inliers > max_inliers_counter:
@@ -875,7 +875,7 @@ def icp():
         # depth_anything_wrapper.show_pointclouds_with_frames([pointclouds_masked_world[index_pointcloud], new_pc0], [transforms[index_pointcloud]], title="Original and scaled pointcloud")
 
         # Count the number of inliers between mask 2 and projection of scaled pointcloud
-        num_inliers = depth_anything_wrapper.count_inliers(projection_new_pc2_mask, masks[index_pointcloud+1])
+        num_inliers, _ = depth_anything_wrapper.count_inliers(projection_new_pc2_mask, masks[index_pointcloud+1])
         print(f'{i}: num_inliers: {num_inliers}')
 
     depth_anything_wrapper.show_pointclouds(icp_pointclouds0, title="ICP pointclouds")

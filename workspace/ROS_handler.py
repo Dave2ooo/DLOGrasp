@@ -24,6 +24,8 @@ class ROSHandler():
             rospy.sleep(0.2)
             try:
                 transform = self.tf_buffer.lookup_transform(reference_frame, target_frame, rospy.Time(0), rospy.Duration(1.0))
+                print("Transform received.")
+                # print(transform)
                 return transform
             except tf2_ros.LookupException as e:
                 rospy.logerr("Transform lookup failed: {}".format(e))
@@ -96,9 +98,7 @@ class ROSHandler():
 
         return path
 
-    def create_pointcloud_message(self,
-                                  pointcloud: o3d.geometry.PointCloud,
-                                  frame: str) -> PointCloud2:
+    def create_pointcloud_message(self, pointcloud: o3d.geometry.PointCloud, frame: str) -> PointCloud2:
         """
         Convert an Open3D PointCloud into a ROS PointCloud2 message.
 
@@ -127,83 +127,13 @@ class ROSHandler():
         pc2_msg = point_cloud2.create_cloud_xyz32(header, xyz)
         return pc2_msg
 
-    def publish_pose(self, pose: PoseStamped, topic: str, frame: str = "map") -> None:
-        """
-        Publish a Pose or PoseStamped message to a ROS topic.
-
-        Parameters
-        ----------
-        pose : geometry_msgs.msg.Pose or geometry_msgs.msg.PoseStamped
-            The pose to publish.
-        topic : str
-            The ROS topic name to publish to.
-        frame : str
-            The frame_id to stamp the message with (used if publishing a bare Pose).
-        """
-        # Initialize publisher (latch last value)
-        pub = rospy.Publisher(topic, PoseStamped, queue_size=1, latch=True)
-        rospy.sleep(0.1)  # allow publisher registration
-
-        # Build a PoseStamped if necessary
-        if isinstance(pose, PoseStamped):
-            pub.publish(pose)
-        else:
-            raise TypeError("publish_pose requires a Pose or PoseStamped")
-
-        return
-
-    def publish_path(self,
-                     path: list[PoseStamped],
-                     topic: str,
-                     frame: str = "map") -> None:
-        """
-        Publish a sequence of PoseStamped messages as a nav_msgs/Path on a ROS topic.
-
-        Parameters
-        ----------
-        path : list of geometry_msgs.msg.PoseStamped
-            The ordered list of stamped poses to publish.
-        topic : str
-            The ROS topic name to publish the Path message on.
-        frame : str
-            The frame_id to stamp the Path header with.
-        """
-        import rospy
-        from nav_msgs.msg import Path
-        from geometry_msgs.msg import PoseStamped
-
-        # Validate inputs
-        if not isinstance(path, (list, tuple)):
-            raise TypeError("path must be a list or tuple of PoseStamped messages")
-        for ps in path:
-            if not isinstance(ps, PoseStamped):
-                raise TypeError("each element of path must be a geometry_msgs.msg.PoseStamped")
-
-        # Create a latched publisher so the path persists
-        pub = rospy.Publisher(topic, Path, queue_size=1, latch=True)
-        rospy.sleep(0.1)  # allow registration
-
-        # Build Path message
-        path_msg = Path()
-        path_msg.header.stamp = rospy.Time.now()
-        path_msg.header.frame_id = frame
-
-        # Append each stamped pose (overwrite header to unify frame/time if desired)
-        for ps in path:
-            ps_out = PoseStamped()
-            ps_out.header = path_msg.header
-            ps_out.pose = ps.pose
-            path_msg.poses.append(ps_out)
-
-        pub.publish(path_msg)
-
-
     def convert_pose_to_pose_stamped(self, pose: Pose, frame: str = "map") -> PoseStamped:
         ps = PoseStamped()
         ps.header.stamp = rospy.Time.now()
         ps.header.frame_id = frame
         ps.pose = pose
         return ps
+    
     
 
 if __name__ == '__main__':

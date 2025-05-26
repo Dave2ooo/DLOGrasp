@@ -168,6 +168,56 @@ class GroundedSamWrapper:
         cv2.imshow(title, canvas)
         if wait:
             cv2.waitKey(0)
+        cv2.destroyAllWindows()
+
+    def show_mask_union(self, mask1: np.ndarray, mask2: np.ndarray) -> None:
+        """
+        Display two masks overlayed in one window, coloring:
+          - mask1-only regions in red,
+          - mask2-only regions in green,
+          - overlapping regions in yellow.
+
+        Parameters
+        ----------
+        mask1, mask2 : np.ndarray
+            2D arrays of the same shape. Can be float in [0,1] or uint8 in [0,255].
+        """
+        if not isinstance(mask1, np.ndarray) or not isinstance(mask2, np.ndarray):
+            raise TypeError("Both mask1 and mask2 must be numpy arrays")
+        if mask1.shape != mask2.shape:
+            raise ValueError("mask1 and mask2 must have the same shape")
+        if mask1.ndim != 2:
+            raise ValueError("Masks must be 2D arrays")
+
+        # Normalize masks to uint8 0/255
+        def to_uint8(m):
+            if m.dtype in (np.float32, np.float64):
+                return (m * 255).astype(np.uint8)
+            else:
+                return m.astype(np.uint8)
+
+        m1 = to_uint8(mask1)
+        m2 = to_uint8(mask2)
+
+        H, W = m1.shape
+        canvas = np.zeros((H, W, 3), dtype=np.uint8)
+
+        # Boolean versions
+        b1 = m1 > 0
+        b2 = m2 > 0
+
+        # mask1-only: red
+        canvas[b1 & ~b2] = (0, 0, 255)
+        # mask2-only: green
+        canvas[~b1 & b2] = (0, 255, 0)
+        # overlap: purple
+        canvas[b1 & b2] = (240, 32, 160)
+
+        # show
+        cv2.namedWindow("mask_union", cv2.WINDOW_NORMAL)
+        cv2.imshow("mask_union", canvas)
+        cv2.waitKey(0)
+        cv2.destroyWindow("mask_union")
 
     def show_mask_and_points(self, mask: np.ndarray, points, title = "mask_with_points") -> None:
         """

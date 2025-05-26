@@ -46,6 +46,7 @@ class DepthAnythingWrapper():
         cv2.imshow(title, depth)
         if wait:
             cv2.waitKey(0)
+        cv2.destroyAllWindows()
 
     def get_pointcloud(self,
             depth: NDArray[np.floating] | Image.Image | NDArray[np.uint8],
@@ -905,19 +906,14 @@ class DepthAnythingWrapper():
         int
             The count of positions where both inputs are valid.
         """
-        import numpy as np
-
         if depth1.shape != depth2.shape:
-            raise ValueError("Inputs must have the same shape")
+            raise ValueError(f"Inputs must have the same shape\ndepth1.shape: {depth1.shape}\ndepth2.shape: {depth2.shape}")
 
         def make_mask(x):
-            # boolean mask stays boolean
             if x.dtype == bool:
                 return x
-            # integer mask: nonzero is valid
             if np.issubdtype(x.dtype, np.integer):
                 return x != 0
-            # float depth: positive values are valid
             if np.issubdtype(x.dtype, np.floating):
                 return x > 0
             raise TypeError(f"Unsupported dtype for count_inliers: {x.dtype}")
@@ -925,8 +921,10 @@ class DepthAnythingWrapper():
         m1 = make_mask(depth1)
         m2 = make_mask(depth2)
 
-        # count where both are True
-        return int(np.count_nonzero(m1 & m2))
+        inlier_mask = m1 & m2
+        union_mask  = m1 | m2
+
+        return int(np.count_nonzero(inlier_mask)), int(np.count_nonzero(union_mask))
 
     def interactive_scale_shift(self,
                                 depth1: np.ndarray,
@@ -1029,32 +1027,6 @@ class DepthAnythingWrapper():
 
         cv2.destroyWindow(window)
         return result['scale'], result['shift'], result['inliers']
-
-    def get_highest_point(self, pointcloud: o3d.geometry.PointCloud) -> np.ndarray:
-        """
-        Return the 3D point in the point cloud with the largest Z coordinate.
-
-        Parameters
-        ----------
-        pointcloud : o3d.geometry.PointCloud
-            The input point cloud.
-
-        Returns
-        -------
-        np.ndarray
-            A length-3 array [x, y, z] of the point with the maximum z value.
-        """
-        if not isinstance(pointcloud, o3d.geometry.PointCloud):
-            raise TypeError("pointcloud must be an open3d.geometry.PointCloud")
-
-        pts = np.asarray(pointcloud.points, dtype=np.float64)
-        if pts.size == 0:
-            raise ValueError("Point cloud is empty")
-
-        # find the index of the maximum Z
-        idx = np.argmax(pts[:, 2])
-        return pts[idx]
-
 
 
 if __name__ == '__main__':

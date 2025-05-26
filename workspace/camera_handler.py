@@ -10,26 +10,25 @@ import sensor_msgs.msg
 
 class ImageSubscriber:
     def __init__(self, topic):
-        self.topic = topic
-        self.image = None
         self.bridge = CvBridge()
-        rospy.Subscriber(topic, sensor_msgs.msg.Image, self.callback)
+        self.msg    = None
+        rospy.Subscriber(topic, sensor_msgs.msg.Image, self.callback, queue_size=1)
 
     def callback(self, msg):
-        self.msg = msg
+        self.msg = msg            # just store it; no conversion here
 
-    def get_current_image(self):
-        self.msg = None
-        rospy.sleep(0.2)
-        rospy.loginfo("No image received yet. Waiting")
+    def get_current_image(self, timeout=2.0):
+        start = rospy.Time.now()
         while self.msg is None and not rospy.is_shutdown():
-            print("Message is not None")
-            print(self.msg)
-            rospy.sleep(0.2)
-            print('.', end='')
-            try:
-                self.image = self.bridge.imgmsg_to_cv2(self.msg, "rgb8")
-                print('Image received')
-                return self.image
-            except CvBridgeError as e:
-                rospy.logerr(f"CvBridge Error: {e}")
+            if (rospy.Time.now() - start).to_sec() > timeout:
+                raise RuntimeError("Timed out waiting for image")
+            rospy.sleep(0.05)
+
+        # convert the first image we got
+        try:
+            image = self.bridge.imgmsg_to_cv2(self.msg, "bgr8")  # OpenCV expects BGR
+            self.msg = None                                      # optional: clear it
+            return image
+        except CvBridgeError as e:
+            rospy.logerr(e)
+            return None
