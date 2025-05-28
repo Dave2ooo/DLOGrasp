@@ -206,13 +206,30 @@ class MyClass:
         y_opt = -self.inliers_function([alpha_opt, beta_opt], depth_masked1, transform1, mask2, transform2)
         # end = time.perf_counter()
         # print(f"One function call took {end - start:.4f} seconds")
-        print(f'Optimal alpha: {alpha_opt:.2f}, beta: {beta_opt:.2f}, Inliers: {y_opt}')
 
         depth_opt = self.depth_anything_wrapper.scale_depth_map(depth_masked1, scale=alpha_opt, shift=beta_opt)
-        pc1_opt = self.depth_anything_wrapper.get_pointcloud(depth_opt)
-        pc0_opt = self.depth_anything_wrapper.transform_pointcloud_to_world(pc1_opt, transform1)
+        pc_cam1_opt = self.depth_anything_wrapper.get_pointcloud(depth_opt)
+        pc_cam0_opt = self.depth_anything_wrapper.transform_pointcloud_to_world(pc_cam1_opt, transform1)
+        projection_pc_depth_cam2_opt, projection_pc_mask_cam2_opt = self.depth_anything_wrapper.project_pointcloud(pc_cam0_opt, transform2)
 
-        return alpha_opt, beta_opt, pc0_opt
+        # Show mask and pointcloud
+        # self.grounded_sam_wrapper.show_masks([projection_pc_mask_cam2_opt], title='Projection')
+        fixed_projection_pc_depth_cam2_opt = self.grounded_sam_wrapper.fill_mask_holes(projection_pc_mask_cam2_opt)
+        # self.grounded_sam_wrapper.show_masks([fixed_projection_pc_depth_cam2_opt], title='Projection fixed')
+
+
+        # Compare original projection with fixed
+        # self.grounded_sam_wrapper.show_mask_union(projection_pc_mask_cam2_opt, fixed_projection_pc_depth_cam2_opt)
+
+
+        self.grounded_sam_wrapper.show_mask_union(fixed_projection_pc_depth_cam2_opt, mask2)
+        # self.depth_anything_wrapper.show_pointclouds_with_frames_and_grid([pc_cam0_opt], [transform1])
+
+        num_inliers, num_inliers_union = self.depth_anything_wrapper.count_inliers(fixed_projection_pc_depth_cam2_opt, mask2)
+
+        print(f'Optimal alpha: {alpha_opt:.2f}, beta: {beta_opt:.2f}, Inliers: {y_opt}, Inliers ratio: {num_inliers/num_inliers_union:.2f}')
+
+        return alpha_opt, beta_opt, pc_cam0_opt, num_inliers, num_inliers_union
 
     def get_desired_pose(self, position, frame="map"):
         # build Pose
@@ -256,6 +273,7 @@ class MyClass:
         return pts[idx]
 
     def inliers_function(self, x, depth_masked, transform1, mask, transform2):
+        if rospy.is_shutdown(): exit()
         alpha, beta = x
         # Scale and shift
         depth_new = self.depth_anything_wrapper.scale_depth_map(depth_masked, scale=alpha, shift=beta)
@@ -265,8 +283,10 @@ class MyClass:
         new_pc0 = self.depth_anything_wrapper.transform_pointcloud_to_world(new_pc1, transform1)
         # Get projection of scaled pointcloud into camera 2
         projection_new_pc2_depth, projection_new_pc2_mask = self.depth_anything_wrapper.project_pointcloud(new_pc0, transform2)
+        # Fill holes
+        fixed_projection_new_pc2_mask = self.grounded_sam_wrapper.fill_mask_holes(projection_new_pc2_mask)
         # Count the number of inliers between mask 2 and projection of scaled pointcloud
-        num_inliers, inlier_union = self.depth_anything_wrapper.count_inliers(projection_new_pc2_mask, mask)
+        num_inliers, inlier_union = self.depth_anything_wrapper.count_inliers(fixed_projection_new_pc2_mask, mask)
 
         return -num_inliers
 
@@ -330,12 +350,12 @@ def pipeline():
     # Move arm
     next_pose = Pose()
     next_pose.position.z = 0.1
-    # next_pose.orientation.y = -0.087
-    # next_pose.orientation.w =  0.996
+    next_pose.orientation.y = -0.087
+    next_pose.orientation.w =  0.996
     next_pose_stamped = ros_handler.convert_pose_to_pose_stamped(next_pose, "hand_palm_link")
     pose_publisher.publish(next_pose_stamped)
     # input("Press Enter when moves are finished…")
-    rospy.sleep(2)
+    rospy.sleep(4)
 
     while not rospy.is_shutdown(): 
         # Take image
@@ -345,13 +365,13 @@ def pipeline():
         # Process image
         data.append(my_class.process_image(images[-1], transforms[-1], show=False))
         # Estimate scale and shift
-        best_alpha, best_beta, best_pc_world = my_class.estimate_scale_shift_new(data[-2], data[-1], transforms[-2], transforms[-1], show=True)
+        best_alpha, best_beta, best_pc_world, num_inliers, num_inliers_union = my_class.estimate_scale_shift_new(data[-2], data[-1], transforms[-2], transforms[-1], show=True)
         best_alphas.append(best_alpha)
         best_betas.append(best_beta)
         best_pcs_world.append(best_pc_world)
         # Get highest Point in pointcloud
         target_point = my_class.get_highest_point(best_pcs_world[-1])
-        # target_point[2] += 0.1 # Make target Pose hover above actual target pose
+        target_point[2] += 0.098 - 0.0015 # Make target Pose hover above actual target pose - tested offset
         # Convert to Pose
         target_poses.append(my_class.get_desired_pose(target_point))
         # Calculate Path
@@ -361,6 +381,7 @@ def pipeline():
         usr_input = input("Press Enter to accept next Pose, Type y to go to last Pose")
         if usr_input == "y":
             pose_publisher.publish(target_path[-1])
+            break
         else:
             pose_publisher.publish(target_path[1])
         # input("Press Enter when moves are finished…")
@@ -371,7 +392,6 @@ def pipeline():
 if __name__ == "__main__":
     rospy.init_node("MyClass", anonymous=True)
     pipeline()
-
 
     # my_class = MyClass()
     # ros_handler = ROSHandler()

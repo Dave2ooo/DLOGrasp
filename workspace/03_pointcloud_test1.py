@@ -778,7 +778,7 @@ def differential_evolution():
 
     for i, transform in enumerate(transforms[0:7]):
         print(f'Processing image {i}')
-        image = cv2.imread(f'/root/workspace/images/moves/cable{i}.jpg')
+        image = cv2.imread(f'/root/workspace/images/moves/tube{i}.jpg')
         images.append(image)
 
         depth = depth_anything_wrapper.get_depth_map(image)
@@ -800,29 +800,39 @@ def differential_evolution():
         pointclouds_masked_world.append(pointcloud_masked_world)
         # depth_anything_wrapper.show_pointclouds([pointcloud_masked_world])
         
-    index_pointcloud = 0
+    # index_pointcloud = 0
     bounds = [(0.05, 0.4), (-0.3, 0.3)] # [(alpha_min, alpha_max), (beta_min,  beta_max)]
 
-    start = time.perf_counter()
-    result = opt.differential_evolution(
-        inliers_function,
-        bounds,
-        args=(depths_masked[index_pointcloud], transforms[index_pointcloud], masks[index_pointcloud+1], transforms[index_pointcloud+1]),
-        strategy='best1bin',
-        maxiter=20,
-        popsize=15,
-        tol=1e-2,
-        disp=True
-    )
-    end = time.perf_counter()
-    print(f"Optimization took {end - start:.2f} seconds")
+    pointclouds_world_opt = []
+    for index_pointcloud in range(6):
+        start = time.perf_counter()
+        result = opt.differential_evolution(
+            inliers_function,
+            bounds,
+            args=(depths_masked[index_pointcloud], transforms[index_pointcloud], masks[index_pointcloud+1], transforms[index_pointcloud+1]),
+            strategy='best1bin',
+            maxiter=20,
+            popsize=15,
+            tol=1e-2,
+            disp=True
+        )
+        end = time.perf_counter()
+        print(f"Optimization took {end - start:.2f} seconds")
 
-    alpha_opt, beta_opt = result.x
-    start = time.perf_counter()
-    y_opt = inliers_function([alpha_opt, beta_opt], depths_masked[index_pointcloud], transforms[index_pointcloud], masks[index_pointcloud+1], transforms[index_pointcloud+1])
-    end = time.perf_counter()
-    print(f"One function call took {end - start:.4f} seconds")
-    print(f'Optimal alpha: {alpha_opt:.2f}, beta: {beta_opt:.2f}, Inliers: {y_opt}')
+        alpha_opt, beta_opt = result.x
+        start = time.perf_counter()
+        y_opt = inliers_function([alpha_opt, beta_opt], depths_masked[index_pointcloud], transforms[index_pointcloud], masks[index_pointcloud+1], transforms[index_pointcloud+1])
+        end = time.perf_counter()
+        print(f"One function call took {end - start:.4f} seconds")
+        print(f'Optimal alpha: {alpha_opt:.2f}, beta: {beta_opt:.2f}, Inliers: {y_opt}')
+
+        depth_opt = depth_anything_wrapper.scale_depth_map(depths_masked[index_pointcloud], scale=alpha_opt, shift=beta_opt)
+        pc1_opt = depth_anything_wrapper.get_pointcloud(depth_opt)
+        pointclouds_world_opt.append(depth_anything_wrapper.transform_pointcloud_to_world(pc1_opt, transforms[index_pointcloud]))
+
+        # depth_anything_wrapper.show_pointclouds_with_frames_and_grid([pointclouds_world_opt[-1]], [transforms[index_pointcloud]], title='Best pointclouds')
+    depth_anything_wrapper.show_pointclouds_with_frames_and_grid(pointclouds_world_opt, transforms, title='Best pointclouds')
+    
 
 def icp():
     depth_anything_wrapper = DepthAnythingWrapper(intrinsics=camera_intrinsics)

@@ -6,6 +6,7 @@ import numpy as np
 from numpy.typing import NDArray
 import supervision as sv
 from PIL import Image
+from skimage.morphology import reconstruction, disk, square, binary_closing
 
 grounded_sam_directory = '/root/grounded_sam2'
 # sys.path.insert(1, grounded_sam_directory)
@@ -327,6 +328,39 @@ class GroundedSamWrapper:
         result[~mask_bool] = 0
         return result
 
+    def fill_mask_holes(self, mask_bw: np.ndarray, closing_radius: int = 2, kernel_shape: str = 'disk') -> np.ndarray:
+        """
+        Pure morphological closing: dilation then erosion with a small SE.
+
+        Parameters
+        ----------
+        mask_bw : np.ndarray
+            Input binary mask (0/255 or bool).
+        closing_radius : int
+            Radius of the closing structuring element.
+        kernel_shape : str
+            'disk' for circular SE, 'square' for square SE.
+
+        Returns
+        -------
+        np.ndarray
+            Output mask (uint8 0/255) with holes filled (and borders smoothed).
+        """
+        # normalize
+        m = mask_bw.copy()
+        if m.dtype != np.uint8:
+            m = (m.astype(bool).astype(np.uint8) * 255)
+
+        # choose SE
+        ksz = 2*closing_radius + 1
+        if kernel_shape == 'disk':
+            # approximate disk with ellipse
+            se = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksz, ksz))
+        else:
+            se = cv2.getStructuringElement(cv2.MORPH_RECT, (ksz, ksz))
+
+        closed = cv2.morphologyEx(m, cv2.MORPH_CLOSE, se)
+        return closed
 
 
 if __name__ == "__main__":

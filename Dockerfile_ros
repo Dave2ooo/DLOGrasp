@@ -118,3 +118,5 @@ ENV MPLBACKEND=TkAgg
 
 RUN python3.10 -m pip install --no-cache-dir --ignore-installed 'PyYAML>=5.4.1'
 RUN python3.10 -m pip install --no-cache-dir open3d
+
+RUN python -m pip install --upgrade scikit-image
