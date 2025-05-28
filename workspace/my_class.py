@@ -8,8 +8,9 @@ from tf.transformations import quaternion_matrix, quaternion_from_matrix
 import numpy as np
 import rospy
 import cv2
-
+import time
 import random
+import scipy.optimize as opt
 
 # camera_intrinsics = (203.71833, 203.71833, 319.5, 239.5) # old/wrong
 camera_intrinsics = (149.09148, 187.64966, 334.87706, 268.23742)
@@ -21,7 +22,7 @@ class MyClass:
         self.grounded_sam_wrapper = GroundedSamWrapper()
         pass
 
-    def get_stamped_transform(self, translation, rotation):
+    def convert_trans_and_rot_to_stamped_transform(self, translation, rotation):
         transform_stamped = TransformStamped()
         transform_stamped.transform.translation.x = translation[0]
         transform_stamped.transform.translation.y = translation[1]
@@ -178,7 +179,41 @@ class MyClass:
             self.depth_anything_wrapper.show_pointclouds_with_frames([pointcloud_masked_world1, best_pointcloud_world], [transform1], title="Original and scaled pointcloud")
 
         return best_alpha, best_beta, best_pointcloud_world
-    
+
+    def estimate_scale_shift_new(self, data1, data2, transform1, transform2, show=False):
+        print('Estimating scale and shift...')
+        _, mask1, depth_masked1, _, pointcloud_masked_world1 = data1
+        _, mask2, _, _, _ = data2
+
+        bounds = [(0.05, 0.4), (-0.3, 0.3)] # [(alpha_min, alpha_max), (beta_min,  beta_max)]
+
+        start = time.perf_counter()
+        result = opt.differential_evolution(
+            self.inliers_function,
+            bounds,
+            args=(depth_masked1, transform1, mask2, transform2),
+            strategy='best1bin',
+            maxiter=20,
+            popsize=15,
+            tol=1e-2,
+            disp=True
+        )
+        end = time.perf_counter()
+        print(f"Optimization took {end - start:.2f} seconds")
+
+        alpha_opt, beta_opt = result.x
+        # start = time.perf_counter()
+        y_opt = -self.inliers_function([alpha_opt, beta_opt], depth_masked1, transform1, mask2, transform2)
+        # end = time.perf_counter()
+        # print(f"One function call took {end - start:.4f} seconds")
+        print(f'Optimal alpha: {alpha_opt:.2f}, beta: {beta_opt:.2f}, Inliers: {y_opt}')
+
+        depth_opt = self.depth_anything_wrapper.scale_depth_map(depth_masked1, scale=alpha_opt, shift=beta_opt)
+        pc1_opt = self.depth_anything_wrapper.get_pointcloud(depth_opt)
+        pc0_opt = self.depth_anything_wrapper.transform_pointcloud_to_world(pc1_opt, transform1)
+
+        return alpha_opt, beta_opt, pc0_opt
+
     def get_desired_pose(self, position, frame="map"):
         # build Pose
         p = Pose()
@@ -220,6 +255,20 @@ class MyClass:
         idx = np.argmax(pts[:, 2])
         return pts[idx]
 
+    def inliers_function(self, x, depth_masked, transform1, mask, transform2):
+        alpha, beta = x
+        # Scale and shift
+        depth_new = self.depth_anything_wrapper.scale_depth_map(depth_masked, scale=alpha, shift=beta)
+        # Get scaled/shifted pointcloud
+        new_pc1 = self.depth_anything_wrapper.get_pointcloud(depth_new)
+        # Transform scaled pointcloud into world coordinates
+        new_pc0 = self.depth_anything_wrapper.transform_pointcloud_to_world(new_pc1, transform1)
+        # Get projection of scaled pointcloud into camera 2
+        projection_new_pc2_depth, projection_new_pc2_mask = self.depth_anything_wrapper.project_pointcloud(new_pc0, transform2)
+        # Count the number of inliers between mask 2 and projection of scaled pointcloud
+        num_inliers, inlier_union = self.depth_anything_wrapper.count_inliers(projection_new_pc2_mask, mask)
+
+        return -num_inliers
 
 def test1():
     my_class = MyClass()
@@ -227,8 +276,8 @@ def test1():
 
     image1 = cv2.imread(f'/root/workspace/images/moves/cable0.jpg')
     image2 = cv2.imread(f'/root/workspace/images/moves/cable1.jpg')
-    transform1 = my_class.get_stamped_transform([0.767, 0.495, 0.712], [0.707, 0.001, 0.707, -0.001])
-    transform2 = my_class.get_stamped_transform([0.839, 0.493, 0.727], [0.774, 0.001, 0.633, -0.001])
+    transform1 = my_class.convert_trans_and_rot_to_stamped_transform([0.767, 0.495, 0.712], [0.707, 0.001, 0.707, -0.001])
+    transform2 = my_class.convert_trans_and_rot_to_stamped_transform([0.839, 0.493, 0.727], [0.774, 0.001, 0.633, -0.001])
 
     data1 = my_class.process_image(image1, transform1, show=True)
     data2 = my_class.process_image(image2, transform2, show=True)
@@ -239,8 +288,8 @@ def test2():
     my_class = MyClass()
     ros_handler = ROSHandler()
 
-    transform_stamped0 = my_class.get_stamped_transform([0.767, 0.495, 0.712], [0.707, 0.001, 0.707, -0.001])
-    transform_stamped6 = my_class.get_stamped_transform([1.025, 0.493, 0.643], [0.983, 0.001, 0.184, -0.000])
+    transform_stamped0 = my_class.convert_trans_and_rot_to_stamped_transform([0.767, 0.495, 0.712], [0.707, 0.001, 0.707, -0.001])
+    transform_stamped6 = my_class.convert_trans_and_rot_to_stamped_transform([1.025, 0.493, 0.643], [0.983, 0.001, 0.184, -0.000])
 
     path = ros_handler.interpolate_poses(transform_stamped0, transform_stamped6, num_steps=10)
 
@@ -267,7 +316,7 @@ def pipeline():
     images = []
     transforms = []
     data = []
-    desired_poses = []
+    target_poses = []
     best_alphas = []
     best_betas = []
     best_pcs_world = []
@@ -296,7 +345,7 @@ def pipeline():
         # Process image
         data.append(my_class.process_image(images[-1], transforms[-1], show=False))
         # Estimate scale and shift
-        best_alpha, best_beta, best_pc_world = my_class.estimate_scale_shift(data[-2], data[-1], transforms[-2], transforms[-1], show=True)
+        best_alpha, best_beta, best_pc_world = my_class.estimate_scale_shift_new(data[-2], data[-1], transforms[-2], transforms[-1], show=True)
         best_alphas.append(best_alpha)
         best_betas.append(best_beta)
         best_pcs_world.append(best_pc_world)
@@ -304,9 +353,9 @@ def pipeline():
         target_point = my_class.get_highest_point(best_pcs_world[-1])
         # target_point[2] += 0.1 # Make target Pose hover above actual target pose
         # Convert to Pose
-        target_pose = my_class.get_desired_pose(target_point)
+        target_poses.append(my_class.get_desired_pose(target_point))
         # Calculate Path
-        target_path = ros_handler.interpolate_poses(transforms[-1], target_pose, num_steps=3)
+        target_path = ros_handler.interpolate_poses(transforms[-1], target_poses[-1], num_steps=3)
         # Move arm a step
         path_publisher.publish(target_path)
         usr_input = input("Press Enter to accept next Pose, Type y to go to last Pose")

@@ -4,12 +4,17 @@ from ROS_handler import ROSHandler
 from geometry_msgs.msg import TransformStamped
 from tf.transformations import quaternion_matrix, quaternion_from_matrix
 import numpy as np
-
 import cv2
 
 import random
+import time
+import scipy.optimize as opt
 
-camera_intrinsics = (203.71833, 203.71833, 319.5, 239.5)
+# camera_intrinsics = (203.71833, 203.71833, 319.5, 239.5) # old/wrong
+camera_intrinsics = (149.09148, 187.64966, 334.87706, 268.23742)
+
+depth_anything_wrapper = DepthAnythingWrapper(intrinsics=camera_intrinsics)
+grounded_sam_wrapper = GroundedSamWrapper()
 
 def get_stamped_transform(translation, rotation):
     transform_stamped = TransformStamped()
@@ -132,6 +137,21 @@ def get_homogeneous_matrix(transform: TransformStamped) -> np.ndarray:
     M[2, 3] = t.z
 
     return M
+
+def inliers_function(x, depth_masked, transform1, mask, transform2):
+    alpha, beta = x
+    # Scale and shift
+    depth_new = depth_anything_wrapper.scale_depth_map(depth_masked, scale=alpha, shift=beta)
+    # Get scaled/shifted pointcloud
+    new_pc1 = depth_anything_wrapper.get_pointcloud(depth_new)
+    # Transform scaled pointcloud into world coordinates
+    new_pc0 = depth_anything_wrapper.transform_pointcloud_to_world(new_pc1, transform1)
+    # Get projection of scaled pointcloud into camera 2
+    projection_new_pc2_depth, projection_new_pc2_mask = depth_anything_wrapper.project_pointcloud(new_pc0, transform2)
+    # Count the number of inliers between mask 2 and projection of scaled pointcloud
+    num_inliers, inlier_union = depth_anything_wrapper.count_inliers(projection_new_pc2_mask, mask)
+
+    return -num_inliers
 
 def test2():
     depth_anything_wrapper = DepthAnythingWrapper(intrinsics=camera_intrinsics)
@@ -466,7 +486,7 @@ def ransac2():
         # depth_anything_wrapper.show_pointclouds([pointcloud_world])
 
 
-    index_pointcloud = 5
+    index_pointcloud = 0
     current_pointcloud_masked_world = pointclouds_masked_world[index_pointcloud]
     max_inliers_counter = 0
     best_alpha, best_beta = 0, 0
@@ -479,9 +499,9 @@ def ransac2():
         point0_A = random.choice(current_pointcloud_masked_world.points)
         point0_B = random.choice(current_pointcloud_masked_world.points)
         if np.all(point0_A == point0_B):
-            print(f'point0_A: {point0_A}')
-            print(f'point0_B: {point0_B}')
-            print('Points are the same')
+            # print(f'point0_A: {point0_A}')
+            # print(f'point0_B: {point0_B}')
+            # print('Points are the same')
             continue
 
         # Project the points into coordinates of camera 2
@@ -626,6 +646,7 @@ def ransac3():
         # print(f'Processing Pointcloud {iteration}')
         current_pointcloud_masked_world = pointclouds_masked_world[index_pointcloud]
         max_inliers_counter = 0
+        best_inlier_ratio = None
         best_alpha, best_beta = 0, 0
         best_pointcloud = None
         best_projection = None
@@ -726,24 +747,82 @@ def ransac3():
             # depth_anything_wrapper.show_pointclouds_with_frames([pointclouds_masked_world[index_pointcloud], new_pc0], [transforms[index_pointcloud]], title="Original and scaled pointcloud")
 
             # Count the number of inliers between mask 2 and projection of scaled pointcloud
-            num_inliers, _ = depth_anything_wrapper.count_inliers(projection_new_pc2_mask, masks[index_pointcloud+1])
+            num_inliers, inlier_union = depth_anything_wrapper.count_inliers(projection_new_pc2_mask, masks[index_pointcloud+1])
             # print(f'{i}: num_inliers: {num_inliers}')
 
             if num_inliers > max_inliers_counter:
                 max_inliers_counter = num_inliers
+                best_inlier_ratio = num_inliers/inlier_union
                 best_alpha = alpha
                 best_beta = beta
                 best_pointcloud = new_pc0
                 best_projection = projection_new_pc2_depth
 
-        print(f'Max inliers: {max_inliers_counter}, alpha: {best_alpha:.2f}, beta: {best_beta:.2f}, Skipped points: {num_skips}')
-        # # Show original and scaled depth maps and masks
-        # grounded_sam_wrapper.show_masks([best_projection, masks[index_pointcloud+1]], title="Scaled depth map and mask")
-        # # Show original and scaled pointclouds in world coordinates
+        print(f'Max inliers: {max_inliers_counter}, Inlier Ratio: {best_inlier_ratio:.2f}, alpha: {best_alpha:.2f}, beta: {best_beta:.2f}, Skipped points: {num_skips}')
+        # Show original and scaled depth maps and masks
+        # grounded_sam_wrapper.show_masks([best_projection], title="Projection of scaled PC")
+        # grounded_sam_wrapper.show_masks([masks[index_pointcloud+1]], title="Mask")
+        grounded_sam_wrapper.show_mask_union(best_projection, masks[index_pointcloud+1])
+        # Show original and scaled pointclouds in world coordinates
         # depth_anything_wrapper.show_pointclouds_with_frames([pointclouds_masked_world[index_pointcloud], best_pointcloud], [transforms[index_pointcloud]], title="Original and scaled pointcloud")
         best_pointclouds_world.append(best_pointcloud)
 
     depth_anything_wrapper.show_pointclouds_with_frames_and_grid(best_pointclouds_world, transforms, title='Best pointclouds')
+
+def differential_evolution():
+    images = []
+    depths_masked = []
+    masks = []
+    pointclouds_masked = []
+    pointclouds_masked_world = []
+
+    for i, transform in enumerate(transforms[0:7]):
+        print(f'Processing image {i}')
+        image = cv2.imread(f'/root/workspace/images/moves/cable{i}.jpg')
+        images.append(image)
+
+        depth = depth_anything_wrapper.get_depth_map(image)
+        # depth_anything_wrapper.show_depth_map(depth)
+
+        mask = grounded_sam_wrapper.get_mask(image)[0][0]
+        masks.append(mask)
+        # grounded_sam_wrapper.show_mask(mask)
+
+        depth_masked = grounded_sam_wrapper.mask_depth_map(depth, mask)
+        depths_masked.append(depth_masked)
+        # depth_anything_wrapper.show_depth_map(depth_masked)
+
+        pointcloud_masked = depth_anything_wrapper.get_pointcloud(depth_masked)
+        pointclouds_masked.append(pointcloud_masked)
+        # depth_anything_wrapper.show_pointclouds([pointcloud_masked])
+
+        pointcloud_masked_world = depth_anything_wrapper.transform_pointcloud_to_world(pointcloud_masked, transform)
+        pointclouds_masked_world.append(pointcloud_masked_world)
+        # depth_anything_wrapper.show_pointclouds([pointcloud_masked_world])
+        
+    index_pointcloud = 0
+    bounds = [(0.05, 0.4), (-0.3, 0.3)] # [(alpha_min, alpha_max), (beta_min,  beta_max)]
+
+    start = time.perf_counter()
+    result = opt.differential_evolution(
+        inliers_function,
+        bounds,
+        args=(depths_masked[index_pointcloud], transforms[index_pointcloud], masks[index_pointcloud+1], transforms[index_pointcloud+1]),
+        strategy='best1bin',
+        maxiter=20,
+        popsize=15,
+        tol=1e-2,
+        disp=True
+    )
+    end = time.perf_counter()
+    print(f"Optimization took {end - start:.2f} seconds")
+
+    alpha_opt, beta_opt = result.x
+    start = time.perf_counter()
+    y_opt = inliers_function([alpha_opt, beta_opt], depths_masked[index_pointcloud], transforms[index_pointcloud], masks[index_pointcloud+1], transforms[index_pointcloud+1])
+    end = time.perf_counter()
+    print(f"One function call took {end - start:.4f} seconds")
+    print(f'Optimal alpha: {alpha_opt:.2f}, beta: {beta_opt:.2f}, Inliers: {y_opt}')
 
 def icp():
     depth_anything_wrapper = DepthAnythingWrapper(intrinsics=camera_intrinsics)
@@ -981,8 +1060,8 @@ if __name__ == '__main__':
     # ransac3()
     # icp()
     # interactive_scale_shift()
-    test3()
-
+    # test3()
+    differential_evolution()
 
     cv2.waitKey(0)
     cv2.destroyAllWindows()

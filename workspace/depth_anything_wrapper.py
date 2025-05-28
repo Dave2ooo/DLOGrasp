@@ -571,86 +571,91 @@ class DepthAnythingWrapper():
         scaled[mask_zero] = 0.0
         return scaled
 
-    def project_pointcloud(self,
-                           pointcloud: o3d.geometry.PointCloud,
-                           camera_pose: TransformStamped) -> tuple[np.ndarray, np.ndarray]:
+    def project_pointcloud(self, pointcloud: o3d.geometry.PointCloud, camera_pose: TransformStamped):
         """
-        Project a 3D point cloud (in world coordinates) onto the camera image plane
-        to produce a depth map and a black-and-white mask.
-
-        Parameters
-        ----------
-        pointcloud : o3d.geometry.PointCloud
-            The cloud in world coordinates.
-        camera_pose : geometry_msgs.msg.TransformStamped
-            Transform from camera frame into world frame.
+        Project a 3D point cloud onto the image plane, then fill 1px gaps
+        (holes of width up to one pixel) in the resulting depth map and mask.
 
         Returns
         -------
-        depth_map : np.ndarray
-            Depth map (H×W) in metres, with zero where no points project.
-        mask_bw : np.ndarray
-            Black-and-white mask (H×W) uint8, 255 where depth_map > 0, else 0.
+        depth_map : np.ndarray, shape (480, 640)
+            Depth in metres, with small gaps filled.
+        mask_bw : np.ndarray, shape (480, 640), uint8
+            255 where depth_map > 0 (after filling), else 0.
         """
-        # validate inputs
+        # validate
         if not isinstance(pointcloud, o3d.geometry.PointCloud):
             raise TypeError("pointcloud must be an open3d.geometry.PointCloud")
         if not isinstance(camera_pose, TransformStamped):
             raise TypeError("camera_pose must be a geometry_msgs.msg.TransformStamped")
-        if not hasattr(self, 'intrinsics'):
-            raise AttributeError("DepthAnythingWrapper: self.intrinsics must be set to (fx, fy, cx, cy)")
-
         fx, fy, cx, cy = self.intrinsics
-        W = int(2 * cx) + 1   # 2*319.5 = 639 → +1 = 640 cols
-        H = int(2 * cy) + 1   # 2*239.5 = 479 → +1 = 480 rows
+        H_out, W_out = 480, 640
 
-        # build camera→world homogeneous matrix
+        # build world→camera matrix
         t = camera_pose.transform.translation
         q = camera_pose.transform.rotation
-        trans = np.array([t.x, t.y, t.z], dtype=np.float64)
-        quat  = np.array([q.x, q.y, q.z, q.w], dtype=np.float64)
-        T_cam2world = quaternion_matrix(quat)
-        T_cam2world[:3, 3] = trans
+        trans = np.array([t.x, t.y, t.z], np.float64)
+        quat  = np.array([q.x, q.y, q.z, q.w], np.float64)
+        Tcw = quaternion_matrix(quat); Tcw[:3,3] = trans
+        Twc = np.linalg.inv(Tcw)
 
-        # invert to get world→camera
-        T_world2cam = np.linalg.inv(T_cam2world)
+        # transform points
+        pts = np.asarray(pointcloud.points, np.float64)
+        if pts.size == 0:
+            # empty
+            depth_map = np.zeros((H_out, W_out), dtype=np.float32)
+            return depth_map, depth_map.astype(np.uint8)
+        ones = np.ones((pts.shape[0],1), np.float64)
+        cam_pts = (Twc @ np.hstack((pts, ones)).T).T[:, :3]
+        x_cam, y_cam, z_cam = cam_pts.T
 
-        # transform points to camera frame
-        pts = np.asarray(pointcloud.points, dtype=np.float64)
-        ones = np.ones((pts.shape[0], 1), dtype=np.float64)
-        pts_hom = np.hstack((pts, ones))
-        pts_cam = (T_world2cam @ pts_hom.T).T[:, :3]
-        x_cam, y_cam, z_cam = pts_cam.T
-
-        # keep only points in front of camera
+        # keep in front
         valid = z_cam > 0
         x_cam, y_cam, z_cam = x_cam[valid], y_cam[valid], z_cam[valid]
 
-        # project into pixel coords
+        # project to pixels
         u = x_cam * fx / z_cam + cx
         v = y_cam * fy / z_cam + cy
         j = np.round(u).astype(int)
         i = np.round(v).astype(int)
 
-        # mask out-of-bounds
-        in_bounds = (i >= 0) & (i < H) & (j >= 0) & (j < W)
-        i, j, z_cam = i[in_bounds], j[in_bounds], z_cam[in_bounds]
+        # clip to image bounds
+        inb = (i >= 0) & (i < H_out) & (j >= 0) & (j < W_out)
+        i, j, z_cam = i[inb], j[inb], z_cam[inb]
 
-        # build depth buffer, taking nearest point per pixel
-        depth_map = np.full((H, W), np.inf, dtype=np.float32)
+        # build raw depth map
+        depth_map = np.full((H_out, W_out), np.inf, dtype=np.float32)
         for ii, jj, zz in zip(i, j, z_cam):
             if zz < depth_map[ii, jj]:
                 depth_map[ii, jj] = zz
+        depth_map[depth_map == np.inf] = 0.0
 
-        # finalize depth map and mask
-        mask = depth_map != np.inf
-        depth_map[~mask] = 0.0
+        # build initial mask
+        mask_orig = depth_map > 0
 
-        # black-and-white mask: 255 where depth>0, else 0
-        # mask_bw = (mask.astype(np.uint8) * 255)
-        mask_bw = (mask > 0).astype(np.float32)
-        # with np.printoptions(threshold=np.inf):
-            # print(mask_bw)
+        # close 1px holes in the mask
+        kernel = np.ones((3, 3), dtype=np.uint8)
+        mask_uint8 = (mask_orig.astype(np.uint8) * 255)
+        mask_closed = cv2.morphologyEx(mask_uint8, cv2.MORPH_CLOSE, kernel)
+        mask_closed_bool = mask_closed.astype(bool)
+
+        # find 1px holes (closed minus original)
+        holes = mask_closed_bool & (~mask_orig)
+
+        # fill depth_map holes by averaging valid neighbors
+        depth_filled = depth_map.copy()
+        ys, xs = np.nonzero(holes)
+        for y, x in zip(ys, xs):
+            y0, y1 = max(0, y-1), min(H_out, y+2)
+            x0, x1 = max(0, x-1), min(W_out, x+2)
+            neigh = depth_map[y0:y1, x0:x1]
+            vals = neigh[neigh > 0]
+            if vals.size > 0:
+                depth_filled[y, x] = float(vals.mean())
+
+        # finalize mask and return
+        depth_map = depth_filled
+        mask_bw = (mask_closed_bool.astype(np.uint8) * 255)
         return depth_map, mask_bw
 
     def get_closest_points(self, pointcloud1: o3d.geometry.PointCloud, pointcloud2: o3d.geometry.PointCloud) -> np.ndarray:
@@ -758,9 +763,7 @@ class DepthAnythingWrapper():
         v = y * fy / z + cy
         return [u, v]
 
-    def project_point_from_world(self,
-                      point,
-                      camera_pose: TransformStamped):
+    def project_point_from_world(self, point, camera_pose: TransformStamped):
         """
         Project a single 3D point in world coordinates onto the image plane
         of the camera defined by camera_pose.
