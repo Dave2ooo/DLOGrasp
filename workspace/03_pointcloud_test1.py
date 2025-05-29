@@ -1,6 +1,7 @@
 from depth_anything_wrapper import DepthAnythingWrapper
 from grounded_sam_wrapper import GroundedSamWrapper
 from ROS_handler import ROSHandler
+from my_utils import *
 from geometry_msgs.msg import TransformStamped
 from tf.transformations import quaternion_matrix, quaternion_from_matrix
 import numpy as np
@@ -9,6 +10,8 @@ import cv2
 import random
 import time
 import scipy.optimize as opt
+
+from publisher import *
 
 # camera_intrinsics = (203.71833, 203.71833, 319.5, 239.5) # old/wrong
 camera_intrinsics = (149.09148, 187.64966, 334.87706, 268.23742)
@@ -148,8 +151,10 @@ def inliers_function(x, depth_masked, transform1, mask, transform2):
     new_pc0 = depth_anything_wrapper.transform_pointcloud_to_world(new_pc1, transform1)
     # Get projection of scaled pointcloud into camera 2
     projection_new_pc2_depth, projection_new_pc2_mask = depth_anything_wrapper.project_pointcloud(new_pc0, transform2)
+    # Fill holes   
+    fixed_projection_new_pc2_mask = grounded_sam_wrapper.fill_mask_holes(projection_new_pc2_mask)
     # Count the number of inliers between mask 2 and projection of scaled pointcloud
-    num_inliers, inlier_union = depth_anything_wrapper.count_inliers(projection_new_pc2_mask, mask)
+    num_inliers, inlier_union = depth_anything_wrapper.count_inliers(fixed_projection_new_pc2_mask, mask)
 
     return -num_inliers
 
@@ -778,15 +783,17 @@ def differential_evolution():
 
     for i, transform in enumerate(transforms[0:7]):
         print(f'Processing image {i}')
-        image = cv2.imread(f'/root/workspace/images/moves/tube{i}.jpg')
+        image = cv2.imread(f'/root/workspace/images/moves/cable{i}.jpg')
         images.append(image)
 
         depth = depth_anything_wrapper.get_depth_map(image)
         # depth_anything_wrapper.show_depth_map(depth)
 
         mask = grounded_sam_wrapper.get_mask(image)[0][0]
-        masks.append(mask)
+        mask_reduced = grounded_sam_wrapper.reduce_mask(mask, 1)
+        masks.append(mask_reduced)
         # grounded_sam_wrapper.show_mask(mask)
+        grounded_sam_wrapper.show_mask_union(mask, mask_reduced)
 
         depth_masked = grounded_sam_wrapper.mask_depth_map(depth, mask)
         depths_masked.append(depth_masked)
@@ -832,7 +839,90 @@ def differential_evolution():
 
         # depth_anything_wrapper.show_pointclouds_with_frames_and_grid([pointclouds_world_opt[-1]], [transforms[index_pointcloud]], title='Best pointclouds')
     depth_anything_wrapper.show_pointclouds_with_frames_and_grid(pointclouds_world_opt, transforms, title='Best pointclouds')
-    
+
+def differential_evolution_single():
+    images = []
+    depths_masked = []
+    masks = []
+    pointclouds_masked = []
+    pointclouds_masked_world = []
+
+    for i, transform in enumerate(transforms[0:7]):
+        print(f'Processing image {i}')
+        image = cv2.imread(f'/root/workspace/images/moves/cable{i}.jpg')
+        images.append(image)
+
+        depth = depth_anything_wrapper.get_depth_map(image)
+        # depth_anything_wrapper.show_depth_map(depth)
+
+        mask = grounded_sam_wrapper.get_mask(image)[0][0]
+        mask_reduced = grounded_sam_wrapper.reduce_mask(mask, 1)
+        masks.append(mask_reduced)
+        # masks.append(mask)
+        # grounded_sam_wrapper.show_mask(mask)
+
+        depth_masked = grounded_sam_wrapper.mask_depth_map(depth, mask)
+        depths_masked.append(depth_masked)
+        # depth_anything_wrapper.show_depth_map(depth_masked)
+
+
+
+        pointcloud_masked = depth_anything_wrapper.get_pointcloud(depth_masked)
+        pointclouds_masked.append(pointcloud_masked)
+        # depth_anything_wrapper.show_pointclouds([pointcloud_masked])
+
+        pointcloud_masked_world = depth_anything_wrapper.transform_pointcloud_to_world(pointcloud_masked, transform)
+        pointclouds_masked_world.append(pointcloud_masked_world)
+        # depth_anything_wrapper.show_pointclouds([pointcloud_masked_world])
+
+        # Reduced
+        # mask_reduced = grounded_sam_wrapper.reduce_mask(mask, 1)
+        depth_masked_reduced = grounded_sam_wrapper.mask_depth_map(depth, mask_reduced)
+        pointcloud_masked_reduced = depth_anything_wrapper.get_pointcloud(depth_masked_reduced)
+        pointcloud_masked_reduced_world = depth_anything_wrapper.transform_pointcloud_to_world(pointcloud_masked_reduced, transform)
+
+        # Show reduced
+        # grounded_sam_wrapper.show_mask_union(mask, mask_reduced)
+        # depth_anything_wrapper.show_pointclouds([pointcloud_masked_world])
+        # depth_anything_wrapper.show_pointclouds([pointcloud_masked_reduced_world])
+        # depth_anything_wrapper.show_pointclouds_with_frames_and_grid([pointcloud_masked_world, pointcloud_masked_reduced_world])
+        
+    index_pointcloud = 0
+    index_pointcloud_next = 5
+    bounds = [(0.05, 0.4), (-0.3, 0.3)] # [(alpha_min, alpha_max), (beta_min,  beta_max)]
+
+    start = time.perf_counter()
+    result = opt.differential_evolution(
+        inliers_function,
+        bounds,
+        args=(depths_masked[index_pointcloud], transforms[index_pointcloud], masks[index_pointcloud_next], transforms[index_pointcloud_next]),
+        strategy='best1bin',
+        maxiter=20,
+        popsize=15,
+        tol=1e-2,
+        disp=True
+    )
+    end = time.perf_counter()
+    print(f"Optimization took {end - start:.2f} seconds")
+
+    alpha_opt, beta_opt = result.x
+    start = time.perf_counter()
+    y_opt = inliers_function([alpha_opt, beta_opt], depths_masked[index_pointcloud], transforms[index_pointcloud], masks[index_pointcloud_next], transforms[index_pointcloud_next])
+    end = time.perf_counter()
+    print(f"One function call took {end - start:.4f} seconds")
+    print(f'Optimal alpha: {alpha_opt:.2f}, beta: {beta_opt:.2f}, Inliers: {y_opt}')
+
+    depth_opt = depth_anything_wrapper.scale_depth_map(depths_masked[index_pointcloud], scale=alpha_opt, shift=beta_opt)
+    pc1_opt = depth_anything_wrapper.get_pointcloud(depth_opt)
+    pc_world_opt = depth_anything_wrapper.transform_pointcloud_to_world(pc1_opt, transforms[index_pointcloud])
+
+    projection_pc2_depth_opt, projection_pc2_mask_opt = depth_anything_wrapper.project_pointcloud(pc_world_opt, transforms[index_pointcloud_next])
+    fixed_projection_pc2_mask_world = grounded_sam_wrapper.fill_mask_holes(projection_pc2_depth_opt)
+    grounded_sam_wrapper.show_masks([fixed_projection_pc2_mask_world], title="Projection")
+    grounded_sam_wrapper.show_mask_union(fixed_projection_pc2_mask_world, masks[index_pointcloud_next])
+
+    # depth_anything_wrapper.show_pointclouds_with_frames_and_grid([pointclouds_world_opt[-1]], [transforms[index_pointcloud]], title='Best pointclouds')
+    depth_anything_wrapper.show_pointclouds_with_frames_and_grid([pc_world_opt], transforms, title='Best pointclouds')   
 
 def icp():
     depth_anything_wrapper = DepthAnythingWrapper(intrinsics=camera_intrinsics)
@@ -1052,8 +1142,123 @@ def test3():
         pointcloud_message = ROS_handler.create_pointcloud_message(pointcloud_masked_world, "odom")
         print(f'pointcloud_message: {pointcloud_message}')
 
+def calculate_angle_test():
+    images = []
+    depths_masked = []
+    masks = []
+    pointclouds_masked = []
+    pointclouds_masked_world = []
+
+    for i, transform in enumerate(transforms[0:7]):
+        print(f'Processing image {i}')
+        image = cv2.imread(f'/root/workspace/images/moves/cable{i}.jpg')
+        images.append(image)
+
+        depth = depth_anything_wrapper.get_depth_map(image)
+        # depth_anything_wrapper.show_depth_map(depth)
+
+        mask = grounded_sam_wrapper.get_mask(image)[0][0]
+        mask_reduced = grounded_sam_wrapper.reduce_mask(mask, 1)
+        masks.append(mask_reduced)
+        # masks.append(mask)
+        # grounded_sam_wrapper.show_mask(mask)
+
+        depth_masked = grounded_sam_wrapper.mask_depth_map(depth, mask)
+        depths_masked.append(depth_masked)
+        # depth_anything_wrapper.show_depth_map(depth_masked)
+
+
+
+        pointcloud_masked = depth_anything_wrapper.get_pointcloud(depth_masked)
+        pointclouds_masked.append(pointcloud_masked)
+        # depth_anything_wrapper.show_pointclouds([pointcloud_masked])
+
+        pointcloud_masked_world = depth_anything_wrapper.transform_pointcloud_to_world(pointcloud_masked, transform)
+        pointclouds_masked_world.append(pointcloud_masked_world)
+        # depth_anything_wrapper.show_pointclouds([pointcloud_masked_world])
+
+        # Reduced
+        # mask_reduced = grounded_sam_wrapper.reduce_mask(mask, 1)
+        depth_masked_reduced = grounded_sam_wrapper.mask_depth_map(depth, mask_reduced)
+        pointcloud_masked_reduced = depth_anything_wrapper.get_pointcloud(depth_masked_reduced)
+        pointcloud_masked_reduced_world = depth_anything_wrapper.transform_pointcloud_to_world(pointcloud_masked_reduced, transform)
+
+        # Show reduced
+        # grounded_sam_wrapper.show_mask_union(mask, mask_reduced)
+        # depth_anything_wrapper.show_pointclouds([pointcloud_masked_world])
+        # depth_anything_wrapper.show_pointclouds([pointcloud_masked_reduced_world])
+        # depth_anything_wrapper.show_pointclouds_with_frames_and_grid([pointcloud_masked_world, pointcloud_masked_reduced_world])
+        
+    index_pointcloud = 0
+    index_pointcloud_next = 1
+    bounds = [(0.05, 0.4), (-0.3, 0.3)] # [(alpha_min, alpha_max), (beta_min,  beta_max)]
+
+    start = time.perf_counter()
+    result = opt.differential_evolution(
+        inliers_function,
+        bounds,
+        args=(depths_masked[index_pointcloud], transforms[index_pointcloud], masks[index_pointcloud_next], transforms[index_pointcloud_next]),
+        strategy='best1bin',
+        maxiter=20,
+        popsize=15,
+        tol=1e-2,
+        disp=True
+    )
+    end = time.perf_counter()
+    print(f"Optimization took {end - start:.2f} seconds")
+
+    alpha_opt, beta_opt = result.x
+    start = time.perf_counter()
+    y_opt = inliers_function([alpha_opt, beta_opt], depths_masked[index_pointcloud], transforms[index_pointcloud], masks[index_pointcloud_next], transforms[index_pointcloud_next])
+    end = time.perf_counter()
+    print(f"One function call took {end - start:.4f} seconds")
+    print(f'Optimal alpha: {alpha_opt:.2f}, beta: {beta_opt:.2f}, Inliers: {y_opt}')
+
+    depth_opt = depth_anything_wrapper.scale_depth_map(depths_masked[index_pointcloud], scale=alpha_opt, shift=beta_opt)
+    pc1_opt = depth_anything_wrapper.get_pointcloud(depth_opt)
+    pc_world_opt = depth_anything_wrapper.transform_pointcloud_to_world(pc1_opt, transforms[index_pointcloud])
+
+    projection_pc2_depth_opt, projection_pc2_mask_opt = depth_anything_wrapper.project_pointcloud(pc_world_opt, transforms[index_pointcloud_next])
+    fixed_projection_pc2_mask_world = grounded_sam_wrapper.fill_mask_holes(projection_pc2_depth_opt)
+    grounded_sam_wrapper.show_masks([fixed_projection_pc2_mask_world], title="Projection")
+    grounded_sam_wrapper.show_mask_union(fixed_projection_pc2_mask_world, masks[index_pointcloud_next])
+
+    # depth_anything_wrapper.show_pointclouds_with_frames_and_grid([pointclouds_world_opt[-1]], [transforms[index_pointcloud]], title='Best pointclouds')
+    depth_anything_wrapper.show_pointclouds_with_frames_and_grid([pc_world_opt], transforms, title='Best pointclouds')   
+
+    pose_publisher = PosePublisher("/next_pose")
+    path_publisher = PathPublisher("/my_path")
+
+
+    target_point = get_highest_point(pc_world_opt)
+    target_point_offset = target_point
+    target_point_offset[2] += 0.098 - 0.0015 # Make target Pose hover above actual target pose - tested offset
+    # Convert to Pose
+    target_pose = get_desired_pose(target_point_offset)
+    # Calculate Path
+    target_path = interpolate_poses(transforms[1], target_pose, num_steps=3)
+    # Move arm a step
+    
+    _, final_mask = depth_anything_wrapper.project_pointcloud(pc_world_opt, target_pose)
+    # target_point_2D = depth_anything_wrapper.project_point_world(target_point, target_pose)
+    angle = calculate_angle_from_mask_and_point(final_mask, [640//2, 480//2])
+    rotated_target_pose = rotate_pose_around_z(target_pose, angle)
+
+    while not rospy.is_shutdown():
+        pose_publisher.publish(rotated_target_pose)
+        path_publisher.publish(target_path)
+        rospy.sleep(1)
+
+    # point = (186, 349)
+    # calculate_angle_from_mask_and_point(mask, point)
+    # grounded_sam_wrapper.show_mask_and_points(mask, [point])
+
+
+
+
 
 if __name__ == '__main__':
+    rospy.init_node('pointcloud_test', anonymous=True)
     transform_stamped0 = get_stamped_transform([0.767, 0.495, 0.712], [0.707, 0.001, 0.707, -0.001])
     transform_stamped1 = get_stamped_transform([0.839, 0.493, 0.727], [0.774, 0.001, 0.633, -0.001])
     transform_stamped2 = get_stamped_transform([0.903, 0.493, 0.728], [0.834, 0.001, 0.552, -0.000])
@@ -1071,7 +1276,9 @@ if __name__ == '__main__':
     # icp()
     # interactive_scale_shift()
     # test3()
-    differential_evolution()
+    # differential_evolution()
+    # differential_evolution_single()
+    calculate_angle_test()
 
     cv2.waitKey(0)
     cv2.destroyAllWindows()

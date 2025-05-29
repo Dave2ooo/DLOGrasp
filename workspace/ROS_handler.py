@@ -1,12 +1,11 @@
 import sys
 import copy
 import rospy
-from tf.transformations import quaternion_from_euler
 import numpy as np
 import tf2_ros
 from geometry_msgs.msg import TransformStamped, Pose, PoseStamped
 from nav_msgs.msg import Path
-from tf.transformations import quaternion_slerp, quaternion_matrix, quaternion_from_matrix
+from tf.transformations import quaternion_from_euler, quaternion_slerp, quaternion_matrix, quaternion_from_matrix, quaternion_multiply
 from std_msgs.msg import Header
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs import point_cloud2
@@ -126,7 +125,6 @@ class ROSHandler():
         # Create the PointCloud2 message (XYZ only, 32-bit floats)
         pc2_msg = point_cloud2.create_cloud_xyz32(header, xyz)
         return pc2_msg
-
     def convert_pose_to_pose_stamped(self, pose: Pose, frame: str = "map") -> PoseStamped:
         ps = PoseStamped()
         ps.header.stamp = rospy.Time.now()
@@ -134,7 +132,48 @@ class ROSHandler():
         ps.pose = pose
         return ps
     
-    
+    def rotate_pose(self, pose: PoseStamped, angle:float) -> PoseStamped:
+        """
+        Rotate a stamped pose around its own local Z axis by the given angle (radians).
+
+        Parameters
+        ----------
+        pose : geometry_msgs.msg.PoseStamped
+            The input pose to rotate.
+        angle : float
+            The rotation angle in radians (positive = counter‐clockwise around Z).
+
+        Returns
+        -------
+        geometry_msgs.msg.PoseStamped
+            A new PoseStamped with the same position but rotated orientation.
+        """
+        if not isinstance(pose, PoseStamped):
+            raise TypeError("pose must be a geometry_msgs.msg.PoseStamped")
+
+        # extract the original quaternion [x, y, z, w]
+        q = pose.pose.orientation
+        q_orig = [q.x, q.y, q.z, q.w]
+
+        # build a quaternion for a rotation about Z by `angle`
+        q_delta = quaternion_from_euler(0.0, 0.0, angle)
+
+        # compose: apply the delta in the pose's local frame
+        q_new = quaternion_multiply(q_orig, q_delta)
+
+        # construct the new PoseStamped
+        new_pose = PoseStamped()
+        new_pose.header = copy.deepcopy(pose.header)
+        new_pose.pose.position.x = pose.pose.position.x
+        new_pose.pose.position.y = pose.pose.position.y
+        new_pose.pose.position.z = pose.pose.position.z
+        new_pose.pose.orientation.x = float(q_new[0])
+        new_pose.pose.orientation.y = float(q_new[1])
+        new_pose.pose.orientation.z = float(q_new[2])
+        new_pose.pose.orientation.w = float(q_new[3])
+
+        return new_pose
+       
 
 if __name__ == '__main__':
     ros_handler = ROSHandler()

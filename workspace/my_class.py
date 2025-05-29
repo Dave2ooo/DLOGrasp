@@ -3,6 +3,7 @@ from grounded_sam_wrapper import GroundedSamWrapper
 from ROS_handler import ROSHandler
 from camera_handler import ImageSubscriber
 from publisher import *
+from my_utils import *
 from geometry_msgs.msg import TransformStamped, Pose, PoseStamped
 from tf.transformations import quaternion_matrix, quaternion_from_matrix
 import numpy as np
@@ -39,7 +40,8 @@ class MyClass:
 
         depth = self.depth_anything_wrapper.get_depth_map(image)
         mask = self.grounded_sam_wrapper.get_mask(image)[0][0]
-        depth_masked = self.grounded_sam_wrapper.mask_depth_map(depth, mask)
+        mask_reduced = self.grounded_sam_wrapper.reduce_mask(mask, 1)
+        depth_masked = self.grounded_sam_wrapper.mask_depth_map(depth, mask_reduced) # Reduce mask border
         pointcloud_masked = self.depth_anything_wrapper.get_pointcloud(depth_masked)
         pointcloud_masked_world = self.depth_anything_wrapper.transform_pointcloud_to_world(pointcloud_masked, transform)
 
@@ -335,7 +337,7 @@ def pipeline():
 
     images = []
     transforms = []
-    data = []
+    data = [] # depth, mask, depth_masked, pointcloud_masked, pointcloud_masked_world
     target_poses = []
     best_alphas = []
     best_betas = []
@@ -371,22 +373,27 @@ def pipeline():
         best_pcs_world.append(best_pc_world)
         # Get highest Point in pointcloud
         target_point = my_class.get_highest_point(best_pcs_world[-1])
-        target_point[2] += 0.098 - 0.0015 # Make target Pose hover above actual target pose - tested offset
+        tarrget_point_offset = target_point[2] + 0.098 - 0.0015 # Make target Pose hover above actual target pose - tested offset
         # Convert to Pose
-        target_poses.append(my_class.get_desired_pose(target_point))
+        target_poses.append(my_class.get_desired_pose(tarrget_point_offset))
         # Calculate Path
         target_path = ros_handler.interpolate_poses(transforms[-1], target_poses[-1], num_steps=3)
         # Move arm a step
         path_publisher.publish(target_path)
         usr_input = input("Press Enter to accept next Pose, Type y to go to last Pose")
         if usr_input == "y":
-            pose_publisher.publish(target_path[-1])
+            final_mask = my_class.depth_anything_wrapper.project_pointcloud(best_pcs_world[-1], target_poses[-1])
+            target_point_2D = my_class.depth_anything_wrapper.project_point_world(target_point, target_poses[-1])
+            angle = calculate_angle_from_mask_and_point(final_mask, target_point_2D)
+            rotated_target_pose = ros_handler.rotate_pose(target_poses[-1], angle)
+            pose_publisher.publish(rotated_target_pose)
             break
         else:
             pose_publisher.publish(target_path[1])
         # input("Press Enter when moves are finished…")
-        rospy.sleep(2)
+        rospy.sleep(3)
     # Loop End
+
 
 
 if __name__ == "__main__":

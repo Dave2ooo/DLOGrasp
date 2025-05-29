@@ -1,15 +1,6 @@
-import sys
-import copy
 import rospy
-from tf.transformations import quaternion_from_euler
-import numpy as np
-import tf2_ros
-from geometry_msgs.msg import TransformStamped, Pose, PoseStamped
+from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path
-from tf.transformations import quaternion_slerp, quaternion_matrix, quaternion_from_matrix
-from std_msgs.msg import Header
-from sensor_msgs.msg import PointCloud2
-from sensor_msgs import point_cloud2
 import open3d as o3d
 
 
@@ -17,7 +8,6 @@ class PathPublisher:
     def __init__(self, topic: str, frame: str = "map"):
         self.pub = rospy.Publisher(topic, Path, queue_size=1, latch=True)
         self.frame = frame
-        # rospy.sleep(0.1)  # allow registration
 
     def publish(self, path: list[PoseStamped]) -> None:
         """
@@ -38,8 +28,6 @@ class PathPublisher:
         for ps in path:
             if not isinstance(ps, PoseStamped):
                 raise TypeError("each element of path must be a geometry_msgs.msg.PoseStamped")
-
-        # Create a latched publisher so the path persists
         
 
         # Build Path message
@@ -61,7 +49,6 @@ class PathPublisher:
 class PosePublisher:
     def __init__(self, topic: str):
         self.pub = rospy.Publisher(topic, PoseStamped, queue_size=1, latch=True)
-        # rospy.sleep(0.1)  # allow publisher registration
         
     def publish(self, pose: PoseStamped) -> None:
         """
@@ -76,8 +63,6 @@ class PosePublisher:
         frame : str
             The frame_id to stamp the message with (used if publishing a bare Pose).
         """
-        # Initialize publisher (latch last value)
-
         # Build a PoseStamped if necessary
         if isinstance(pose, PoseStamped):
             self.pub.publish(pose)
