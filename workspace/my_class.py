@@ -14,12 +14,12 @@ import random
 import scipy.optimize as opt
 
 # camera_intrinsics = (203.71833, 203.71833, 319.5, 239.5) # old/wrong
-camera_intrinsics = (149.09148, 187.64966, 334.87706, 268.23742)
+camera_parameters = (149.09148, 187.64966, 334.87706, 268.23742)
 
 
 class MyClass:
     def __init__(self):
-        self.depth_anything_wrapper = DepthAnythingWrapper(intrinsics=camera_intrinsics)
+        self.depth_anything_wrapper = DepthAnythingWrapper(intrinsics=camera_parameters)
         self.grounded_sam_wrapper = GroundedSamWrapper()
         pass
 
@@ -40,19 +40,26 @@ class MyClass:
 
         depth = self.depth_anything_wrapper.get_depth_map(image)
         mask = self.grounded_sam_wrapper.get_mask(image)[0][0]
-        mask_reduced = self.grounded_sam_wrapper.reduce_mask(mask, 1)
-        depth_masked = self.grounded_sam_wrapper.mask_depth_map(depth, mask_reduced) # Reduce mask border
-        pointcloud_masked = self.depth_anything_wrapper.get_pointcloud(depth_masked)
-        pointcloud_masked_world = self.depth_anything_wrapper.transform_pointcloud_to_world(pointcloud_masked, transform)
+        mask_reduced = reduce_mask(mask, 1)
+
+        depth_masked = mask_depth_map(depth, mask)
+        depth_masked_reduced = mask_depth_map(depth, mask_reduced) # Reduce mask border
+
+        pointcloud_masked = convert_depth_map_to_pointcloud(depth_masked, camera_parameters)
+        pointcloud_masked_reduced = convert_depth_map_to_pointcloud(depth_masked_reduced, camera_parameters)
+
+        pointcloud_masked_world = transform_pointcloud_to_world(pointcloud_masked, transform)
+        pointcloud_masked_world_reduced = transform_pointcloud_to_world(pointcloud_masked_reduced, transform)
 
         if show:
-            self.grounded_sam_wrapper.show_mask(mask, title="Original Mask")
-            self.depth_anything_wrapper.show_depth_map(depth_masked, title="Original Depth Map Masked")
-            self.depth_anything_wrapper.show_pointclouds([pointcloud_masked], title="Original Pointcloud Masked in Camera Frame")
-            self.depth_anything_wrapper.show_pointclouds_with_frames_and_grid([pointcloud_masked_world], [transform], title="Original Pointcloud Masked in World Frame")
+            show_masks([mask], title="Original Mask")
+            show_masks_union(mask, mask_reduced, title="Mask & Reduced mask")
+            show_depth_map(depth_masked, title="Original Depth Map Masked")
+            show_pointclouds([pointcloud_masked, pointcloud_masked_reduced], title="Original Pointcloud Masked in Camera Frame")
+            show_pointclouds_with_frames_and_grid([pointcloud_masked_world, pointcloud_masked_world_reduced], [transform], title="Original & Reduced Pointcloud Masked in World Frame")
 
         print('Done')
-        return depth, mask, depth_masked, pointcloud_masked, pointcloud_masked_world
+        return depth, mask_reduced, depth_masked_reduced, pointcloud_masked_reduced, pointcloud_masked_world_reduced
     
     def estimate_scale_shift(self, data1, data2, transform1, transform2, show=False):
         print('Estimating scale and shift...')
@@ -80,7 +87,7 @@ class MyClass:
             projectionB_cam2 = self.depth_anything_wrapper.project_point_from_world(pointB_world, transform2)
 
             # Project the pointcloud into coordinates of camera 2
-            projected_pointcloud_depth, projected_pointcloud_mask_2 = self.depth_anything_wrapper.project_pointcloud(pointcloud_masked_world1, transform2)
+            projected_pointcloud_depth, projected_pointcloud_mask_2 = project_pointcloud_from_world(pointcloud_masked_world1, transform2)
             # self.grounded_sam_wrapper.show_mask_and_points(projected_pointcloud_mask_2, [projectionA_cam2, projectionB_cam2], title="Pointcloud 1 projected onto camera 2 with rand points")
 
             # Get the closest points between single point (from pointcloud 1) and mask 2
@@ -142,13 +149,13 @@ class MyClass:
             # self.depth_anything_wrapper.show_depth_map(depth_new, title="Scaled depth map")
 
             # Get scaled/shifted pointcloud
-            new_pc_cam1 = self.depth_anything_wrapper.get_pointcloud(depth_new)
+            new_pc_cam1 = convert_depth_map_to_pointcloud(depth_new)
 
             # Transform scaled pointcloud into world coordinates
             new_pc_world = self.depth_anything_wrapper.transform_pointcloud_to_world(new_pc_cam1, transform1)
 
             # Get projection of scaled pointcloud into camera 2
-            projection_new_pc2_depth, projection_new_pc2_mask = self.depth_anything_wrapper.project_pointcloud(new_pc_world, transform2)
+            projection_new_pc2_depth, projection_new_pc2_mask = project_pointcloud_from_world(new_pc_world, transform2)
         
             # Show projection of scaled pointcloud in camera 2 and closest points
             # self.grounded_sam_wrapper.show_mask_and_points(projection_new_pc2_depth, [closestA_cam2, closestB_cam2], title="Scaled pointcloud with closest points")
@@ -198,7 +205,7 @@ class MyClass:
             maxiter=20,
             popsize=15,
             tol=1e-2,
-            disp=True
+            disp=False
         )
         end = time.perf_counter()
         print(f"Optimization took {end - start:.2f} seconds")
@@ -209,27 +216,26 @@ class MyClass:
         # end = time.perf_counter()
         # print(f"One function call took {end - start:.4f} seconds")
 
-        depth_opt = self.depth_anything_wrapper.scale_depth_map(depth_masked1, scale=alpha_opt, shift=beta_opt)
-        pc_cam1_opt = self.depth_anything_wrapper.get_pointcloud(depth_opt)
-        pc_cam0_opt = self.depth_anything_wrapper.transform_pointcloud_to_world(pc_cam1_opt, transform1)
-        projection_pc_depth_cam2_opt, projection_pc_mask_cam2_opt = self.depth_anything_wrapper.project_pointcloud(pc_cam0_opt, transform2)
+        depth_opt = scale_depth_map(depth_masked1, scale=alpha_opt, shift=beta_opt)
+        pc_cam1_opt = convert_depth_map_to_pointcloud(depth_opt, camera_parameters)
+        pc_cam0_opt = transform_pointcloud_to_world(pc_cam1_opt, transform1)
+        projection_pc_depth_cam2_opt, projection_pc_mask_cam2_opt = project_pointcloud_from_world(pc_cam0_opt, transform2, camera_parameters)
 
-        # Show mask and pointcloud
-        # self.grounded_sam_wrapper.show_masks([projection_pc_mask_cam2_opt], title='Projection')
-        fixed_projection_pc_depth_cam2_opt = self.grounded_sam_wrapper.fill_mask_holes(projection_pc_mask_cam2_opt)
-        # self.grounded_sam_wrapper.show_masks([fixed_projection_pc_depth_cam2_opt], title='Projection fixed')
+        fixed_projection_pc_depth_cam2_opt = fill_mask_holes(projection_pc_mask_cam2_opt)
 
-
-        # Compare original projection with fixed
-        # self.grounded_sam_wrapper.show_mask_union(projection_pc_mask_cam2_opt, fixed_projection_pc_depth_cam2_opt)
-
-
-        self.grounded_sam_wrapper.show_mask_union(fixed_projection_pc_depth_cam2_opt, mask2)
         # self.depth_anything_wrapper.show_pointclouds_with_frames_and_grid([pc_cam0_opt], [transform1])
 
-        num_inliers, num_inliers_union = self.depth_anything_wrapper.count_inliers(fixed_projection_pc_depth_cam2_opt, mask2)
+        num_inliers, num_inliers_union = count_inliers(fixed_projection_pc_depth_cam2_opt, mask2)
 
         print(f'Optimal alpha: {alpha_opt:.2f}, beta: {beta_opt:.2f}, Inliers: {y_opt}, Inliers ratio: {num_inliers/num_inliers_union:.2f}')
+
+
+        # Show mask and pointcloud
+        if show:
+            show_masks([projection_pc_mask_cam2_opt], title='Optimal Projection')
+            show_masks([fixed_projection_pc_depth_cam2_opt], title='Projection holes fixed')
+            show_masks_union(projection_pc_mask_cam2_opt, fixed_projection_pc_depth_cam2_opt, title="Optimal Projection orig & holes fixed Projection")
+            show_masks_union(fixed_projection_pc_depth_cam2_opt, mask2, title='Optimal Projection with holes fixed vs Mask to fit')
 
         return alpha_opt, beta_opt, pc_cam0_opt, num_inliers, num_inliers_union
 
@@ -278,18 +284,18 @@ class MyClass:
         if rospy.is_shutdown(): exit()
         alpha, beta = x
         # Scale and shift
-        depth_new = self.depth_anything_wrapper.scale_depth_map(depth_masked, scale=alpha, shift=beta)
+        depth_new = scale_depth_map(depth_masked, scale=alpha, shift=beta)
         # Get scaled/shifted pointcloud
-        new_pc1 = self.depth_anything_wrapper.get_pointcloud(depth_new)
+        new_pc1 = convert_depth_map_to_pointcloud(depth_new, camera_parameters)
         # Transform scaled pointcloud into world coordinates
-        new_pc0 = self.depth_anything_wrapper.transform_pointcloud_to_world(new_pc1, transform1)
+        new_pc0 = transform_pointcloud_to_world(new_pc1, transform1)
         # Get projection of scaled pointcloud into camera 2
-        projection_new_pc2_depth, projection_new_pc2_mask = self.depth_anything_wrapper.project_pointcloud(new_pc0, transform2)
+        projection_new_pc2_depth, projection_new_pc2_mask = project_pointcloud_from_world(new_pc0, transform2, camera_parameters)
         # Fill holes
-        fixed_projection_new_pc2_mask = self.grounded_sam_wrapper.fill_mask_holes(projection_new_pc2_mask)
+        fixed_projection_new_pc2_mask = fill_mask_holes(projection_new_pc2_mask)
         # Count the number of inliers between mask 2 and projection of scaled pointcloud
-        num_inliers, inlier_union = self.depth_anything_wrapper.count_inliers(fixed_projection_new_pc2_mask, mask)
-
+        num_inliers, inlier_union = count_inliers(fixed_projection_new_pc2_mask, mask)
+        # print(f'num_inliers: {num_inliers}')
         return -num_inliers
 
 def test1():
@@ -337,6 +343,7 @@ def pipeline():
 
     images = []
     transforms = []
+    transforms_palm = []
     data = [] # depth, mask, depth_masked, pointcloud_masked, pointcloud_masked_world
     target_poses = []
     best_alphas = []
@@ -347,25 +354,25 @@ def pipeline():
     images.append(image_subscriber.get_current_image())
     # Get current transform
     transforms.append(ros_handler.get_current_pose("hand_camera_frame", "map"))
+    transforms_palm.append(ros_handler.get_current_pose("hand_palm_link", "map"))
     # Process image
-    data.append(my_class.process_image(images[-1], transforms[-1], show=False))
+    data.append(my_class.process_image(images[-1], transforms[-1], show=True))
+    usr_input = input("Mask Correct? [y]/n: ")
+    if usr_input == "n": exit()
     # Move arm
-    next_pose = Pose()
-    next_pose.position.z = 0.1
-    next_pose.orientation.y = -0.087
-    next_pose.orientation.w =  0.996
-    next_pose_stamped = ros_handler.convert_pose_to_pose_stamped(next_pose, "hand_palm_link")
+    next_pose_stamped = create_pose(z=0.1, pitch=-0.4, reference_frame="hand_palm_link")
     pose_publisher.publish(next_pose_stamped)
     # input("Press Enter when moves are finished…")
-    rospy.sleep(4)
+    rospy.sleep(5)
 
     while not rospy.is_shutdown(): 
         # Take image
         images.append(image_subscriber.get_current_image())
         # Get current transform
         transforms.append(ros_handler.get_current_pose("hand_camera_frame", "map"))
+        transforms_palm.append(ros_handler.get_current_pose("hand_palm_link", "map"))
         # Process image
-        data.append(my_class.process_image(images[-1], transforms[-1], show=False))
+        data.append(my_class.process_image(images[-1], transforms[-1], show=True))
         # Estimate scale and shift
         best_alpha, best_beta, best_pc_world, num_inliers, num_inliers_union = my_class.estimate_scale_shift_new(data[-2], data[-1], transforms[-2], transforms[-1], show=True)
         best_alphas.append(best_alpha)
@@ -373,25 +380,27 @@ def pipeline():
         best_pcs_world.append(best_pc_world)
         # Get highest Point in pointcloud
         target_point = my_class.get_highest_point(best_pcs_world[-1])
-        tarrget_point_offset = target_point[2] + 0.098 - 0.0015 # Make target Pose hover above actual target pose - tested offset
+        tarrget_point_offset = target_point
+        tarrget_point_offset[2] += 0.098 - 0.020 # Make target Pose hover above actual target pose - tested offset
         # Convert to Pose
         target_poses.append(my_class.get_desired_pose(tarrget_point_offset))
         # Calculate Path
-        target_path = ros_handler.interpolate_poses(transforms[-1], target_poses[-1], num_steps=3)
+        target_path = interpolate_poses(transforms_palm[-1], target_poses[-1], num_steps=3)
         # Move arm a step
         path_publisher.publish(target_path)
-        usr_input = input("Press Enter to accept next Pose, Type y to go to last Pose")
+        usr_input = input("Go to final Pose? y/[n]: ")
         if usr_input == "y":
-            final_mask = my_class.depth_anything_wrapper.project_pointcloud(best_pcs_world[-1], target_poses[-1])
-            target_point_2D = my_class.depth_anything_wrapper.project_point_world(target_point, target_poses[-1])
-            angle = calculate_angle_from_mask_and_point(final_mask, target_point_2D)
-            rotated_target_pose = ros_handler.rotate_pose(target_poses[-1], angle)
+            _, final_mask = project_pointcloud_from_world(best_pcs_world[-1], target_poses[-1], camera_parameters)
+            # target_point_2D = project_point_from_world(target_point, target_poses[-1], camera_parameters)
+            # angle = calculate_angle_from_mask_and_point(final_mask, [640//2, 480//2])
+            angle = calculate_angle_from_pointcloud(best_pcs_world[-1], target_point)
+            rotated_target_pose = rotate_pose_around_z(target_poses[-1], angle)
             pose_publisher.publish(rotated_target_pose)
             break
         else:
             pose_publisher.publish(target_path[1])
         # input("Press Enter when moves are finished…")
-        rospy.sleep(3)
+        rospy.sleep(5)
     # Loop End
 
 

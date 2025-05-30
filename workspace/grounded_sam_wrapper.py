@@ -70,6 +70,11 @@ class GroundedSamWrapper:
         input_boxes = results[0]["boxes"].cpu().numpy()
         OBJECTS = results[0]["labels"]
 
+        if input_boxes.size == 0:
+            H, W = image.shape[:2]
+            rospy.logerr("Object cannot be found.")
+            return np.zeros((1, H, W), dtype=bool)
+
         # prompt SAM 2 image predictor to get the mask for the object
         masks, scores, logits = self.image_predictor.predict(
             point_coords=None,
