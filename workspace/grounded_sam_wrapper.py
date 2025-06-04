@@ -6,7 +6,6 @@ import numpy as np
 from numpy.typing import NDArray
 import supervision as sv
 from PIL import Image
-from skimage.morphology import reconstruction, disk, square, binary_closing
 
 grounded_sam_directory = '/root/grounded_sam2'
 # sys.path.insert(1, grounded_sam_directory)
@@ -361,6 +360,39 @@ class GroundedSamWrapper:
 
         closed = cv2.morphologyEx(m, cv2.MORPH_CLOSE, se)
         return closed
+
+    def reduce_mask(self, mask: np.ndarray, pixel: int) -> np.ndarray:
+        """
+        Shrink (erode) a binary mask by removing `pixel` layers from its border.
+
+        Parameters
+        ----------
+        mask : np.ndarray
+            Input mask (2D), dtype bool or uint8 (0/255).
+        pixel : int
+            Number of pixels to remove from the outer boundary.
+
+        Returns
+        -------
+        np.ndarray
+            The eroded mask, dtype uint8 (0/255).
+        """
+        if not isinstance(pixel, int) or pixel < 1:
+            raise ValueError("pixel must be a positive integer")
+
+        # Normalize to uint8 0/255
+        m = mask.copy()
+        if m.dtype != np.uint8:
+            m = (m.astype(bool).astype(np.uint8) * 255)
+
+        # Create a (2*pixel+1)x(2*pixel+1) rectangular structuring element
+        ksize = 2 * pixel + 1
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (ksize, ksize))
+
+        # Erode to remove `pixel` layers around the mask
+        eroded = cv2.erode(m, kernel, iterations=1)
+
+        return eroded
 
 
 if __name__ == "__main__":

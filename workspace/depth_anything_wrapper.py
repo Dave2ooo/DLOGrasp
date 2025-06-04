@@ -8,7 +8,7 @@ from PIL import Image
 import open3d as o3d
 
 from tf.transformations import quaternion_matrix
-from geometry_msgs.msg import TransformStamped
+from geometry_msgs.msg import TransformStamped, PoseStamped
 
 script_path = os.path.abspath(__file__)
 
@@ -48,9 +48,7 @@ class DepthAnythingWrapper():
             cv2.waitKey(0)
         cv2.destroyAllWindows()
 
-    def get_pointcloud(self,
-            depth: NDArray[np.floating] | Image.Image | NDArray[np.uint8],
-            stride: int | None = None) -> 'o3d.geometry.PointCloud':
+    def get_pointcloud(self, depth: NDArray[np.floating] | Image.Image | NDArray[np.uint8], stride: int | None = None) -> 'o3d.geometry.PointCloud':
         """Convert *depth map* → Open3D :class:`~open3d.geometry.PointCloud`.
 
         Parameters
@@ -159,13 +157,7 @@ class DepthAnythingWrapper():
         pc_new.points = o3d.utility.Vector3dVector(filtered)
         return pc_new
 
-    def show_pointclouds(
-            self,
-            pointclouds: 'o3d.geometry.PointCloud',
-            max_points: int = 200_000,
-            voxel_size: float | None = None,
-            axis_size: float = 0.2,
-            title: str = 'DepthAnything – Point Cloud') -> None:
+    def show_pointclouds(self, pointclouds: 'o3d.geometry.PointCloud', max_points: int = 200_000, voxel_size: float | None = None, axis_size: float = 0.2, title: str = 'DepthAnything – Point Cloud') -> None:
         """Display a point cloud via *Open3D*'s built‑in viewer, showing axes.
 
         Parameters
@@ -592,18 +584,24 @@ class DepthAnythingWrapper():
         """
         if not isinstance(pointcloud, o3d.geometry.PointCloud):
             raise TypeError("pointcloud must be an open3d.geometry.PointCloud")
-        if not isinstance(camera_pose, TransformStamped):
-            raise TypeError("camera_pose must be a geometry_msgs.msg.TransformStamped")
         if not hasattr(self, 'intrinsics'):
             raise AttributeError("DepthAnythingWrapper: self.intrinsics must be set to (fx, fy, cx, cy)")
+        
+        # build camera→world, invert to world→camera
+        if isinstance(camera_pose, PoseStamped):
+            t = camera_pose.pose.position
+            q = camera_pose.pose.orientation
+        elif isinstance(camera_pose, TransformStamped):
+            t = camera_pose.transform.translation
+            q = camera_pose.transform.rotation
+        else:
+            raise TypeError("camera_pose must be a geometry_msgs.msg.TransformStamped")
+        
 
         fx, fy, cx, cy = self.intrinsics
         # force output resolution
         H_out, W_out = 480, 640
 
-        # build camera→world, invert to world→camera
-        t = camera_pose.transform.translation
-        q = camera_pose.transform.rotation
         trans = np.array([t.x, t.y, t.z], np.float64)
         quat  = np.array([q.x, q.y, q.z, q.w], np.float64)
         Tcw = quaternion_matrix(quat)
@@ -747,6 +745,62 @@ class DepthAnythingWrapper():
         u = x * fx / z + cx
         v = y * fy / z + cy
         return [u, v]
+
+    def project_point_world(self, point, camera_pose):
+        """
+        Project a 3D world‐point onto the image plane of a camera.
+
+        Parameters
+        ----------
+        point : sequence of three floats
+            [x, y, z] in world coordinates.
+        camera_pose : TransformStamped or PoseStamped
+            Defines the camera→world transform.
+
+        Returns
+        -------
+        (x, y) : tuple of int
+            The pixel coordinates of the projected point.
+        """
+        if not hasattr(self, 'intrinsics'):
+            raise AttributeError("self.intrinsics must be set to (fx, fy, cx, cy)")
+        fx, fy, cx, cy = self.intrinsics
+
+        # extract translation & rotation
+        if isinstance(camera_pose, TransformStamped):
+            t = camera_pose.transform.translation
+            q = camera_pose.transform.rotation
+        elif isinstance(camera_pose, PoseStamped):
+            t = camera_pose.pose.position
+            q = camera_pose.pose.orientation
+        else:
+            raise TypeError("camera_pose must be TransformStamped or PoseStamped")
+
+        # build 4×4 camera→world, then invert to world→camera
+        trans = np.array([t.x, t.y, t.z], dtype=np.float64)
+        quat  = np.array([q.x, q.y, q.z, q.w], dtype=np.float64)
+        Tcw = quaternion_matrix(quat)
+        Tcw[:3, 3] = trans
+        Twc = np.linalg.inv(Tcw)
+
+        # transform world point into camera frame
+        p_w = np.asarray(point, dtype=np.float64)
+        if p_w.shape != (3,):
+            raise ValueError("point must be a 3‐element sequence")
+        hom_w = np.append(p_w, 1.0)
+        x_cam, y_cam, z_cam = (Twc @ hom_w)[:3]
+
+        if z_cam <= 0:
+            raise ValueError("Point is behind the camera (z<=0)")
+
+        # project to image plane
+        u = x_cam * fx / z_cam + cx
+        v = y_cam * fy / z_cam + cy
+
+        # return pixel indices
+        x_pix = int(round(u))
+        y_pix = int(round(v))
+        return x_pix, y_pix
 
     def project_point_from_world(self, point, camera_pose: TransformStamped):
         """
