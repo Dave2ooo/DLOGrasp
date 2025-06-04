@@ -18,11 +18,13 @@ class ImageSubscriber:
         self.msg = msg            # just store it; no conversion here
 
     def get_current_image(self, timeout=2.0):
-        start = rospy.Time.now()
+        print("Waiting for image...")
+        self.msg = None
+        # start = rospy.Time.now()
         while self.msg is None and not rospy.is_shutdown():
-            if (rospy.Time.now() - start).to_sec() > timeout:
-                raise RuntimeError("Timed out waiting for image")
-            rospy.sleep(0.05)
+            # if (rospy.Time.now() - start).to_sec() > timeout:
+            #     raise RuntimeError("Timed out waiting for image")
+            rospy.sleep(0.1)
 
         # convert the first image we got
         try:

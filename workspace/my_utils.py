@@ -592,6 +592,7 @@ def project_point(point, camera_parameters):
     v = y * fy / z + cy
     return [u, v]
 
+# project_point_world
 def project_point_from_world(point, camera_pose: TransformStamped, camera_parameters):
     """
     Project a single 3D point in world coordinates onto the image plane
@@ -609,12 +610,16 @@ def project_point_from_world(point, camera_pose: TransformStamped, camera_parame
     (u, v) : tuple of float
         The projected pixel coordinates.
     """
-    if not isinstance(camera_pose, TransformStamped):
+    # build camera→world, invert to world→camera
+    if isinstance(camera_pose, PoseStamped):
+        t = camera_pose.pose.position
+        q = camera_pose.pose.orientation
+    elif isinstance(camera_pose, TransformStamped):
+        t = camera_pose.transform.translation
+        q = camera_pose.transform.rotation
+    else:
         raise TypeError("camera_pose must be a geometry_msgs.msg.TransformStamped")
 
-    # world→camera: invert camera→world
-    t = camera_pose.transform.translation
-    q = camera_pose.transform.rotation
     trans = np.array([t.x, t.y, t.z], dtype=np.float64)
     quat  = np.array([q.x, q.y, q.z, q.w], dtype=np.float64)
     T_cam2world = quaternion_matrix(quat)
@@ -628,8 +633,10 @@ def project_point_from_world(point, camera_pose: TransformStamped, camera_parame
     hom = np.append(p_world, 1.0)
     x_cam, y_cam, z_cam = (T_world2cam @ hom)[:3]
 
+    print(f'x_cam: {x_cam}, y_cam: {y_cam}')
+
     if z_cam <= 0:
-        raise ValueError("Point is behind the camera (z <= 0)")
+        rospy.logwarn("Point is behind the camera (z <= 0)")
 
     # project using intrinsics
     fx, fy, cx, cy = camera_parameters
@@ -793,7 +800,7 @@ def reduce_mask(mask: np.ndarray, pixel: int) -> np.ndarray:
 # ----------------------------------------------------------------------------
 
 #region Calculations
-def calculate_angle_from_mask_and_point(mask, point, area=20):
+def calculate_angle_from_mask_and_point(mask, point, area=40):
     """
     Calculate angle from mask and point.
 
@@ -814,15 +821,122 @@ def calculate_angle_from_mask_and_point(mask, point, area=20):
     px, py = point
     px, py = int(px), int(py)
 
-    print(f'point: {point}')
-    print(f'px: {px}, py: {py}')
+    print(f'point: {point}, px: {px}, py: {py}')
     patch = mask[py-area:py+area+1, px-area:px+area+1]
+    show_masks([mask], title="Pointcloud projected to horizontal plane")
+    show_masks([patch], title="Patch")
     points = cv2.findNonZero(patch)    # get foreground points in the patch
     # fit a line (least squares) through these points
     [vx, vy, x0, y0] = cv2.fitLine(points, cv2.DIST_L2, 0, 0.01, 0.01)
     angle = np.arctan2(vy, vx)[0]
-    print(f'Angle: {angle}')
+    print(f'Angle: {angle/np.pi*180:.0f}°')
     return(angle)
+
+def calculate_angle_from_pointcloud(pointcloud: o3d.geometry.PointCloud,
+                                    point3d,
+                                    radius: float = 0.05) -> float:
+    """
+    Compute the orientation of the local structure in a point cloud patch,
+    as viewed from above (projected onto the XY plane), and visualize it.
+
+    Parameters
+    ----------
+    pointcloud : o3d.geometry.PointCloud
+        The full 3D point cloud.
+    point3d : sequence of three floats
+        The [x, y, z] reference point in world coordinates.
+    radius : float
+        Horizontal search radius around `point3d`.
+
+    Returns
+    -------
+    float
+        The angle (in radians) of the best‐fitting line through the patch,
+        measured CCW from the X axis in the XY‐plane.
+    """
+
+    # Validate inputs
+    if not isinstance(pointcloud, o3d.geometry.PointCloud):
+        raise TypeError("pointcloud must be an Open3D PointCloud")
+    p_ref = np.asarray(point3d, dtype=np.float64)
+    if p_ref.shape != (3,):
+        raise ValueError("point3d must be a sequence of three floats")
+
+    # Extract points and select neighbors
+    pts = np.asarray(pointcloud.points, dtype=np.float64)
+    if pts.size == 0:
+        raise ValueError("Point cloud is empty")
+    dx = pts[:, 0] - p_ref[0]
+    dy = pts[:, 1] - p_ref[1]
+    mask = (dx**2 + dy**2) <= radius**2
+    neighbors = pts[mask]
+    if neighbors.shape[0] < 2:
+        raise ValueError("Not enough neighbors within radius")
+
+    # Project onto XY plane and center on mean
+    xy = neighbors[:, :2]
+    mean_xy = xy.mean(axis=0)
+    centered = xy - mean_xy
+
+    # PCA to get principal direction
+    _, _, vt = np.linalg.svd(centered, full_matrices=False)
+    direction = vt[0]  # unit vector [ux, uy]
+
+    # Compute angle CCW from X axis
+    angle = float(np.arctan(direction[1] / direction[0]))
+    print(f'Angle: {angle/np.pi*180}')
+
+    # --- Visualization with OpenCV ---
+    # Map the patch to a square image
+    canvas_size = 400
+    canvas = np.full((canvas_size, canvas_size, 3), 255, dtype=np.uint8)
+    scale = (canvas_size * 0.4) / radius  # leave 10% border
+    origin = canvas_size // 2
+
+    # Draw neighbor points
+    for x, y in centered:
+        px = int(origin + x * scale)
+        py = int(origin - y * scale)
+        if 0 <= px < canvas_size and 0 <= py < canvas_size:
+            cv2.circle(canvas, (px, py), 2, (0, 0, 255), -1)
+
+    # Draw principal axis line
+    length = int(radius * scale)
+    ux, uy = direction
+    x1 = int(origin - ux * length)
+    y1 = int(origin + uy * length)
+    x2 = int(origin + ux * length)
+    y2 = int(origin - uy * length)
+    cv2.line(canvas, (x1, y1), (x2, y2), (255, 0, 0), 2)
+
+    # Annotate angle
+    deg = angle * 180.0 / np.pi
+    cv2.putText(canvas,
+                f"Angle: {deg:.1f} deg",
+                (10, canvas_size - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 0, 0),
+                2,
+                cv2.LINE_AA)
+
+    cv2.imshow("XY Patch and Principal Direction", canvas)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+    # --- end visualization ---
+
+    return -angle
+
+
+# Example usage:
+if __name__ == "__main__":
+    # Load a sample point cloud
+    pc = o3d.io.read_point_cloud("sample.pcd")
+    ref_pt = [0.0, 0.0, 0.0]
+    angle = calculate_angle_from_pointcloud(None, pc, ref_pt, radius=0.1, visualize=True)
+    print(f"Computed angle: {np.degrees(angle):.2f}°")
+
+
 
 def count_inliers(depth1: np.ndarray,
                     depth2: np.ndarray) -> int:
@@ -933,11 +1047,13 @@ def show_masks(masks, title="Masks", wait=True) -> None:
 
     # Display the combined masks
     cv2.namedWindow(title, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(title, 700, 550)
     cv2.imshow(title, canvas)
     if wait:
         cv2.waitKey(0)
     cv2.destroyAllWindows()
 
+# show_mask_union
 def show_masks_union(mask1: np.ndarray, mask2: np.ndarray, title="Masks Union") -> None:
     """
     Display two masks overlayed in one window, coloring:
@@ -983,6 +1099,7 @@ def show_masks_union(mask1: np.ndarray, mask2: np.ndarray, title="Masks Union") 
 
     # show
     cv2.namedWindow(title, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(title, 700, 550)
     cv2.imshow(title, canvas)
     cv2.waitKey(0)
     cv2.destroyWindow(title)
@@ -1017,6 +1134,7 @@ def show_mask_and_points(mask: np.ndarray, points, title = "Mask with Points") -
 
     # Show result
     cv2.namedWindow(title, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(title, 700, 550)
     cv2.imshow(title, canvas)
     cv2.waitKey(0)
     cv2.destroyAllWindows()
@@ -1043,12 +1161,23 @@ def show_pointclouds(pointclouds: 'o3d.geometry.PointCloud', max_points: int = 2
     # Origin coordinate frame ---------------------------------------------
     geometries = [o3d.geometry.TriangleMesh.create_coordinate_frame(size=axis_size, origin=[0, 0, 0])]
 
-    for pc in pointclouds:
-        if voxel_size is not None and voxel_size > 0:
-            pc = pc.voxel_down_sample(voxel_size)
-        elif len(pc.points) > max_points:
-            pc = pc.random_down_sample(max_points / len(pc.points))
-        geometries.append(pc)
+    # for pc in pointclouds:
+    #     if voxel_size is not None and voxel_size > 0:
+    #         pc = pc.voxel_down_sample(voxel_size)
+    #     elif len(pc.points) > max_points:
+    #         pc = pc.random_down_sample(max_points / len(pc.points))
+    #     geometries.append(pc)
+
+    # colored pointclouds
+    palette = [[1,0,0],[0,1,0],[0,0,1],[1,1,0],[1,0,1],[0,1,1]]
+    for idx, pc in enumerate(pointclouds):
+        if not isinstance(pc, o3d.geometry.PointCloud):
+            raise TypeError("Expected PointCloud")
+        pc2 = copy.deepcopy(pc)
+        color = palette[idx % len(palette)]
+        pc2.colors = o3d.utility.Vector3dVector(
+            np.tile(color, (len(pc2.points),1)))
+        geometries.append(pc2)
 
     # Viewer ---------------------------------------------------------------
     o3d.visualization.draw_geometries(
@@ -1228,9 +1357,6 @@ def interactive_scale_shift(depth1: np.ndarray,
     (scale, shift, inliers) : Tuple[float, float, int]
         The final slider values and number of inliers when the window is closed.
     """
-    import cv2
-    import numpy as np
-
     H, W = depth1.shape
     window = "Scale/Shift Tuner"
     cv2.namedWindow(window, cv2.WINDOW_NORMAL)
@@ -1427,6 +1553,46 @@ def convert_trans_and_rot_to_stamped_transform(translation, rotation):
     transform_stamped.transform.rotation.z = rotation[2]
     transform_stamped.transform.rotation.w = rotation[3]
     return transform_stamped
+
+def create_pose(x: float=0, y: float=0, z: float=0, roll: float=0, pitch: float=0, yaw: float=0, reference_frame: str=None) -> PoseStamped:
+    """
+    Create a PoseStamped message from XYZ and RPY in a given reference frame.
+
+    Parameters
+    ----------
+    x, y, z : float
+        Position coordinates.
+    roll, pitch, yaw : float
+        Orientation in radians (ZYX convention).
+    reference_frame : str
+        The frame_id for the header.
+
+    Returns
+    -------
+    geometry_msgs.msg.PoseStamped
+        The stamped pose.
+    """
+    if reference_frame is None:
+        raise TypeError("reference_frame cannot be None")
+
+    ps = PoseStamped()
+    ps.header.stamp = rospy.Time.now()
+    ps.header.frame_id = reference_frame
+
+    # Set position
+    ps.pose.position.x = float(x)
+    ps.pose.position.y = float(y)
+    ps.pose.position.z = float(z)
+
+    # Convert RPY to quaternion
+    q = quaternion_from_euler(roll, pitch, yaw)  # returns [x, y, z, w]
+    ps.pose.orientation.x = float(q[0])
+    ps.pose.orientation.y = float(q[1])
+    ps.pose.orientation.z = float(q[2])
+    ps.pose.orientation.w = float(q[3])
+
+    return ps
+
 
 #endregion
 
