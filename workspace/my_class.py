@@ -403,6 +403,74 @@ def pipeline():
         rospy.sleep(5)
     # Loop End
 
+def pipeline2():
+    my_class = MyClass()
+    ros_handler = ROSHandler()
+    image_subscriber = ImageSubscriber('/hsrb/hand_camera/image_rect_color')
+    pose_publisher = PosePublisher("/next_pose")
+    path_publisher = PathPublisher("/my_path")
+
+    images = []
+    transforms = []
+    transforms_palm = []
+    data = [] # depth, mask, depth_masked, pointcloud_masked, pointcloud_masked_world
+    target_poses = []
+    best_alphas = []
+    best_betas = []
+    best_pcs_world = []
+
+    # Take image
+    images.append(image_subscriber.get_current_image())
+    # Get current transform
+    transforms.append(ros_handler.get_current_pose("hand_camera_frame", "map"))
+    transforms_palm.append(ros_handler.get_current_pose("hand_palm_link", "map"))
+    # Process image
+    data.append(my_class.process_image(images[-1], transforms[-1], show=True))
+    usr_input = input("Mask Correct? [y]/n: ")
+    if usr_input == "n": exit()
+    # Move arm
+    next_pose_stamped = create_pose(z=0.1, pitch=-0.4, reference_frame="hand_palm_link")
+    pose_publisher.publish(next_pose_stamped)
+    # input("Press Enter when moves are finished…")
+    rospy.sleep(5)
+
+    while not rospy.is_shutdown(): 
+        # Take image
+        images.append(image_subscriber.get_current_image())
+        # Get current transform
+        transforms.append(ros_handler.get_current_pose("hand_camera_frame", "map"))
+        transforms_palm.append(ros_handler.get_current_pose("hand_palm_link", "map"))
+        # Process image
+        data.append(my_class.process_image(images[-1], transforms[-1], show=True))
+        # Estimate scale and shift
+        best_alpha, best_beta, best_pc_world, num_inliers, num_inliers_union = my_class.estimate_scale_shift_new(data[-2], data[-1], transforms[-2], transforms[-1], show=True)
+        best_alphas.append(best_alpha)
+        best_betas.append(best_beta)
+        best_pcs_world.append(best_pc_world)
+        # Get highest Point in pointcloud
+        target_point = my_class.get_highest_point(best_pcs_world[-1])
+        tarrget_point_offset = target_point
+        tarrget_point_offset[2] += 0.098 - 0.020 # Make target Pose hover above actual target pose - tested offset
+        # Convert to Pose
+        target_poses.append(my_class.get_desired_pose(tarrget_point_offset))
+        # Calculate Path
+        target_path = interpolate_poses(transforms_palm[-1], target_poses[-1], num_steps=3)
+        # Move arm a step
+        path_publisher.publish(target_path)
+        usr_input = input("Go to final Pose? y/[n]: ")
+        if usr_input == "y":
+            _, final_mask = project_pointcloud_from_world(best_pcs_world[-1], target_poses[-1], camera_parameters)
+            # target_point_2D = project_point_from_world(target_point, target_poses[-1], camera_parameters)
+            # angle = calculate_angle_from_mask_and_point(final_mask, [640//2, 480//2])
+            angle = calculate_angle_from_pointcloud(best_pcs_world[-1], target_point)
+            rotated_target_pose = rotate_pose_around_z(target_poses[-1], angle)
+            pose_publisher.publish(rotated_target_pose)
+            break
+        else:
+            pose_publisher.publish(target_path[1])
+        # input("Press Enter when moves are finished…")
+        rospy.sleep(5)
+    # Loop End
 
 
 if __name__ == "__main__":
