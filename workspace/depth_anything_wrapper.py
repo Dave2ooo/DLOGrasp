@@ -6,6 +6,7 @@ import numpy as np
 from numpy.typing import NDArray
 from PIL import Image
 import open3d as o3d
+from my_utils import *
 
 from tf.transformations import quaternion_matrix
 from geometry_msgs.msg import TransformStamped, PoseStamped
@@ -999,8 +1000,8 @@ class DepthAnythingWrapper():
 
         Returns
         -------
-        (scale, shift, inliers) : Tuple[float, float, int]
-            The final slider values and number of inliers when the window is closed.
+        (scale, shift, score) : Tuple[float, float, int]
+            The final slider values and number of score when the window is closed.
         """
         import cv2
         import numpy as np
@@ -1019,7 +1020,7 @@ class DepthAnythingWrapper():
         t_steps = 200
         shift_res = (tmax - tmin) / t_steps
 
-        result = {'scale': None, 'shift': None, 'inliers': None}
+        result = {'scale': None, 'shift': None, 'score': None}
 
         def update(_=0):
             v_s = cv2.getTrackbarPos("scale", window)
@@ -1041,18 +1042,18 @@ class DepthAnythingWrapper():
             overlay[m2 > 0]               = (0,   0, 255)
             overlay[rm > 0]               = (0, 255,   0)
             overlay[(m2 > 0) & (rm > 0)]  = (0, 255, 255)
-            # 5) count inliers
-            inliers = self.count_inliers(reproj_mask, mask2)
+            # 5) count score
+            score = score_mask_match(reproj_mask, mask2)
 
-            # 6) annotate scale, shift, inliers
+            # 6) annotate scale, shift, score
             cv2.putText(overlay, f"Scale: {scale:.3f}", (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
             cv2.putText(overlay, f"Shift: {shift:.3f}", (10, 60),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
-            cv2.putText(overlay, f"Inliers: {inliers}", (10, 90),
+            cv2.putText(overlay, f"Score: {score}", (10, 90),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
 
-            result['scale'], result['shift'], result['inliers'] = scale, shift, inliers
+            result['scale'], result['shift'], result['score'] = scale, shift, score
             cv2.imshow(window, overlay)
 
         # create trackbars
@@ -1068,7 +1069,7 @@ class DepthAnythingWrapper():
                 break
 
         cv2.destroyWindow(window)
-        return result['scale'], result['shift'], result['inliers']
+        return result['scale'], result['shift'], result['score']
 
 
 if __name__ == '__main__':

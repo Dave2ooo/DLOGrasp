@@ -1,6 +1,7 @@
 from depth_anything_wrapper import DepthAnythingWrapper
 from grounded_sam_wrapper import GroundedSamWrapper
 from ROS_handler import ROSHandler
+from my_class import MyClass
 from my_utils import *
 from geometry_msgs.msg import TransformStamped
 from tf.transformations import quaternion_matrix, quaternion_from_matrix
@@ -1253,6 +1254,85 @@ def calculate_angle_test():
     # calculate_angle_from_mask_and_point(mask, point)
     # grounded_sam_wrapper.show_mask_and_points(mask, [point])
 
+def pipeline_offline_test(offline_transforms):
+    my_class = MyClass()
+
+    image = cv2.imread(f'/root/workspace/images/moves/cable{0}.jpg')
+
+    images = []
+    transforms = []
+    transforms_palm = []
+    data = [] # depth, mask, depth_masked, pointcloud_masked, pointcloud_masked_world
+    target_poses = []
+    best_alphas = []
+    best_betas = []
+    best_pcs_world = []
+
+    # Take image
+    images.append(cv2.imread(f'/root/workspace/images/moves/cable{0}.jpg'))
+    # Get current transform
+    transforms.append(offline_transforms[0])
+    # Process image
+    data.append(my_class.process_image(images[-1], transforms[-1], show=True))
+    usr_input = input("Mask Correct? [y]/n: ")
+    if usr_input == "n": exit()
+
+    index = 0
+    while not rospy.is_shutdown(): 
+        index += 1
+        # Take image
+        images.append(cv2.imread(f'/root/workspace/images/moves/cable{index}.jpg'))
+        # Get current transform
+        transforms.append(offline_transforms[index])
+        # Process image
+        data.append(my_class.process_image(images[-1], transforms[-1], show=True))
+        # Estimate scale and shift
+        best_alpha, best_beta, best_pc_world, score = my_class.estimate_scale_shift_new_distance(data[-2], data[-1], transforms[-2], transforms[-1], show=True)
+        best_alphas.append(best_alpha)
+        best_betas.append(best_beta)
+        best_pcs_world.append(best_pc_world)
+
+    # Loop End
+
+def pipeline2_offline_test(offline_transforms):
+    my_class = MyClass()
+
+    image = cv2.imread(f'/root/workspace/images/moves/cable{0}.jpg')
+
+    images = []
+    transforms = []
+    transforms_palm = []
+    data = [] # depth, mask, depth_masked, pointcloud_masked, pointcloud_masked_world
+    target_poses = []
+    best_alphas = []
+    best_betas = []
+    best_pcs_world = []
+
+    # Take image
+    images.append(cv2.imread(f'/root/workspace/images/moves/cable{0}.jpg'))
+    # Get current transform
+    transforms.append(offline_transforms[0])
+    # Process image
+    data.append(my_class.process_image(images[-1], transforms[-1], show=True))
+    usr_input = input("Mask Correct? [y]/n: ")
+    if usr_input == "n": exit()
+
+    index = 0
+    while not rospy.is_shutdown(): 
+        index += 1
+        # Take image
+        images.append(cv2.imread(f'/root/workspace/images/moves/cable{index}.jpg'))
+        # Get current transform
+        transforms.append(offline_transforms[index])
+        # Process image
+        data.append(my_class.process_image(images[-1], transforms[-1], show=True))
+        # Estimate scale and shift
+        best_alpha, best_beta, best_pc_world, num_inliers = my_class.estimate_scale_shift_from_multiple_cameras_distance(data, transforms, show=True)
+        best_alphas.append(best_alpha)
+        best_betas.append(best_beta)
+        best_pcs_world.append(best_pc_world)
+
+    # Loop End
 
 
 
@@ -1278,7 +1358,9 @@ if __name__ == '__main__':
     # test3()
     # differential_evolution()
     # differential_evolution_single()
-    calculate_angle_test()
+    # calculate_angle_test()
+    # pipeline_offline_test(offline_transforms=transforms)
+    pipeline2_offline_test(offline_transforms=transforms)
 
     cv2.waitKey(0)
     cv2.destroyAllWindows()

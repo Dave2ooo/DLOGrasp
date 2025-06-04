@@ -927,17 +927,6 @@ def calculate_angle_from_pointcloud(pointcloud: o3d.geometry.PointCloud,
 
     return -angle
 
-
-# Example usage:
-if __name__ == "__main__":
-    # Load a sample point cloud
-    pc = o3d.io.read_point_cloud("sample.pcd")
-    ref_pt = [0.0, 0.0, 0.0]
-    angle = calculate_angle_from_pointcloud(None, pc, ref_pt, radius=0.1, visualize=True)
-    print(f"Computed angle: {np.degrees(angle):.2f}°")
-
-
-
 def count_inliers(depth1: np.ndarray,
                     depth2: np.ndarray) -> int:
     """
@@ -974,6 +963,58 @@ def count_inliers(depth1: np.ndarray,
     union_mask  = m1 | m2
 
     return int(np.count_nonzero(inlier_mask)), int(np.count_nonzero(union_mask))
+
+import numpy as np
+import cv2
+
+def score_mask_match(P, M, beta: float = 0.05, thresh: float = 0.5) -> float:
+    """
+    P : projected mask, arbitrary numeric or bool array
+    M : reference mask, same shape as P
+    thresh : values > thresh are treated as 1
+    """
+
+    # ---- sanity checks ------------------------------------------------------
+    if not isinstance(P, np.ndarray) or not isinstance(M, np.ndarray):
+        raise TypeError("P and M must be numpy.ndarray")
+
+    if P.shape != M.shape:
+        raise ValueError(f"shape mismatch {P.shape} vs {M.shape}")
+
+    if P.ndim != 2:
+        raise ValueError("masks must be 2-D (H×W)")
+
+    # ---- force binary bool --------------------------------------------------
+    if P.dtype != np.bool_:
+        P = P > thresh
+    if M.dtype != np.bool_:
+        M = M > thresh
+
+    # ---- overlap (IoU) ------------------------------------------------------
+    inter = np.logical_and(P, M).sum(dtype=np.float32)
+    union = np.logical_or (P, M).sum(dtype=np.float32)
+    iou   = inter / (union + 1e-8)
+
+    # ---- distance term (ASSD) ----------------------------------------------
+    # OpenCV wants uint8 with background=1, object=0
+    dt_M = cv2.distanceTransform(np.logical_not(M).astype(np.uint8),
+                                 cv2.DIST_L2, 3)
+    dt_P = cv2.distanceTransform(np.logical_not(P).astype(np.uint8),
+                                 cv2.DIST_L2, 3)
+
+    fp = np.logical_and(P, ~M)  # false positives
+    fn = np.logical_and(M, ~P)  # false negatives
+
+    assd = 0.0
+    if fp.any():
+        assd += dt_M[fp].mean()
+    if fn.any():
+        assd += dt_P[fn].mean()
+    assd *= 0.5
+
+    return np.exp(-beta * assd)
+
+    return float(iou * np.exp(-beta * assd))
 
 #endregion
 

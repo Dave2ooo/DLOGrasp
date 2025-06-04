@@ -62,6 +62,32 @@ class MyClass:
         return depth, mask_reduced, depth_masked_reduced, pointcloud_masked_reduced, pointcloud_masked_world_reduced
     
     def estimate_scale_shift(self, data1, data2, transform1, transform2, show=False):
+        """
+        Estimates the optimal scale and shift values of data1 to fit data2.
+        
+        Parameters
+        ----------
+        data1 : tuple
+            A tuple containing the first dataset, including the mask and depth map.
+        data2 : tuple
+            A tuple containing the second dataset, including the mask.
+        transform1 : TransformStamped
+            The transformation from the first camera to the world frame.
+        transform2 : TransformStamped
+            The transformation from the second camera to the world frame.
+        show : bool, optional
+            If True, display visualizations of the masks and point clouds.
+        
+        Returns
+        -------
+        best_alpha : float
+            The estimated optimal scale factor.
+        best_beta : float
+            The estimated optimal shift value.
+        best_pointcloud_world : np.ndarray
+            The transformed point cloud in world coordinates after applying the scale and shift.
+        """
+
         print('Estimating scale and shift...')
         _, mask1, depth_masked1, _, pointcloud_masked_world1 = data1
         _, mask2, _, _, _ = data2
@@ -190,6 +216,31 @@ class MyClass:
         return best_alpha, best_beta, best_pointcloud_world
 
     def estimate_scale_shift_new(self, data1, data2, transform1, transform2, show=False):
+        """
+        Estimates the optimal scale and shift values of data1 to fit data2.
+        
+        Parameters
+        ----------
+        data1 : tuple
+            A tuple containing the first dataset, including the mask and depth map.
+        data2 : tuple
+            A tuple containing the second dataset, including the mask.
+        transform1 : TransformStamped
+            The transformation from the first camera to the world frame.
+        transform2 : TransformStamped
+            The transformation from the second camera to the world frame.
+        show : bool, optional
+            If True, display visualizations of the masks and point clouds.
+        
+        Returns
+        -------
+        best_alpha : float
+            The estimated optimal scale factor.
+        best_beta : float
+            The estimated optimal shift value.
+        best_pointcloud_world : np.ndarray
+            The transformed point cloud in world coordinates after applying the scale and shift.
+        """
         print('Estimating scale and shift...')
         _, mask1, depth_masked1, _, pointcloud_masked_world1 = data1
         _, mask2, _, _, _ = data2
@@ -239,6 +290,249 @@ class MyClass:
 
         return alpha_opt, beta_opt, pc_cam0_opt, num_inliers, num_inliers_union
 
+    def estimate_scale_shift_from_multiple_cameras(self, datas, transforms, show=False):
+        """
+        Estimates the optimal scale and shift values of data1 to fit data2.
+        
+        Parameters
+        ----------
+        data1 : tuple
+            A tuple containing the first dataset, including the mask and depth map.
+        data2 : tuple
+            A tuple containing the second dataset, including the mask.
+        transform1 : TransformStamped
+            The transformation from the first camera to the world frame.
+        transform2 : TransformStamped
+            The transformation from the second camera to the world frame.
+        show : bool, optional
+            If True, display visualizations of the masks and point clouds.
+        
+        Returns
+        -------
+        best_alpha : float
+            The estimated optimal scale factor.
+        best_beta : float
+            The estimated optimal shift value.
+        best_pointcloud_world : np.ndarray
+            The transformed point cloud in world coordinates after applying the scale and shift.
+        """
+        print('Estimating scale and shift...')
+        # _, mask1, depth_masked1, _, pointcloud_masked_world1 = data1
+        _, _, depth_masked_last, _, _ = datas[-1]
+
+        bounds = [(0.05, 0.4), (-0.3, 0.3)] # [(alpha_min, alpha_max), (beta_min,  beta_max)]
+
+        start = time.perf_counter()
+        result = opt.differential_evolution(
+            self.inliers_function_multiple_cameras,
+            bounds,
+            args=(datas, transforms),
+            strategy='best1bin',
+            maxiter=20,
+            popsize=15,
+            tol=5e-3,
+            disp=False
+        )
+        end = time.perf_counter()
+        print(f"Optimization took {end - start:.2f} seconds")
+
+        alpha_opt, beta_opt = result.x
+        # start = time.perf_counter()
+        y_opt = -self.inliers_function_multiple_cameras([alpha_opt, beta_opt], datas, transforms)
+        # end = time.perf_counter()
+        # print(f"One function call took {end - start:.4f} seconds")
+
+        # num_inliers_list = []
+        # num_inliers_union_list = []
+        projections_list = []
+        num_inliers = 0
+        num_inliers_union = 0
+
+        depth_opt = scale_depth_map(depth_masked_last, scale=alpha_opt, shift=beta_opt)
+        pc_cam_last_opt = convert_depth_map_to_pointcloud(depth_opt, camera_parameters)
+        pc_cam0_opt = transform_pointcloud_to_world(pc_cam_last_opt, transforms[-1])
+        for data, transform in zip(datas[:-1], transforms[:-1]):
+            _, mask, _, _, _ = data
+            # Get projection of scaled pointcloud into camera 2
+            _, projection_pc_cam_x_opt_mask = project_pointcloud_from_world(pc_cam0_opt, transform, camera_parameters)
+            # Fill holes
+            fixed_projection_npc_cam0_opt_mask = fill_mask_holes(projection_pc_cam_x_opt_mask)
+            num_inliers_temp, num_inliers_union_temp = count_inliers(fixed_projection_npc_cam0_opt_mask, mask)
+
+            print(f'Optimal alpha: {alpha_opt:.2f}, beta: {beta_opt:.2f}, Inliers: {y_opt}, Inliers ratio: {num_inliers_temp/num_inliers_union_temp:.2f}')
+            # num_inliers_list.append(num_inliers)
+            # num_inliers_union_list.append(num_inliers_union)
+            projections_list.append(fixed_projection_npc_cam0_opt_mask)
+            num_inliers += num_inliers_temp
+            num_inliers_union += num_inliers_union_temp
+
+        # Show mask and pointcloud
+        if show:
+            for i, (data, projection) in enumerate(zip(datas[:-1], projections_list)):
+                _, mask, _, _, _ = data
+                show_masks_union(projection, mask, title=f'Optimal Projection with holes fixed vs Mask {i} to fit')
+
+        return alpha_opt, beta_opt, pc_cam0_opt, num_inliers, num_inliers_union
+
+    def estimate_scale_shift_new_distance(self, data1, data2, transform1, transform2, show=False):
+        """
+        Estimates the optimal scale and shift values of data1 to fit data2.
+        
+        Parameters
+        ----------
+        data1 : tuple
+            A tuple containing the first dataset, including the mask and depth map.
+        data2 : tuple
+            A tuple containing the second dataset, including the mask.
+        transform1 : TransformStamped
+            The transformation from the first camera to the world frame.
+        transform2 : TransformStamped
+            The transformation from the second camera to the world frame.
+        show : bool, optional
+            If True, display visualizations of the masks and point clouds.
+        
+        Returns
+        -------
+        best_alpha : float
+            The estimated optimal scale factor.
+        best_beta : float
+            The estimated optimal shift value.
+        best_pointcloud_world : np.ndarray
+            The transformed point cloud in world coordinates after applying the scale and shift.
+        """
+        print('Estimating scale and shift...')
+        _, mask1, depth_masked1, _, pointcloud_masked_world1 = data1
+        _, mask2, _, _, _ = data2
+
+        bounds = [(0.05, 0.4), (-0.3, 0.3)] # [(alpha_min, alpha_max), (beta_min,  beta_max)]
+
+        start = time.perf_counter()
+        result = opt.differential_evolution(
+            self.score_function,
+            bounds,
+            args=(depth_masked1, transform1, mask2, transform2),
+            strategy='best1bin',
+            maxiter=20,
+            popsize=15,
+            tol=1e-2,
+            disp=False
+        )
+        end = time.perf_counter()
+        print(f"Optimization took {end - start:.2f} seconds")
+
+        alpha_opt, beta_opt = result.x
+        # start = time.perf_counter()
+        y_opt = -self.score_function([alpha_opt, beta_opt], depth_masked1, transform1, mask2, transform2)
+        # end = time.perf_counter()
+        # print(f"One function call took {end - start:.4f} seconds")
+
+        depth_opt = scale_depth_map(depth_masked1, scale=alpha_opt, shift=beta_opt)
+        pc_cam1_opt = convert_depth_map_to_pointcloud(depth_opt, camera_parameters)
+        pc_cam0_opt = transform_pointcloud_to_world(pc_cam1_opt, transform1)
+        projection_pc_depth_cam2_opt, projection_pc_mask_cam2_opt = project_pointcloud_from_world(pc_cam0_opt, transform2, camera_parameters)
+
+        fixed_projection_pc_depth_cam2_opt = fill_mask_holes(projection_pc_mask_cam2_opt)
+
+        # self.depth_anything_wrapper.show_pointclouds_with_frames_and_grid([pc_cam0_opt], [transform1])
+
+        score = score_mask_match(fixed_projection_pc_depth_cam2_opt, mask2)
+
+        print(f'Optimal alpha: {alpha_opt:.2f}, beta: {beta_opt:.2f}, Score: {y_opt}')
+
+
+        # Show mask and pointcloud
+        if show:
+            show_masks([projection_pc_mask_cam2_opt], title='Optimal Projection')
+            show_masks([fixed_projection_pc_depth_cam2_opt], title='Projection holes fixed')
+            show_masks_union(projection_pc_mask_cam2_opt, fixed_projection_pc_depth_cam2_opt, title="Optimal Projection orig & holes fixed Projection")
+            show_masks_union(fixed_projection_pc_depth_cam2_opt, mask2, title='Optimal Projection with holes fixed vs Mask to fit')
+
+        return alpha_opt, beta_opt, pc_cam0_opt, score
+
+    def estimate_scale_shift_from_multiple_cameras_distance(self, datas, transforms, show=False):
+        """
+        Estimates the optimal scale and shift values of data1 to fit data2.
+        
+        Parameters
+        ----------
+        data1 : tuple
+            A tuple containing the first dataset, including the mask and depth map.
+        data2 : tuple
+            A tuple containing the second dataset, including the mask.
+        transform1 : TransformStamped
+            The transformation from the first camera to the world frame.
+        transform2 : TransformStamped
+            The transformation from the second camera to the world frame.
+        show : bool, optional
+            If True, display visualizations of the masks and point clouds.
+        
+        Returns
+        -------
+        best_alpha : float
+            The estimated optimal scale factor.
+        best_beta : float
+            The estimated optimal shift value.
+        best_pointcloud_world : np.ndarray
+            The transformed point cloud in world coordinates after applying the scale and shift.
+        """
+        print('Estimating scale and shift...')
+        # _, mask1, depth_masked1, _, pointcloud_masked_world1 = data1
+        _, _, depth_masked_last, _, _ = datas[-1]
+
+        bounds = [(0.05, 0.4), (-0.3, 0.3)] # [(alpha_min, alpha_max), (beta_min,  beta_max)]
+
+        start = time.perf_counter()
+        result = opt.differential_evolution(
+            self.score_function_multiple_cameras,
+            bounds,
+            args=(datas, transforms),
+            strategy='best1bin',
+            maxiter=20,
+            popsize=15,
+            tol=5e-3,
+            disp=False
+        )
+        end = time.perf_counter()
+        print(f"Optimization took {end - start:.2f} seconds")
+
+        alpha_opt, beta_opt = result.x
+        # start = time.perf_counter()
+        y_opt = -self.score_function_multiple_cameras([alpha_opt, beta_opt], datas, transforms)
+        # end = time.perf_counter()
+        # print(f"One function call took {end - start:.4f} seconds")
+
+        # num_inliers_list = []
+        # num_inliers_union_list = []
+        projections_list = []
+        score = 0
+
+        depth_opt = scale_depth_map(depth_masked_last, scale=alpha_opt, shift=beta_opt)
+        pc_cam_last_opt = convert_depth_map_to_pointcloud(depth_opt, camera_parameters)
+        pc_cam0_opt = transform_pointcloud_to_world(pc_cam_last_opt, transforms[-1])
+        for data, transform in zip(datas[:-1], transforms[:-1]):
+            _, mask, _, _, _ = data
+            # Get projection of scaled pointcloud into camera 2
+            _, projection_pc_cam_x_opt_mask = project_pointcloud_from_world(pc_cam0_opt, transform, camera_parameters)
+            # Fill holes
+            fixed_projection_npc_cam0_opt_mask = fill_mask_holes(projection_pc_cam_x_opt_mask)
+            score_temp = score_mask_match(fixed_projection_npc_cam0_opt_mask, mask)
+
+            print(f'Score: {score_temp}')
+            # num_inliers_list.append(num_inliers)
+            # num_inliers_union_list.append(num_inliers_union)
+            projections_list.append(fixed_projection_npc_cam0_opt_mask)
+            score += score_temp
+        
+        print(f'Optimal alpha: {alpha_opt:.2f}, beta: {beta_opt:.2f}, Score: {y_opt}')
+
+        # Show mask and pointcloud
+        if show:
+            for i, (data, projection) in enumerate(zip(datas[:-1], projections_list)):
+                _, mask, _, _, _ = data
+                show_masks_union(projection, mask, title=f'Optimal Projection with holes fixed vs Mask {i} to fit')
+
+        return alpha_opt, beta_opt, pc_cam0_opt, score
+
     def get_desired_pose(self, position, frame="map"):
         # build Pose
         p = Pose()
@@ -280,7 +574,7 @@ class MyClass:
         idx = np.argmax(pts[:, 2])
         return pts[idx]
 
-    def inliers_function(self, x, depth_masked, transform1, mask, transform2):
+    def inliers_function(self, x, depth_masked, transform1, mask, transform2, scoring_function='inliers'):
         if rospy.is_shutdown(): exit()
         alpha, beta = x
         # Scale and shift
@@ -294,9 +588,79 @@ class MyClass:
         # Fill holes
         fixed_projection_new_pc2_mask = fill_mask_holes(projection_new_pc2_mask)
         # Count the number of inliers between mask 2 and projection of scaled pointcloud
-        num_inliers, inlier_union = count_inliers(fixed_projection_new_pc2_mask, mask)
+        score, inlier_union = count_inliers(fixed_projection_new_pc2_mask, mask)
         # print(f'num_inliers: {num_inliers}')
+        return -score
+
+    def inliers_function_multiple_cameras(self, x, datas, transforms):
+        if rospy.is_shutdown(): exit()
+        alpha, beta = x
+        num_inliers = 0
+        _, _, depth_masked_last, _, _ = datas[-1]
+        # Scale and shift
+        depth_new_last = scale_depth_map(depth_masked_last, scale=alpha, shift=beta)
+        # Get scaled/shifted pointcloud
+        new_pc_camera_last = convert_depth_map_to_pointcloud(depth_new_last, camera_parameters)
+        # Transform scaled pointcloud into world coordinates
+        new_pc0 = transform_pointcloud_to_world(new_pc_camera_last, transforms[-1])
+
+        for data, transform in zip(datas[:-1], transforms[:-1]):
+            _, mask, _, _, _ = data
+            # Get projection of scaled pointcloud into camera 2
+            projection_new_pc_x_depth, projection_new_pc_x_mask = project_pointcloud_from_world(new_pc0, transform, camera_parameters)
+            # Fill holes
+            fixed_projection_new_pc_x_mask = fill_mask_holes(projection_new_pc_x_mask)
+            # Count the number of inliers between mask 2 and projection of scaled pointcloud
+            num_inliers_temp, inlier_union_temp = count_inliers(fixed_projection_new_pc_x_mask, mask)
+            # print(f'num_inliers: {num_inliers}')
+            num_inliers += num_inliers_temp
+
         return -num_inliers
+
+    def score_function(self, x, depth_masked, transform1, mask, transform2):
+        if rospy.is_shutdown(): exit()
+        alpha, beta = x
+        # Scale and shift
+        depth_new = scale_depth_map(depth_masked, scale=alpha, shift=beta)
+        # Get scaled/shifted pointcloud
+        new_pc1 = convert_depth_map_to_pointcloud(depth_new, camera_parameters)
+        # Transform scaled pointcloud into world coordinates
+        new_pc0 = transform_pointcloud_to_world(new_pc1, transform1)
+        # Get projection of scaled pointcloud into camera 2
+        projection_new_pc2_depth, projection_new_pc2_mask = project_pointcloud_from_world(new_pc0, transform2, camera_parameters)
+        # Fill holes
+        fixed_projection_new_pc2_mask = fill_mask_holes(projection_new_pc2_mask)
+        # Count the number of inliers between mask 2 and projection of scaled pointcloud
+        score = score_mask_match(fixed_projection_new_pc2_mask, mask)
+        # print(f'num_inliers: {num_inliers}')
+        return -score
+
+    def score_function_multiple_cameras(self, x, datas, transforms):
+        if rospy.is_shutdown(): exit()
+        alpha, beta = x
+        score = 0
+        _, _, depth_masked_last, _, _ = datas[-1]
+        # Scale and shift
+        depth_new_last = scale_depth_map(depth_masked_last, scale=alpha, shift=beta)
+        # Get scaled/shifted pointcloud
+        new_pc_camera_last = convert_depth_map_to_pointcloud(depth_new_last, camera_parameters)
+        # Transform scaled pointcloud into world coordinates
+        new_pc0 = transform_pointcloud_to_world(new_pc_camera_last, transforms[-1])
+
+        for data, transform in zip(datas[:-1], transforms[:-1]):
+            _, mask, _, _, _ = data
+            # Get projection of scaled pointcloud into camera 2
+            projection_new_pc_x_depth, projection_new_pc_x_mask = project_pointcloud_from_world(new_pc0, transform, camera_parameters)
+            # Fill holes
+            fixed_projection_new_pc_x_mask = fill_mask_holes(projection_new_pc_x_mask)
+            # Count the number of inliers between mask 2 and projection of scaled pointcloud
+            score_temp = score_mask_match(fixed_projection_new_pc_x_mask, mask)
+            # print(f'num_inliers: {num_inliers}')
+            score += score_temp
+
+        return -score
+
+
 
 def test1():
     my_class = MyClass()
@@ -443,7 +807,8 @@ def pipeline2():
         # Process image
         data.append(my_class.process_image(images[-1], transforms[-1], show=True))
         # Estimate scale and shift
-        best_alpha, best_beta, best_pc_world, num_inliers, num_inliers_union = my_class.estimate_scale_shift_new(data[-2], data[-1], transforms[-2], transforms[-1], show=True)
+        # best_alpha, best_beta, best_pc_world, num_inliers, num_inliers_union = my_class.estimate_scale_shift_new(data[-2], data[-1], transforms[-2], transforms[-1], show=True)
+        best_alpha, best_beta, best_pc_world, score = my_class.estimate_scale_shift_from_multiple_cameras_distance(data, transforms, show=True)
         best_alphas.append(best_alpha)
         best_betas.append(best_beta)
         best_pcs_world.append(best_pc_world)
@@ -475,7 +840,8 @@ def pipeline2():
 
 if __name__ == "__main__":
     rospy.init_node("MyClass", anonymous=True)
-    pipeline()
+    # pipeline()
+    pipeline2()
 
     # my_class = MyClass()
     # ros_handler = ROSHandler()
