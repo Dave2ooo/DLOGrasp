@@ -2,6 +2,10 @@ import rospy
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path
 import open3d as o3d
+from sensor_msgs.msg import PointCloud2
+from sensor_msgs import point_cloud2
+from std_msgs.msg import Header
+import numpy as np
 
 
 class PathPublisher:
@@ -71,3 +75,45 @@ class PosePublisher:
             raise TypeError("publish_pose requires a Pose or PoseStamped")
 
         return
+
+
+class PointcloudPublisher:
+    def __init__(self, topic: str, frame_id: str = "map"):
+        """
+        Initialize a ROS publisher for PointCloud2 messages.
+
+        Parameters
+        ----------
+        topic : str
+            The name of the ROS topic to publish the point cloud on.
+        frame_id : str
+            The frame_id to stamp each message with (default: "map").
+        """
+        # Publisher for PointCloud2
+        self.pub = rospy.Publisher(topic, PointCloud2, queue_size=1, latch=True)
+        self.frame_id = frame_id
+
+    def publish(self, pointcloud: o3d.geometry.PointCloud) -> None:
+        """
+        Convert an Open3D PointCloud into a ROS PointCloud2 and publish it.
+
+        Parameters
+        ----------
+        pointcloud : o3d.geometry.PointCloud
+            The Open3D point cloud to publish (XYZ only).
+        """
+        # Extract XYZ coordinates to a list of tuples
+        pts = np.asarray(pointcloud.points, dtype=np.float32)
+        xyz = [(float(x), float(y), float(z)) for x, y, z in pts]
+
+        # Create header
+        header = Header()
+        header.stamp = rospy.Time.now()
+        header.frame_id = self.frame_id
+
+        # Build PointCloud2 message (XYZ as float32)
+        pc2_msg = point_cloud2.create_cloud_xyz32(header, xyz)
+
+        # Publish
+        self.pub.publish(pc2_msg)
+

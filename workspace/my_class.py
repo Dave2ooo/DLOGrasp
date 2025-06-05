@@ -39,7 +39,7 @@ class MyClass:
         print('Processing image...')
 
         depth = self.depth_anything_wrapper.get_depth_map(image)
-        mask = self.grounded_sam_wrapper.get_mask(image)[0][0]
+        mask = self.grounded_sam_wrapper.get_mask(image, 'black cable.transparent tube.')[0][0]
         mask_reduced = reduce_mask(mask, 1)
 
         depth_masked = mask_depth_map(depth, mask)
@@ -449,7 +449,7 @@ class MyClass:
 
         return alpha_opt, beta_opt, pc_cam0_opt, score
 
-    def estimate_scale_shift_from_multiple_cameras_distance(self, datas, transforms, show=False):
+    def estimate_scale_shift_from_multiple_cameras_distance(self, datas, transforms, decay=0.9, show=False):
         """
         Estimates the optimal scale and shift values of data1 to fit data2.
         
@@ -485,7 +485,7 @@ class MyClass:
         result = opt.differential_evolution(
             self.score_function_multiple_cameras,
             bounds,
-            args=(datas, transforms),
+            args=(datas, transforms, 0.9),
             strategy='best1bin',
             maxiter=20,
             popsize=15,
@@ -497,7 +497,7 @@ class MyClass:
 
         alpha_opt, beta_opt = result.x
         # start = time.perf_counter()
-        y_opt = -self.score_function_multiple_cameras([alpha_opt, beta_opt], datas, transforms)
+        y_opt = -self.score_function_multiple_cameras([alpha_opt, beta_opt], datas, transforms, decay)
         # end = time.perf_counter()
         # print(f"One function call took {end - start:.4f} seconds")
 
@@ -635,7 +635,7 @@ class MyClass:
         # print(f'num_inliers: {num_inliers}')
         return -score
 
-    def score_function_multiple_cameras(self, x, datas, transforms):
+    def score_function_multiple_cameras(self, x, datas, transforms, decay):
         if rospy.is_shutdown(): exit()
         alpha, beta = x
         score = 0
@@ -647,7 +647,7 @@ class MyClass:
         # Transform scaled pointcloud into world coordinates
         new_pc0 = transform_pointcloud_to_world(new_pc_camera_last, transforms[-1])
 
-        for data, transform in zip(datas[:-1], transforms[:-1]):
+        for i, (data, transform) in enumerate(zip(datas[:-1], transforms[:-1])):
             _, mask, _, _, _ = data
             # Get projection of scaled pointcloud into camera 2
             projection_new_pc_x_depth, projection_new_pc_x_mask = project_pointcloud_from_world(new_pc0, transform, camera_parameters)
@@ -656,6 +656,9 @@ class MyClass:
             # Count the number of inliers between mask 2 and projection of scaled pointcloud
             score_temp = score_mask_match(fixed_projection_new_pc_x_mask, mask)
             # print(f'num_inliers: {num_inliers}')
+            # print(f'Initial score: {score_temp}')
+            score_temp = score_temp * decay**(len(transforms)-2-i)
+            # print(f'decay: {decay**(len(transforms)-2-i)}, new score: {score_temp}')
             score += score_temp
 
         return -score
@@ -773,6 +776,7 @@ def pipeline2():
     image_subscriber = ImageSubscriber('/hsrb/hand_camera/image_rect_color')
     pose_publisher = PosePublisher("/next_pose")
     path_publisher = PathPublisher("/my_path")
+    pointcloud_publisher = PointcloudPublisher(topic="my_pointcloud", frame_id="map")
 
     images = []
     transforms = []
@@ -805,17 +809,18 @@ def pipeline2():
         transforms.append(ros_handler.get_current_pose("hand_camera_frame", "map"))
         transforms_palm.append(ros_handler.get_current_pose("hand_palm_link", "map"))
         # Process image
-        data.append(my_class.process_image(images[-1], transforms[-1], show=True))
+        data.append(my_class.process_image(images[-1], transforms[-1], show=False))
         # Estimate scale and shift
         # best_alpha, best_beta, best_pc_world, num_inliers, num_inliers_union = my_class.estimate_scale_shift_new(data[-2], data[-1], transforms[-2], transforms[-1], show=True)
         best_alpha, best_beta, best_pc_world, score = my_class.estimate_scale_shift_from_multiple_cameras_distance(data, transforms, show=True)
         best_alphas.append(best_alpha)
         best_betas.append(best_beta)
         best_pcs_world.append(best_pc_world)
+        pointcloud_publisher.publish(best_pcs_world[-1])
         # Get highest Point in pointcloud
         target_point = my_class.get_highest_point(best_pcs_world[-1])
         tarrget_point_offset = target_point
-        tarrget_point_offset[2] += 0.098 - 0.020 # Make target Pose hover above actual target pose - tested offset
+        tarrget_point_offset[2] += 0.098 + 0.010# - 0.020 # Make target Pose hover above actual target pose - tested offset
         # Convert to Pose
         target_poses.append(my_class.get_desired_pose(tarrget_point_offset))
         # Calculate Path
