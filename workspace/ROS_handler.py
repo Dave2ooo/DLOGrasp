@@ -125,6 +125,7 @@ class ROSHandler():
         # Create the PointCloud2 message (XYZ only, 32-bit floats)
         pc2_msg = point_cloud2.create_cloud_xyz32(header, xyz)
         return pc2_msg
+        
     def convert_pose_to_pose_stamped(self, pose: Pose, frame: str = "map") -> PoseStamped:
         ps = PoseStamped()
         ps.header.stamp = rospy.Time.now()
