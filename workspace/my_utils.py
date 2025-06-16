@@ -14,6 +14,14 @@ from std_msgs.msg import Header
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs import point_cloud2
 
+
+from sklearn.decomposition import PCA
+from scipy.interpolate import splprep, splev
+from scipy.spatial import cKDTree
+
+from scipy.interpolate import BSpline
+
+
 # ----------------------------------------------------------------------------
 
 #region Pointcloud
@@ -794,6 +802,57 @@ def reduce_mask(mask: np.ndarray, pixel: int) -> np.ndarray:
     eroded = cv2.erode(m, kernel, iterations=1)
 
     return eroded
+
+def cleanup_mask(mask: np.ndarray) -> np.ndarray:
+    """
+    Let the user interactively remove portions of a binary mask by drawing
+    one or more rectangles. Inside each drawn rectangle, mask pixels are set to zero.
+    """
+    import cv2
+    import numpy as np
+
+    # Normalize to uint8 0/255
+    working = mask.copy()
+    if working.dtype != np.uint8:
+        working = (working.astype(bool).astype(np.uint8) * 255)
+
+    drawing = False
+    ix = iy = cur_x = cur_y = 0
+
+    def on_mouse(event, x, y, flags, param):
+        nonlocal drawing, ix, iy, cur_x, cur_y, working
+        if event == cv2.EVENT_LBUTTONDOWN:
+            drawing = True
+            ix, iy = x, y
+            cur_x, cur_y = x, y
+        elif event == cv2.EVENT_MOUSEMOVE and drawing:
+            cur_x, cur_y = x, y
+        elif event == cv2.EVENT_LBUTTONUP and drawing:
+            drawing = False
+            x1, x2 = sorted((ix, cur_x))
+            y1, y2 = sorted((iy, cur_y))
+            working[y1:y2, x1:x2] = 0
+
+    window = "Cleanup Mask - draw rectangles, Esc to finish"
+    cv2.namedWindow(window, cv2.WINDOW_NORMAL)
+    cv2.setMouseCallback(window, on_mouse)
+
+    while True:
+        display_img = working.copy()
+        if drawing:
+            cv2.rectangle(display_img,
+                            (ix, iy),
+                            (cur_x, cur_y),
+                            color=128, thickness=2)
+        cv2.imshow(window, display_img)
+        key = cv2.waitKey(20) & 0xFF
+        if key == 27:  # Esc
+            break
+
+    cv2.destroyWindow(window)
+    return working
+
+
 
 #endregion
 
@@ -1707,3 +1766,287 @@ def get_highest_point(pointcloud: o3d.geometry.PointCloud) -> np.ndarray:
     # find the index of the maximum Z
     idx = np.argmax(pts[:, 2])
     return pts[idx]
+
+
+
+#region B-spline Fitting
+def fit_spline(data, num_control_points: int, order: int) -> np.ndarray:
+    """
+    Fit a clamped, uniform B‐spline of given degree and number of control points
+    to either:
+        - an Open3D PointCloud (unordered) or
+        - an (M×3) numpy array of ordered center-line points.
+
+    Returns the (num_control_points×3) control‐point array.
+
+    Parameters
+    ----------
+    data : o3d.geometry.PointCloud or np.ndarray
+        If PointCloud, will parameterize by chord‐length along its PCA‐axis.
+        If np.ndarray of shape (M,3), treated as already‐ordered curve.
+    num_control_points : int
+    order : int
+    """
+    import numpy as np
+    from scipy.interpolate import make_lsq_spline
+    import open3d as o3d
+
+    # --- extract points and parameter t ---
+    if isinstance(data, o3d.geometry.PointCloud):
+        pts = np.asarray(data.points, dtype=float)
+        # PCA‐based axis as before
+        centered = pts - pts.mean(axis=0)
+        _, _, vt = np.linalg.svd(centered, full_matrices=False)
+        axis = vt[0]
+        proj = centered.dot(axis)
+        t_raw = (proj - proj.min()) / (proj.max() - proj.min())
+        order_idx = np.argsort(t_raw)
+        t_sorted = t_raw[order_idx]
+        pts_sorted = pts[order_idx]
+    elif isinstance(data, np.ndarray):
+        pts = data.astype(float)
+        if pts.ndim != 2 or pts.shape[1] != 3:
+            raise ValueError("numpy array must be shape (M,3)")
+        pts_sorted = pts
+        # chord‐length parameterization
+        dists = np.linalg.norm(np.diff(pts_sorted, axis=0), axis=1)
+        s = np.concatenate(([0.], np.cumsum(dists)))
+        t_sorted = s / s[-1]
+    else:
+        raise TypeError("data must be an Open3D PointCloud or an (M×3) numpy array")
+
+    M = pts_sorted.shape[0]
+    if M < order + 1:
+        raise ValueError("Not enough points for spline")
+
+    # --- build clamped uniform knot vector ---
+    m = num_control_points - order - 1
+    if m > 0:
+        interior = np.linspace(0, 1, m+2)[1:-1]
+    else:
+        interior = np.array([])
+    knots = np.concatenate([
+        np.zeros(order+1),
+        interior,
+        np.ones(order+1)
+    ])
+
+    # --- least‐squares fit per dimension ---
+    ctrl_pts = np.zeros((num_control_points, 3), dtype=float)
+    for dim in range(3):
+        coord = pts_sorted[:, dim]
+        spline = make_lsq_spline(t_sorted, coord, t=knots, k=order)
+        ctrl_pts[:, dim] = spline.c
+
+    return ctrl_pts
+
+
+def visualize_spline_with_pc(pointcloud, control_pts, degree, num_samples=200):
+    n_ctrl = len(control_pts)
+    # Build a clamped, uniform knot vector of length n_ctrl + degree + 1
+    # interior knot count = n_ctrl - degree - 1
+    if n_ctrl <= degree:
+        raise ValueError("Need more control points than the degree")
+    m = n_ctrl - degree - 1
+    if m > 0:
+        interior = np.linspace(0, 1, m+2)[1:-1]
+    else:
+        interior = np.array([])
+    # clamp start/end
+    t = np.concatenate([
+        np.zeros(degree+1),
+        interior,
+        np.ones(degree+1)
+    ])
+    # create BSpline
+    spline = BSpline(t, control_pts, degree)
+
+    # sample
+    ts = np.linspace(t[degree], t[-degree-1], num_samples)
+    curve_pts = spline(ts)
+
+    # build LineSet
+    import open3d as o3d
+    lines = [[i, i+1] for i in range(len(curve_pts)-1)]
+    ls = o3d.geometry.LineSet(
+        points=o3d.utility.Vector3dVector(curve_pts),
+        lines=o3d.utility.Vector2iVector(lines)
+    )
+    ls.colors = o3d.utility.Vector3dVector([[1,0,0] for _ in lines])
+
+    o3d.visualization.draw_geometries([pointcloud, ls])
+
+def extract_centerline_mst(pointcloud: o3d.geometry.PointCloud, k: int = 6) -> np.ndarray:
+    """
+    Extract a 1D center-line from a (possibly sparse) DLO point cloud by:
+        1) Building a k-NN graph
+        2) Computing its undirected MST
+        3) Finding the two farthest-apart leaves
+        4) Extracting the unique path between them via Dijkstra predecessors
+
+    Returns an ordered array of 3D points along that path.
+    """
+    import numpy as np
+    from scipy.spatial import cKDTree
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import minimum_spanning_tree, dijkstra
+    import open3d as o3d
+
+    if not isinstance(pointcloud, o3d.geometry.PointCloud):
+        raise TypeError("pointcloud must be an Open3D PointCloud")
+
+    pts = np.asarray(pointcloud.points, float)
+    N = pts.shape[0]
+    if N < 3:
+        raise ValueError("Need at least three points to get a non-trivial centerline")
+
+    # 1) k-NN graph (undirected)
+    tree = cKDTree(pts)
+    dists, idxs = tree.query(pts, k+1)
+    rows, cols, data = [], [], []
+    for i in range(N):
+        for dist, j in zip(dists[i,1:], idxs[i,1:]):
+            rows.extend([i, j])
+            cols.extend([j, i])
+            data.extend([dist, dist])
+    G = coo_matrix((data, (rows, cols)), shape=(N, N))
+
+    # 2) build undirected MST
+    mst_directed = minimum_spanning_tree(G)
+    mst_und = mst_directed + mst_directed.T  # now symmetric
+    mst_und = mst_und.tocsr()
+
+    # 3) compute degrees properly
+    # adjacency is nonzero entries
+    adj_bool = mst_und.copy()
+    adj_bool.data = np.ones_like(adj_bool.data)
+    degrees = np.array(adj_bool.sum(axis=1)).flatten()
+    leaves = np.where(degrees == 1)[0]
+    if len(leaves) < 2:
+        raise ValueError(f"Only found {len(leaves)} leaf nodes—try increasing k")
+
+    # 4a) tree diameter endpoints
+    dist0, _ = dijkstra(mst_und, indices=leaves[0], return_predecessors=True)
+    A = np.nanargmax(dist0)
+    distA, preds = dijkstra(mst_und, indices=A, return_predecessors=True)
+    B = np.nanargmax(distA)
+
+    # 5) reconstruct unique path A→B
+    path_idx = []
+    cur = B
+    while cur != A and cur != -9999:
+        path_idx.append(cur)
+        cur = preds[cur]
+    path_idx.append(A)
+    path_idx = path_idx[::-1]
+
+    # map back to 3D
+    centerline = pts[path_idx]
+    return centerline
+
+
+
+
+
+#endregion
+
+
+#region B-spline fitting - paper
+
+def chord_length_parameterize(X):
+    """Returns normalized chord‐length params u_k for point cloud X."""
+    diffs = np.linalg.norm(np.diff(X, axis=0), axis=1)
+    u = np.zeros(len(X))
+    u[1:] = np.cumsum(diffs)
+    return u / u[-1]
+
+def make_open_uniform_knots(n_ctrl_pts, degree):
+    """Creates an open‐uniform knot vector with clamped ends."""
+    m = n_ctrl_pts + degree + 1
+    # first and last degree+1 knots are 0 and 1, interior uniformly spaced
+    knots = np.empty(m)
+    knots[:degree+1] = 0.0
+    knots[-(degree+1):] = 1.0
+    num_int = m - 2*(degree+1)
+    if num_int > 0:
+        knots[degree+1:- (degree+1)] = np.linspace(0, 1, num_int+2)[1:-1]
+    return knots
+
+def find_footpoint(bspline, bspline_d1, bspline_d2, Xk, t0, tol=1e-6, maxiter=10):
+    """Newton‐project data point Xk onto spline, returns t in [0,1]."""
+    t = t0
+    for _ in range(maxiter):
+        C   = bspline(t)
+        C1  = bspline_d1(t)
+        C2  = bspline_d2(t)
+        r   = C - Xk
+        g1  = 2.0 * np.dot(C1, r)
+        g2  = 2.0 * (np.dot(C1, C1) + np.dot(r, C2))
+        if abs(g2) < 1e-8:
+            break
+        t_new = t - g1/g2
+        # clamp into valid range
+        t = np.clip(t_new, bspline.t[bspline.k], bspline.t[-(bspline.k+1)])
+        if abs(t - t_new) < tol:
+            break
+    return t
+
+def fit_spline_paper(pointcloud, num_ctrl_points, degree,
+                     max_iter=10, tol=1e-5):
+    """
+    Fit a B-spline curve of given degree to a 3D pointcloud,
+    following the iterative squared‐distance minimization in Flöry’s thesis.
+    Returns an array of shape (num_ctrl_points, 3) of control points.
+    
+    Parameters
+    ----------
+    pointcloud : ndarray, shape (N,3)
+    num_ctrl_points : int
+    degree : int             # p in B-spline terminology
+    max_iter : int           # max Gauss–Newton steps
+    tol : float              # convergence tol on control point change
+    """
+    X = np.asarray(pointcloud)
+    N_pts = X.shape[0]
+    
+    # 1) Parameterize and build initial system
+    u = chord_length_parameterize(X)  # initial t_k
+    U = make_open_uniform_knots(num_ctrl_points, degree)
+    
+    # Build initial basis matrix N of shape (N_pts, num_ctrl_points)
+    # using SciPy’s BSpline.design_matrix functionality
+    bspline = BSpline(U, np.zeros((num_ctrl_points,3)), degree)
+    Nmat = np.vstack([bspline.design_matrix(u_k) for u_k in u])
+    
+    # Least‐squares solve N^T N D = N^T X
+    D = solve(Nmat.T @ Nmat, Nmat.T @ X)
+    
+    for it in range(max_iter):
+        # update spline object with current control points
+        bspline = BSpline(U, D, degree)
+        bspline_d1 = bspline.derivative(1)
+        bspline_d2 = bspline.derivative(2)
+        
+        # 2) Foot‐point projection: find new u's
+        u_new = np.array([
+            find_footpoint(bspline, bspline_d1, bspline_d2, X[k], u[k])
+            for k in range(N_pts)
+        ])
+        
+        # 3) Rebuild N matrix at updated parameters
+        Nmat_new = np.vstack([bspline.design_matrix(u_k)
+                               for u_k in u_new])
+        
+        # 4) Solve for new control points
+        D_new = solve(Nmat_new.T @ Nmat_new, Nmat_new.T @ X)
+        
+        # check convergence
+        if np.linalg.norm(D_new - D) < tol:
+            D = D_new
+            break
+        
+        D = D_new
+        u = u_new
+    
+    return D
+#endregion

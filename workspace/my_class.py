@@ -809,7 +809,7 @@ def pipeline2():
         transforms.append(ros_handler.get_current_pose("hand_camera_frame", "map"))
         transforms_palm.append(ros_handler.get_current_pose("hand_palm_link", "map"))
         # Process image
-        data.append(my_class.process_image(images[-1], transforms[-1], show=False))
+        data.append(my_class.process_image(images[-1], transforms[-1], show=True))
         # Estimate scale and shift
         # best_alpha, best_beta, best_pc_world, num_inliers, num_inliers_union = my_class.estimate_scale_shift_new(data[-2], data[-1], transforms[-2], transforms[-1], show=True)
         best_alpha, best_beta, best_pc_world, score = my_class.estimate_scale_shift_from_multiple_cameras_distance(data, transforms, show=True)

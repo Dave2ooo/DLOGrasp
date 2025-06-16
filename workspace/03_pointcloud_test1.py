@@ -14,11 +14,13 @@ import scipy.optimize as opt
 
 from publisher import *
 
-# camera_intrinsics = (203.71833, 203.71833, 319.5, 239.5) # old/wrong
-camera_intrinsics = (149.09148, 187.64966, 334.87706, 268.23742)
+from camera_handler import ImageSubscriber
 
-depth_anything_wrapper = DepthAnythingWrapper(intrinsics=camera_intrinsics)
-grounded_sam_wrapper = GroundedSamWrapper()
+# camera_intrinsics = (203.71833, 203.71833, 319.5, 239.5) # old/wrong
+camera_parameters = (149.09148, 187.64966, 334.87706, 268.23742)
+
+# depth_anything_wrapper = DepthAnythingWrapper(intrinsics=camera_parameters)
+# grounded_sam_wrapper = GroundedSamWrapper()
 
 def get_stamped_transform(translation, rotation):
     transform_stamped = TransformStamped()
@@ -1334,7 +1336,64 @@ def pipeline2_offline_test(offline_transforms):
 
     # Loop End
 
+def fit_spline_to_pc():
+    my_class = MyClass()
+    ros_handler = ROSHandler()
+    image_subscriber = ImageSubscriber('/hsrb/hand_camera/image_rect_color')
+    pose_publisher = PosePublisher("/next_pose")
+    path_publisher = PathPublisher("/my_path")
+    pointcloud_publisher = PointcloudPublisher(topic="my_pointcloud", frame_id="map")
 
+    images = []
+    transforms = []
+    transforms_palm = []
+    data = [] # depth, mask, depth_masked, pointcloud_masked, pointcloud_masked_world
+    target_poses = []
+    best_alphas = []
+    best_betas = []
+    best_pcs_world = []
+
+    # Take image
+    images.append(image_subscriber.get_current_image())
+    # Get current transform
+    transforms.append(ros_handler.get_current_pose("hand_camera_frame", "map"))
+    transforms_palm.append(ros_handler.get_current_pose("hand_palm_link", "map"))
+    # Process image
+    data.append(my_class.process_image(images[-1], transforms[-1], show=False))
+
+    depth, mask, depth_masked, pointcloud_masked, pointcloud_masked_world = data[0]
+    transform = transforms[0]
+
+    new_mask = cleanup_mask(mask)
+    new_mask_reduced = reduce_mask(new_mask, 1)
+    show_masks(new_mask)
+
+    new_depth_masked = mask_depth_map(depth, new_mask)
+    new_depth_masked_reduced = mask_depth_map(depth, new_mask_reduced) # Reduce mask border
+
+    new_pointcloud_masked = convert_depth_map_to_pointcloud(new_depth_masked, camera_parameters)
+    new_pointcloud_masked_reduced = convert_depth_map_to_pointcloud(new_depth_masked_reduced, camera_parameters)
+
+    # new_pointcloud_masked_world = transform_pointcloud_to_world(new_pointcloud_masked, transform)
+    # new_pointcloud_masked_world_reduced = transform_pointcloud_to_world(new_pointcloud_masked_reduced, transform)
+
+    num_ctrl_points = 10
+    degree = 3
+
+    # centerline = extract_centerline_mst(new_pointcloud_masked_reduced)
+
+    # print(f"Centerline: {centerline}")
+
+    # ctrl_points = fit_spline(centerline, num_ctrl_points, degree)
+    # print(f"Control Points: {ctrl_points}")
+    # visualize_spline_with_pc(new_pointcloud_masked_reduced, ctrl_points, degree)
+
+
+    ctrl_point = fit_spline_paper(new_pointcloud_masked_reduced, num_ctrl_points, degree)
+    visualize_spline_with_pc(new_pointcloud_masked_reduced, ctrl_points, degree)
+
+    # show_pointclouds_with_frames([new_pointcloud_masked_reduced], transforms)
+    # show_pointclouds_with_frames([new_pointcloud_masked_reduced, control_points_to_pointcloud(ctrl)], transforms)
 
 
 if __name__ == '__main__':
@@ -1360,7 +1419,8 @@ if __name__ == '__main__':
     # differential_evolution_single()
     # calculate_angle_test()
     # pipeline_offline_test(offline_transforms=transforms)
-    pipeline2_offline_test(offline_transforms=transforms)
+    # pipeline2_offline_test(offline_transforms=transforms)
+    fit_spline_to_pc()
 
     cv2.waitKey(0)
     cv2.destroyAllWindows()
