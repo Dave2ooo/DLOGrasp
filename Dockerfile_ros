@@ -120,3 +120,8 @@ RUN python3.10 -m pip install --no-cache-dir --ignore-installed 'PyYAML>=5.4.1'
 RUN python3.10 -m pip install --no-cache-dir open3d
 
 RUN python -m pip install --upgrade scikit-image
+
+RUN python3.10 -m pip install networkx
+# RUN python3.10 -m pip uninstall importlib-metadata
+RUN python3.10 -m pip install --upgrade --ignore-installed importlib-metadata>=4.3.0
+

@@ -663,7 +663,16 @@ class MyClass:
 
         return -score
 
+    def score_function_bspline(self, x, datas, camera_pose, degree):
+        if rospy.is_shutdown(): exit()
+        ctrl_points = np.array(x).reshape(-1, 3) 
+        _, mask, _, _, _ = datas[-1]
 
+        projected_spline = project_bspline(ctrl_points, camera_pose, camera_parameters, degree=degree)
+        score = score_mask_match(mask, projected_spline)
+        print(f"x: {x},score inside function: {score}")
+        return -score
+    
 
 def test1():
     my_class = MyClass()
@@ -842,11 +851,169 @@ def pipeline2():
         rospy.sleep(5)
     # Loop End
 
+def pipeline_spline():
+    my_class = MyClass()
+    ros_handler = ROSHandler()
+    image_subscriber = ImageSubscriber('/hsrb/hand_camera/image_rect_color')
+    pose_publisher = PosePublisher("/next_pose")
+    path_publisher = PathPublisher("/my_path")
+    pointcloud_publisher = PointcloudPublisher(topic="my_pointcloud", frame_id="map")
+
+    transform_stamped0 = create_stamped_transform_from_trans_and_rot([0.767, 0.495, 0.712], [0.707, 0.001, 0.707, -0.001])
+    transform_stamped1 = create_stamped_transform_from_trans_and_rot([0.839, 0.493, 0.727], [0.774, 0.001, 0.633, -0.001])
+    transform_stamped2 = create_stamped_transform_from_trans_and_rot([0.903, 0.493, 0.728], [0.834, 0.001, 0.552, -0.000])
+    transform_stamped3 = create_stamped_transform_from_trans_and_rot([0.953, 0.493, 0.717], [0.885, 0.000, 0.466, -0.000])
+    transform_stamped4 = create_stamped_transform_from_trans_and_rot([0.991, 0.492, 0.698], [0.927, 0.001, 0.376, -0.000])
+    transform_stamped5 = create_stamped_transform_from_trans_and_rot([1.014, 0.493, 0.672], [0.960, 0.001, 0.282, -0.000])
+    transform_stamped6 = create_stamped_transform_from_trans_and_rot([1.025, 0.493, 0.643], [0.983, 0.001, 0.184, -0.000])
+
+    images = []
+    transforms = []
+    transforms_palm = []
+    data = [] # depth, mask, depth_masked, pointcloud_masked, pointcloud_masked_world
+    target_poses = []
+    best_alphas = []
+    best_betas = []
+    best_pcs_world = []
+    ctrl_points = []
+
+    # Take image
+    images.append(image_subscriber.get_current_image())
+    # images.append(cv2.imread(f'/root/workspace/images/moves/cable{0}.jpg'))
+    # Get current transform
+    transforms.append(ros_handler.get_current_pose("hand_camera_frame", "map"))
+    # transforms.append(transform_stamped0)
+    transforms_palm.append(ros_handler.get_current_pose("hand_palm_link", "map"))
+    # Process image
+    data.append(my_class.process_image(images[-1], transforms[-1], show=False))
+    usr_input = input("Mask Correct? [y]/n: ")
+    if usr_input == "n": exit()
+    # Move arm
+    next_pose_stamped = create_pose(z=0.1, pitch=-0.4, reference_frame="hand_palm_link")
+    pose_publisher.publish(next_pose_stamped)
+    # input("Press Enter when moves are finished…")
+    rospy.sleep(5)
+
+    #region -------------------- Depth Anything --------------------
+    # Take image
+    images.append(image_subscriber.get_current_image())
+    # images.append(cv2.imread(f'/root/workspace/images/moves/cable{1}.jpg'))
+    # Get current transform
+    transforms.append(ros_handler.get_current_pose("hand_camera_frame", "map"))
+    # transforms.append(transform_stamped1)
+    transforms_palm.append(ros_handler.get_current_pose("hand_palm_link", "map"))
+    # Process image
+    data.append(my_class.process_image(images[-1], transforms[-1], show=False))
+    # Estimate scale and shift
+    # best_alpha, best_beta, best_pc_world, num_inliers, num_inliers_union = my_class.estimate_scale_shift_new(data[-2], data[-1], transforms[-2], transforms[-1], show=True)
+    best_alpha, best_beta, best_pc_world, score = my_class.estimate_scale_shift_from_multiple_cameras_distance(data, transforms, show=False)
+    best_alphas.append(best_alpha)
+    best_betas.append(best_beta)
+    best_pcs_world.append(best_pc_world)
+    pointcloud_publisher.publish(best_pcs_world[-1])
+    # Get highest Point in pointcloud
+    target_point = my_class.get_highest_point(best_pcs_world[-1])
+    tarrget_point_offset = target_point
+    tarrget_point_offset[2] += 0.098 + 0.010# - 0.020 # Make target Pose hover above actual target pose - tested offset
+    # Convert to Pose
+    target_poses.append(my_class.get_desired_pose(tarrget_point_offset))
+    # Calculate Path
+    target_path = interpolate_poses(transforms_palm[-1], target_poses[-1], num_steps=3)
+    # Move arm a step
+    path_publisher.publish(target_path)
+    pose_publisher.publish(target_path[1])
+    # input("Press Enter when moves are finished…")
+    rospy.sleep(5)
+    #endregion -------------------- Depth Enything --------------------
+
+    #region -------------------- Spline --------------------
+    best_depth = scale_depth_map(data[-1][0], best_alpha, best_beta)
+    centerline_pts_cam2 = extract_centerline_from_mask(best_depth, data[-1][1], camera_parameters)
+    centerline_pts_world = transform_points_to_world(centerline_pts_cam2, transforms[-1])
+    degree = 3
+    # Fit B-spline
+    ctrl_points.append(fit_bspline_scipy(centerline_pts_world, degree=degree, smooth=1e-5, nest=20))
+    print(f"ctrl_points: {ctrl_points[0]}")
+    visualize_spline_with_pc(best_pc_world, ctrl_points[0], degree, title="Scaled PointCloud & Spline")
+
+    projected_spline = project_bspline(ctrl_points[0], transforms[1], camera_parameters, degree=degree)
+    show_masks([data[-1][1], projected_spline], "Projected B-Spline")
+    
+    correct_skeleton = skeletonize_mask(data[-1][1])
+    show_masks([data[-1][1], correct_skeleton], "Correct Skeleton")
+
+    show_masks([correct_skeleton, projected_spline])
+
+    while not rospy.is_shutdown():
+        # Take image
+        images.append(image_subscriber.get_current_image())
+        # images.append(cv2.imread(f'/root/workspace/images/moves/cable{1}.jpg'))
+        # Get current transform
+        transforms.append(ros_handler.get_current_pose("hand_camera_frame", "map"))
+        # transforms.append(transform_stamped2)
+        transforms_palm.append(ros_handler.get_current_pose("hand_palm_link", "map"))
+        # Process image
+        data.append(my_class.process_image(images[-1], transforms[-1], show=False))
+
+        projected_spline_cam2 = project_bspline(ctrl_points[-1], transforms[2], camera_parameters, degree=degree)
+        show_masks([data[-1][1], projected_spline_cam2], "Projected B-Spline Cam2")
+
+        start = time.perf_counter()
+        bounds = make_bspline_bounds(ctrl_points[-1])
+        result = opt.minimize(
+            fun=score_function_bspline_reg,   # returns –score
+            x0=ctrl_points[-1].flatten(),
+            args=(data, transforms[-1], camera_parameters, degree, ctrl_points[-1].flatten(), 1000, False),
+            method='L-BFGS-B',                 # a quasi-Newton gradient‐based method
+            bounds=bounds,                     # same ±0.5 bounds per coord
+            options={
+                'maxiter': 1e4,
+                'ftol': 1e-4,
+                'eps': 0.002,
+                'disp': True
+            }
+        )
+        end = time.perf_counter()
+        print(f"Optimization took {end - start:.2f} seconds")
+
+        print(f"result: {result}")
+        ctrl_points.append(result.x.reshape(-1, 3))
+
+        projected_spline_opt = project_bspline(ctrl_points[-1], transforms[-1], camera_parameters, degree=degree)
+        correct_skeleton_cam2 = skeletonize_mask(data[-1][1])
+        show_masks([correct_skeleton_cam2, projected_spline_opt])
+
+        visualize_spline_with_pc(best_pc_world, ctrl_points[-1], degree)
+
+        # Movement
+        # Get highest Point in pointcloud
+        target_point, target_angle = get_highest_point_and_angle_spline(ctrl_points[-1])
+        tarrget_point_offset = target_point
+        tarrget_point_offset[2] += 0.098 + 0.010# - 0.020 # Make target Pose hover above actual target pose - tested offset
+        # Convert to Pose
+        target_poses.append(my_class.get_desired_pose(tarrget_point_offset))
+        # Calculate Path
+        target_path = interpolate_poses(transforms_palm[-1], target_poses[-1], num_steps=3)
+        # Move arm a step
+        path_publisher.publish(target_path)
+        usr_input = input("Go to final Pose? y/[n]: ")
+        if usr_input == "y":
+            rotated_target_pose = rotate_pose_around_z(target_poses[-1], target_angle)
+            pose_publisher.publish(rotated_target_pose)
+            break
+        else:
+            pose_publisher.publish(target_path[1])
+        # input("Press Enter when moves are finished…")
+        rospy.sleep(5)
+
+    #endregion -------------------- Spline --------------------
+
 
 if __name__ == "__main__":
     rospy.init_node("MyClass", anonymous=True)
     # pipeline()
-    pipeline2()
+    # pipeline2()
+    pipeline_spline()   
 
     # my_class = MyClass()
     # ros_handler = ROSHandler()

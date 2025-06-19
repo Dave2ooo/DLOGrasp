@@ -21,8 +21,28 @@ from scipy.spatial import cKDTree
 
 from scipy.interpolate import BSpline
 
+import networkx as nx
+
+from skimage.morphology import skeletonize
+
+from skimage.draw import line as skline
+
+from scipy.ndimage import distance_transform_edt
+from scipy.interpolate import RegularGridInterpolator
 
 # ----------------------------------------------------------------------------
+
+def create_stamped_transform_from_trans_and_rot(translation, rotation):
+    transform_stamped = TransformStamped()
+    transform_stamped.transform.translation.x = translation[0]
+    transform_stamped.transform.translation.y = translation[1]
+    transform_stamped.transform.translation.z = translation[2]
+
+    transform_stamped.transform.rotation.x = rotation[0]
+    transform_stamped.transform.rotation.y = rotation[1]
+    transform_stamped.transform.rotation.z = rotation[2]
+    transform_stamped.transform.rotation.w = rotation[3]
+    return transform_stamped
 
 #region Pointcloud
 # get_pointcloud
@@ -180,6 +200,45 @@ def transform_pointcloud_to_world(pointcloud: o3d.geometry.PointCloud, camera_po
     pc_world = o3d.geometry.PointCloud()
     pc_world.points = o3d.utility.Vector3dVector(pts_world)
     return pc_world
+
+def transform_points_to_world(points: np.ndarray, camera_pose: TransformStamped) -> np.ndarray:
+    """
+    Transform an array of 3D points from the camera frame into world coordinates.
+
+    Parameters
+    ----------
+    points : np.ndarray, shape (N,3)
+        Array of points in the camera's coordinate system.
+    camera_pose : geometry_msgs.msg.TransformStamped
+        Transform from camera frame to world frame.
+
+    Returns
+    -------
+    np.ndarray, shape (N,3)
+        The points expressed in the world coordinate system.
+    """
+    # Validate inputs
+    if not isinstance(camera_pose, TransformStamped):
+        raise TypeError("camera_pose must be a geometry_msgs.msg.TransformStamped")
+    pts = np.asarray(points, dtype=np.float64)
+    if pts.ndim != 2 or pts.shape[1] != 3:
+        raise ValueError("points must be an (N,3) array")
+
+    # Build camera→world homogeneous matrix
+    t = camera_pose.transform.translation
+    q = camera_pose.transform.rotation
+    trans = np.array([t.x, t.y, t.z], dtype=np.float64)
+    quat  = np.array([q.x, q.y, q.z, q.w], dtype=np.float64)
+    Tcw = quaternion_matrix(quat)    # 4×4 rotation
+    Tcw[:3, 3] = trans               # insert translation
+
+    # Convert to homogeneous coordinates and apply
+    ones = np.ones((pts.shape[0], 1), dtype=np.float64)
+    pts_hom = np.hstack((pts, ones))  # (N,4)
+    world_hom = (Tcw @ pts_hom.T).T   # (N,4)
+
+    return world_hom[:, :3]
+
 
 def transform_pointcloud_from_world(pointcloud: o3d.geometry.PointCloud, camera_pose: TransformStamped) -> o3d.geometry.PointCloud:
     """
@@ -891,9 +950,7 @@ def calculate_angle_from_mask_and_point(mask, point, area=40):
     print(f'Angle: {angle/np.pi*180:.0f}°')
     return(angle)
 
-def calculate_angle_from_pointcloud(pointcloud: o3d.geometry.PointCloud,
-                                    point3d,
-                                    radius: float = 0.05) -> float:
+def calculate_angle_from_pointcloud(pointcloud: o3d.geometry.PointCloud, point3d, radius: float = 0.05) -> float:
     """
     Compute the orientation of the local structure in a point cloud patch,
     as viewed from above (projected onto the XY plane), and visualize it.
@@ -1022,9 +1079,6 @@ def count_inliers(depth1: np.ndarray,
     union_mask  = m1 | m2
 
     return int(np.count_nonzero(inlier_mask)), int(np.count_nonzero(union_mask))
-
-import numpy as np
-import cv2
 
 def score_mask_match(P, M, beta: float = 0.05, thresh: float = 0.5) -> float:
     """
@@ -1841,7 +1895,7 @@ def fit_spline(data, num_control_points: int, order: int) -> np.ndarray:
     return ctrl_pts
 
 
-def visualize_spline_with_pc(pointcloud, control_pts, degree, num_samples=200):
+def visualize_spline_with_pc(pointcloud, control_pts, degree, num_samples=200, title="Spline with PointCloud"):
     n_ctrl = len(control_pts)
     # Build a clamped, uniform knot vector of length n_ctrl + degree + 1
     # interior knot count = n_ctrl - degree - 1
@@ -2049,4 +2103,598 @@ def fit_spline_paper(pointcloud, num_ctrl_points, degree,
         u = u_new
     
     return D
+#endregion
+
+#region B-spline fitting - new
+def extract_centerline(pcd: o3d.geometry.PointCloud, k: int = 80):
+    """
+    Extracts the centerline of a deformable linear object (DLO) from an unordered pointcloud.
+
+    Steps:
+      1. Builds a k‐nearest‐neighbor graph on the points.
+      2. Computes the minimum spanning tree (MST) of that graph.
+      3. Finds the MST’s diameter (longest path between two leaves).
+      4. Returns the sequence of 3D points along that path.
+
+    Args:
+        pcd: Open3D PointCloud containing only the DLO’s points.
+        k:  Number of nearest neighbors to connect in the graph (default: 6).
+
+    Returns:
+        centerline_pts: (M×3) numpy array of points along the centerline.
+        path_indices:  list of length M giving the original point indices.
+    """
+    # 1. Prepare data & KD‐tree
+    pts = np.asarray(pcd.points)
+    N = len(pts)
+    kdtree = o3d.geometry.KDTreeFlann(pcd)
+
+    # 2. Build k‐NN graph
+    G = nx.Graph()
+    G.add_nodes_from(range(N))
+    for i in range(N):
+        _, idx, dist2 = kdtree.search_knn_vector_3d(pts[i], k+1)
+        # skip idx[0] == i itself
+        for j, d2 in zip(idx[1:], dist2[1:]):
+            w = np.sqrt(d2)
+            # add edge (i, j) with weight = Euclidean distance
+            if not G.has_edge(i, j):
+                G.add_edge(i, j, weight=w)
+
+    # prune long edges
+    lengths = [d['weight'] for _,_,d in G.edges(data=True)]
+    thresh = np.mean(lengths) + 2*np.std(lengths)
+    for u,v,d in list(G.edges(data=True)):
+        if d['weight'] > thresh:
+            G.remove_edge(u,v)
+
+    # 3. Compute MST of the graph
+    T = nx.minimum_spanning_tree(G, weight='weight')
+
+    # 4. Find tree diameter via two BFS/Dijkstra passes:
+    #    a) from arbitrary node (0) find farthest node A
+    lengths, _ = nx.single_source_dijkstra(T, source=0, weight='weight')
+    A = max(lengths, key=lengths.get)
+    #    b) from A find farthest node B
+    lengths, _ = nx.single_source_dijkstra(T, source=A, weight='weight')
+    B = max(lengths, key=lengths.get)
+
+    # 5. Retrieve the longest path between A and B
+    path_indices = nx.shortest_path(T, source=A, target=B, weight='weight')
+
+    # 6. Gather the 3D coordinates
+    centerline_pts = pts[path_indices]
+
+    return centerline_pts, path_indices
+
+def fit_bspline_scipy(centerline_pts: np.ndarray, degree: int = 3, smooth: float = None, nest: int = None) -> np.ndarray:
+    """
+    Fit a B-spline to a 3D centerline using SciPy's smoothing spline.
+
+    Args:
+        centerline_pts: (N×3) array of ordered 3D points along the centerline.
+        degree: Spline degree (k). Must be <= 5.
+        smooth: Smoothing factor (s). If None, defaults to s=0 (interpolating spline).
+        nest: Maximum number of knots. Higher values allow more control points.
+              If None, SciPy chooses based on data size.
+
+    Returns:
+        ctrl_pts: (M×3) array of the spline's control points.
+    """
+    # Prepare data for splprep: a list of coordinate arrays
+    coords = [centerline_pts[:, i] for i in range(3)]
+    
+    # Compute the B-spline representation
+    tck, u = splprep(coords, k=degree, s=smooth, nest=nest)
+    
+    # Extract control points: tck[1] is a list of arrays for each dimension
+    ctrl_pts = np.vstack(tck[1]).T
+    
+    return ctrl_pts
+
+def extract_centerline_from_mask(depth_image: np.ndarray,
+                                 mask: np.ndarray,
+                                 camera_parameters,
+                                 depth_scale: float = 1.0,
+                                 connectivity: int = 8) -> np.ndarray:
+    """
+    Extracts an ordered 3D centerline from a binary mask and its corresponding depth image
+    via 2D skeletonization and back-projection.
+
+    Args:
+        depth_image: (H×W) depth values (in same units as 'depth_scale' multiplier).
+        mask:         (H×W) binary mask (0/1 or False/True) of the DLO region.
+        intrinsics:   Open3D PinholeCameraIntrinsic or dict with keys 'fx','fy','cx','cy'.
+        depth_scale:  Factor to divide depth_image values by to get metric depth (default=1.0).
+        connectivity: 4 or 8 connectivity for the skeleton graph (default=8).
+
+    Returns:
+        centerline_pts: (N×3) array of ordered 3D points along the centerline.
+    """
+    # 1. Skeletonize the 2D mask
+    skeleton = skeletonize(mask > 0)
+
+    # 2. Collect skeleton pixel coordinates
+    rows, cols = np.where(skeleton)
+    coords = list(zip(rows, cols))
+    if len(coords) == 0:
+        return np.empty((0, 3))
+
+    # 3. Build a pixel adjacency graph over the skeleton
+    index_map = {coord: idx for idx, coord in enumerate(coords)}
+    if connectivity == 8:
+        offsets = [(-1, -1), (-1, 0), (-1, 1),
+                   ( 0, -1),           ( 0, 1),
+                   ( 1, -1), ( 1, 0), ( 1, 1)]
+    else:
+        offsets = [(-1, 0), (0, -1), (0, 1), (1, 0)]
+
+    G = nx.Graph()
+    G.add_nodes_from(range(len(coords)))
+    for i, (r, c) in enumerate(coords):
+        for dr, dc in offsets:
+            neighbor = (r + dr, c + dc)
+            j = index_map.get(neighbor)
+            if j is not None:
+                G.add_edge(i, j)
+
+    # 4. Compute the graph diameter (longest path) to order points
+    #    a) Find farthest from arbitrary node 0
+    lengths = nx.single_source_shortest_path_length(G, source=0)
+    A = max(lengths, key=lengths.get)
+    #    b) From A find farthest B
+    lengths_A = nx.single_source_shortest_path_length(G, source=A)
+    B = max(lengths_A, key=lengths_A.get)
+    #    c) Extract the ordered path
+    path = nx.shortest_path(G, source=A, target=B)
+
+    # 5. Back-project each skeleton pixel to 3D
+    #    Resolve intrinsics
+    fx, fy, cx, cy = camera_parameters
+
+    centerline_pts = []
+    for idx in path:
+        r, c = coords[idx]
+        z = depth_image[r, c] / depth_scale
+        if z <= 0:
+            continue
+        x = (c - cx) * z / fx
+        y = (r - cy) * z / fy
+        centerline_pts.append((x, y, z))
+
+    return np.array(centerline_pts)
+
+def project_bspline(ctrl_points: np.ndarray, camera_pose, camera_parameters: tuple, width: int = 640, height: int = 480, degree: int = 3) -> np.ndarray:
+    """
+    Projects a 3D B-spline (defined by control points) into the camera image plane,
+    rendering a continuous curve into a binary mask.
+
+    Args:
+        ctrl_points: (N_control x 3) array of B-spline control points.
+        camera_pose: TransformStamped with .transform.translation (x,y,z)
+                     and .transform.rotation (x,y,z,w) defining camera pose in world.
+        camera_parameters: (fx, fy, cx, cy) intrinsic parameters.
+        width:  Output image width in pixels.
+        height: Output image height in pixels.
+        degree: Spline degree (k). Must satisfy N_control > degree.
+
+    Returns:
+        mask: (height x width) uint8 mask with the projected spline drawn in 255 on 0.
+    """
+    # Unpack intrinsics
+    fx, fy, cx, cy = camera_parameters
+
+    # Build open-uniform knot vector
+    n_ctrl = ctrl_points.shape[0]
+    k = degree
+    if n_ctrl <= k:
+        raise ValueError("Number of control points must exceed spline degree")
+    num_inner = n_ctrl - k - 1
+    if num_inner > 0:
+        inner = np.linspace(1/(num_inner+1), num_inner/(num_inner+1), num_inner)
+        t = np.concatenate(([0]*(k+1), inner, [1]*(k+1)))
+    else:
+        t = np.concatenate(([0]*(k+1), [1]*(k+1)))
+
+    # Create vector-valued spline
+    spline = BSpline(t, ctrl_points, k, axis=0)
+
+    # Sample points along spline
+    num_samples = max(width, height)
+    u = np.linspace(0, 1, num_samples)
+    pts_world = spline(u)  # (num_samples x 3)
+
+    # Parse camera pose (world -> camera)
+    tx = camera_pose.transform.translation.x
+    ty = camera_pose.transform.translation.y
+    tz = camera_pose.transform.translation.z
+    qx = camera_pose.transform.rotation.x
+    qy = camera_pose.transform.rotation.y
+    qz = camera_pose.transform.rotation.z
+    qw = camera_pose.transform.rotation.w
+
+    # Build rotation matrix from quaternion (camera -> world)
+    xx, yy, zz = qx*qx, qy*qy, qz*qz
+    xy, xz, yz = qx*qy, qx*qz, qy*qz
+    wx, wy, wz = qw*qx, qw*qy, qw*qz
+    R = np.array([
+        [1-2*(yy+zz),   2*(xy - wz),   2*(xz + wy)],
+        [  2*(xy + wz), 1-2*(xx+zz),   2*(yz - wx)],
+        [  2*(xz - wy),   2*(yz + wx), 1-2*(xx+yy)]
+    ])
+
+    # Transform points into camera frame: p_cam = R^T * (p_world - t)
+    diff = pts_world - np.array([tx, ty, tz])
+    pts_cam = diff.dot(R.T)
+
+    # Perspective projection
+    x_cam, y_cam, z_cam = pts_cam[:,0], pts_cam[:,1], pts_cam[:,2]
+    valid = z_cam > 0
+    u_proj = (fx * x_cam[valid] / z_cam[valid] + cx)
+    v_proj = (fy * y_cam[valid] / z_cam[valid] + cy)
+
+    # Integer pixel coords
+    u_pix = np.round(u_proj).astype(int)
+    v_pix = np.round(v_proj).astype(int)
+
+    # Create mask and draw lines between consecutive samples
+    mask = np.zeros((height, width), dtype=np.uint8)
+    # Filter pixels inside image bounds
+    pts2d = list(zip(u_pix, v_pix))
+    pts2d = [(u, v) for u, v in pts2d if 0 <= u < width and 0 <= v < height]
+    for (u0, v0), (u1, v1) in zip(pts2d, pts2d[1:]):
+        rr, cc = skline(v0, u0, v1, u1)
+        valid_line = (rr >= 0) & (rr < height) & (cc >= 0) & (cc < width)
+        mask[rr[valid_line], cc[valid_line]] = 255
+
+    return mask
+
+def project_bspline_pts(ctrl_points, camera_pose, camera_parameters, degree=3, num_samples=200,  width=640, height=480):
+    """
+    Same as project_bspline but returns sampled 2D pixel coords (floats) along the spline,
+    instead of rasterizing to a mask.
+    """
+    # Unpack intrinsics
+    fx, fy, cx, cy = camera_parameters
+
+    # Build open-uniform knot vector
+    n_ctrl = ctrl_points.shape[0]
+    k = degree
+    if n_ctrl <= k:
+        raise ValueError("Number of control points must exceed spline degree")
+    num_inner = n_ctrl - k - 1
+    if num_inner > 0:
+        inner = np.linspace(1/(num_inner+1), num_inner/(num_inner+1), num_inner)
+        t = np.concatenate(([0]*(k+1), inner, [1]*(k+1)))
+    else:
+        t = np.concatenate(([0]*(k+1), [1]*(k+1)))
+
+    # Create vector-valued spline
+    spline = BSpline(t, ctrl_points, k, axis=0)
+
+    # Sample points along spline
+    u = np.linspace(0, 1, num_samples)
+    pts_world = spline(u)  # (num_samples x 3)
+
+    # Parse camera pose (world -> camera)
+    tx = camera_pose.transform.translation.x
+    ty = camera_pose.transform.translation.y
+    tz = camera_pose.transform.translation.z
+    qx = camera_pose.transform.rotation.x
+    qy = camera_pose.transform.rotation.y
+    qz = camera_pose.transform.rotation.z
+    qw = camera_pose.transform.rotation.w
+
+    # Build rotation matrix from quaternion (camera -> world)
+    xx, yy, zz = qx*qx, qy*qy, qz*qz
+    xy, xz, yz = qx*qy, qx*qz, qy*qz
+    wx, wy, wz = qw*qx, qw*qy, qw*qz
+    R = np.array([
+        [1-2*(yy+zz),   2*(xy - wz),   2*(xz + wy)],
+        [  2*(xy + wz), 1-2*(xx+zz),   2*(yz - wx)],
+        [  2*(xz - wy),   2*(yz + wx), 1-2*(xx+yy)]
+    ])
+
+    # Transform points into camera frame: p_cam = R^T * (p_world - t)
+    diff = pts_world - np.array([tx, ty, tz])
+    pts_cam = diff.dot(R.T)
+
+    # Perspective projection
+    x_cam, y_cam, z_cam = pts_cam[:,0], pts_cam[:,1], pts_cam[:,2]
+    # compute pts_cam, do projection, but **don’t** round or clip:
+    u = fx * x_cam / z_cam + cx
+    v = fy * y_cam / z_cam + cy
+
+    # keep only those with z>0 and inside a slightly padded window
+    valid = (z_cam>0) & (u>=-1) & (u<width+1) & (v>=-1) & (v<height+1)
+    return np.stack([u[valid], v[valid]], axis=1)  # shape (M,2)
+
+def skeletonize_mask(mask: np.ndarray) -> np.ndarray:
+    """
+    Compute the 2D skeleton of a binary mask.
+
+    Parameters
+    ----------
+    mask : np.ndarray
+        Input 2D mask, dtype bool or uint8 (0/255).
+
+    Returns
+    -------
+    np.ndarray
+        Skeletonized mask, dtype uint8 (0/255).
+    """
+    import numpy as np
+    from skimage.morphology import skeletonize
+
+    # ensure boolean
+    bool_mask = mask.astype(bool)
+
+    # compute skeleton
+    skel = skeletonize(bool_mask)
+
+    # return as uint8 0/255
+    return (skel.astype(np.uint8) * 255)
+
+def make_bspline_bounds(ctrl_points: np.ndarray, delta: float = 0.1):
+    """
+    Given an (N×3) array of B-spline control points, return a 
+    bounds list of length 3N for differential_evolution, where
+    each coordinate is allowed to vary ±delta around its original value.
+    """
+    flat = ctrl_points.flatten()
+    bounds = [(val - delta, val + delta) for val in flat]
+    return bounds
+
+def continuous_score(spline_pts_2d, interp_out, interp_in, beta=0.05):
+    """
+    mask:    H×W bool
+    spline_pts_2d: (N×2) float pixels
+    """
+    # get distances for points that land outside: false positives
+    d_out = interp_out(spline_pts_2d)  # how far from mask when outside
+    # get distances for points that land inside: false negatives
+    d_in  = interp_in(spline_pts_2d)   # how far from background when inside
+
+    # you can combine them however you like; for example:
+    assd = 0.5 * (d_out.mean() + d_in.mean())
+    return np.exp(-beta * assd)
+
+def score_function_bspline_new(x, datas, camera_pose, camera_parameters, degree, show=False):
+    """
+    Score = average distance (in pixels) from spline to mask-skeleton.
+    Lower is better.
+
+    Returns:
+      assd: float
+    """
+    # 1) Reshape flat vector into (n_ctrl,3)
+    ctrl_pts = np.array(x, dtype=float).reshape(-1, 3)
+
+    # 2) Ground truth mask → skeleton
+    _, mask, _, _, _ = datas[-1]           # mask: H×W boolean or 0/1
+    skeleton = skeletonize(mask > 0)       # shape (H,W) bool
+
+    # 3) Project spline to subpixel 2D points
+    pts2d = project_bspline_pts(ctrl_pts,
+                                camera_pose,
+                                camera_parameters,
+                                degree=degree,
+                                num_samples=200)    # → (M,2) floats (u,v)
+
+    # 4) Build a single distance transform of the skeleton’s complement
+    #    (distance from every pixel to the nearest skeleton pixel)
+    dt_skel = distance_transform_edt(~skeleton)
+
+    # 5) Interpolate DT at your spline points (bilinear)
+    H, W = skeleton.shape
+    grid_y = np.arange(H)
+    grid_x = np.arange(W)
+    interp = RegularGridInterpolator(
+        (grid_y, grid_x),
+        dt_skel,
+        bounds_error=False,
+        fill_value=dt_skel.max()
+    )
+    # pts2d is (u,v) = (col,row), but interpolator expects (row, col) → (v,u)
+    sample_pts = np.stack([pts2d[:,1], pts2d[:,0]], axis=1)
+    dists = interp(sample_pts)
+
+    # 6) Compute average distance
+    assd = dists.mean()
+
+    # 7) Optional viz
+    if show:
+        proj_mask = project_bspline(ctrl_pts, camera_pose, camera_parameters,
+                                    degree=degree)
+        show_masks([skeleton.astype(np.uint8)*255, proj_mask],
+                   title=f"Mean dist: {assd:.2f}px")
+
+    # 8) Return the score to MINIMIZE
+    # print(f"score: {assd}")
+    return assd
+
+def score_function_bspline_reg(x, datas, camera_pose, camera_parameters, degree, init_x, reg_weight: float = 1000.0, show: bool = False):
+    """
+    Returns a loss = (average pixel‐distance to skeleton) 
+    + reg_weight * (average control‐point displacement).
+
+    Args:
+        x:               flat array of length 3*n_ctrl, current ctrl‐pts.
+        datas:           your data list, last element’s mask at datas[-1][1].
+        camera_pose:     TransformStamped.
+        camera_parameters: (fx, fy, cx, cy).
+        degree:          spline degree.
+        init_x:          flat array same shape as x, the original ctrl‐pts.
+        reg_weight:      weight for the drift penalty (in pixels per meter).
+        show:            if True, pops up the overlay.
+
+    Returns:
+        loss: float to MINIMIZE.
+    """
+    # ----- 1) Reshape and penalty -----
+    ctrl_pts = np.array(x, dtype=float).reshape(-1, 3)
+    # compute average L2‐displacement per control‐point (in world units)
+    displacement = np.linalg.norm(x - init_x) / ctrl_pts.shape[0]
+
+    # ----- 2) Skeletonize mask -----
+    _, mask, _, _, _ = datas[-1]
+    skeleton = skeletonize(mask > 0)
+
+    # ----- 3) Project to subpixel pts -----
+    pts2d = project_bspline_pts(ctrl_pts,
+                                camera_pose,
+                                camera_parameters,
+                                degree=degree,
+                                num_samples=200)  # (M,2) floats
+
+    # ----- 4) Distance transform of skeleton -----
+    dt = distance_transform_edt(~skeleton)
+    H, W = skeleton.shape
+    interp = RegularGridInterpolator(
+        (np.arange(H), np.arange(W)),
+        dt,
+        bounds_error=False,
+        fill_value=dt.max()
+    )
+
+    # ----- 5) Sample DT at spline pts -----
+    sample_pts = np.stack([pts2d[:,1], pts2d[:,0]], axis=1)  # (row, col)
+    dists = interp(sample_pts)
+    assd = dists.mean()
+
+    # ----- 6) Optional visualization -----
+    if show:
+        proj_mask = project_bspline(ctrl_pts,
+                                    camera_pose,
+                                    camera_parameters,
+                                    width=W,
+                                    height=H,
+                                    degree=degree)
+        show_masks([skeleton.astype(np.uint8)*255, proj_mask],
+                   title=f"Fit: {assd:.2f}px, Drift: {displacement:.3f}m")
+
+    # ----- 7) Final loss -----
+    print(f"reg_weighot: {reg_weight}, punishment. {reg_weight * displacement}")
+    loss = assd + reg_weight * displacement
+    return loss
+
+def interactive_bspline_editor(ctrl_points: np.ndarray,
+                               datas,
+                               camera_pose,
+                               camera_parameters: tuple,
+                               degree: int,
+                               score_function_bspline,
+                               init_ctrl_points: np.ndarray,
+                               delta: float = 0.5,
+                               slider_scale: int = 1000):
+    """
+    Launch an OpenCV window with sliders to manually adjust B-spline control points,
+    overlays the projected spline on the ground-truth mask, and shows the score.
+
+    Args:
+        ctrl_points: (N_control × 3) initial control points.
+        datas:       List of data tuples; last element's second item is ground-truth mask (H×W bool/uint8).
+        camera_pose: TransformStamped for projection.
+        camera_parameters: (fx, fy, cx, cy) intrinsics.
+        degree:      Spline degree for projection.
+        score_function_bspline: Callable(x_flat, datas, camera_pose, camera_parameters, degree) -> -score.
+        delta:       ±range around each original ctrl-point coordinate.
+        slider_scale: Integer range for sliders (0...slider_scale).
+
+    Returns:
+        final_ctrl_pts: (N_control × 3) array of adjusted control points upon exit.
+    """
+    # Extract mask from datas
+    _, mask, _, _, _ = datas[-1]
+    skeleton = skeletonize_mask(mask)
+
+    skeleton_img = (skeleton.astype(np.uint8) * 255) if skeleton.dtype != np.uint8 else skeleton
+    h, w = skeleton_img.shape[:2]
+
+
+    # Prepare slider window
+    window_name = "B-Spline Editor (press 'q' to finish)"
+    cv2.namedWindow(window_name)
+
+    n_ctrl = ctrl_points.shape[0]
+    orig_flat = ctrl_points.flatten()
+
+    # Callback placeholder (required by OpenCV)
+    def _cb(val):
+        pass
+
+    # Create one slider per control-point coordinate
+    for idx in range(len(orig_flat)):
+        cv2.createTrackbar(f"pt{idx}", window_name, slider_scale // 2, slider_scale, _cb)
+
+    # Main loop
+    final_ctrl_pts = orig_flat.copy()
+    while True:
+        # Read slider positions and map to control-point values
+        positions = np.array([cv2.getTrackbarPos(f"pt{i}", window_name) for i in range(len(orig_flat))])
+        final_flat = orig_flat - delta + (positions / slider_scale) * (2 * delta)
+        final_ctrl_pts = final_flat.reshape(-1, 3)
+
+        # Project spline to mask
+        proj_mask = project_bspline(final_ctrl_pts, camera_pose, camera_parameters, width=w, height=h, degree=degree)
+
+        # Overlay: original mask in gray, spline in red
+        disp = cv2.cvtColor(skeleton_img, cv2.COLOR_GRAY2BGR)
+        disp[proj_mask > 0] = (0, 0, 255)
+
+        # Compute and display score (positive value)
+        score_neg = score_function_bspline(final_flat, datas, camera_pose, camera_parameters, degree, init_ctrl_points.flatten())
+        score = -score_neg
+        cv2.putText(disp, f"Score: {score:.4f}", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
+
+        # Show window
+        cv2.imshow(window_name, disp)
+        key = cv2.waitKey(50) & 0xFF
+        if key == ord('q'):
+            break
+
+    cv2.destroyWindow(window_name)
+    return final_ctrl_pts
+
+def get_highest_point_and_angle_spline(ctrl_points):
+    """
+    Returns the 3D control point with the highest z-value and its azimuth angle
+    in the XY-plane (angle from +x axis towards +y axis).
+
+    Args:
+        ctrl_points (array-like): An (N×3) array of control points.
+
+    Returns:
+        highest_pt: numpy.ndarray of shape (3,), the (x, y, z) point with max z.
+        angle: float, azimuth angle in radians: atan2(y, x), measured from +x axis.
+    """
+    pts = np.asarray(ctrl_points, dtype=float)
+    if pts.ndim != 2 or pts.shape[1] != 3:
+        raise ValueError("ctrl_points must be an (N, 3) array-like")
+    if pts.size == 0:
+        raise ValueError("ctrl_points is empty")
+
+    # Find the index of the maximum z-value
+    max_idx = np.argmax(pts[:, 2])
+    highest_pt = pts[max_idx]
+
+    # Compute azimuth angle in the XY-plane
+    x, y = highest_pt[0], highest_pt[1]
+    angle = np.arctan2(y, x)  # radians, in range [-pi, pi]
+
+    return highest_pt, angle
+
+# Example usage:
+# ctrl_pts = np.array([[0,0,0.5], [1,1,2.0], [-1,2,1.8]])
+# pt, ang = get_highest_point_spline(ctrl_pts)
+# print("Highest point:", pt, "Angle (rad):", ang)
+
+
+# Example usage:
+# ctrl_points = np.array([[0,0,0.5], [0,0,1.2], [0,0,0.9]])
+# highest = get_highest_point_spline(ctrl_points)
+# print(highest)  # [0, 0, 1.2]
+
+
 #endregion

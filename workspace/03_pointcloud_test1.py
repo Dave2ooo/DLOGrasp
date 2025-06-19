@@ -1353,8 +1353,10 @@ def fit_spline_to_pc():
     best_betas = []
     best_pcs_world = []
 
+    image = cv2.imread(f'/root/workspace/images/moves/cable{0}.jpg')
+
     # Take image
-    images.append(image_subscriber.get_current_image())
+    images.append(image)
     # Get current transform
     transforms.append(ros_handler.get_current_pose("hand_camera_frame", "map"))
     transforms_palm.append(ros_handler.get_current_pose("hand_palm_link", "map"))
@@ -1389,15 +1391,171 @@ def fit_spline_to_pc():
     # visualize_spline_with_pc(new_pointcloud_masked_reduced, ctrl_points, degree)
 
 
-    ctrl_point = fit_spline_paper(new_pointcloud_masked_reduced, num_ctrl_points, degree)
-    visualize_spline_with_pc(new_pointcloud_masked_reduced, ctrl_points, degree)
+    # ctrl_point = fit_spline_paper(new_pointcloud_masked_reduced, num_ctrl_points, degree)
+    # visualize_spline_with_pc(new_pointcloud_masked_reduced, ctrl_points, degree)
 
     # show_pointclouds_with_frames([new_pointcloud_masked_reduced], transforms)
     # show_pointclouds_with_frames([new_pointcloud_masked_reduced, control_points_to_pointcloud(ctrl)], transforms)
 
+def fit_spline_to_pc_offline():
+    my_class = MyClass()
+
+    transform_stamped0 = get_stamped_transform([0.767, 0.495, 0.712], [0.707, 0.001, 0.707, -0.001])
+
+    images = []
+    transforms = []
+    transforms_palm = []
+    data = [] # depth, mask, depth_masked, pointcloud_masked, pointcloud_masked_world
+    target_poses = []
+    best_alphas = []
+    best_betas = []
+    best_pcs_world = []
+
+    image = cv2.imread(f'/root/workspace/images/moves/tube1.jpg')
+
+    # Take image
+    images.append(image)
+    # Get current transform
+    transforms.append(transform_stamped0)
+    # Process image
+    data.append(my_class.process_image(images[-1], transforms[-1], show=False))
+
+    depth, mask, depth_masked, pointcloud_masked, pointcloud_masked_world = data[0]
+    transform = transforms[0]
+
+    new_mask = cleanup_mask(mask)
+    new_mask_reduced = reduce_mask(new_mask, 1)
+    show_masks(new_mask)
+
+    new_depth_masked = mask_depth_map(depth, new_mask)
+    new_depth_masked_reduced = mask_depth_map(depth, new_mask_reduced) # Reduce mask border
+
+    pointcloud_masked = convert_depth_map_to_pointcloud(new_depth_masked, camera_parameters)
+    pointcloud_masked_reduced = convert_depth_map_to_pointcloud(new_depth_masked_reduced, camera_parameters)
+
+    # load or create your point cloud of just the cable
+    pcd = pointcloud_masked_reduced
+    voxel_size = 1e-3
+    pcd = pcd.voxel_down_sample(voxel_size)
+
+    # extract centerline
+    # centerline_pts, inds = extract_centerline(pcd, k=100)
+
+    # Example usage:
+    
+    centerline_pts = extract_centerline_from_mask(depth, new_mask_reduced, camera_parameters)
+    print(f"centerline_pts: {centerline_pts}")
+
+    # visualize centerline as a line set
+    line_set = o3d.geometry.LineSet(
+        points=o3d.utility.Vector3dVector(centerline_pts),
+        lines=o3d.utility.Vector2iVector([[i, i+1] for i in range(len(centerline_pts)-1)])
+    )
+    o3d.visualization.draw_geometries([pcd.paint_uniform_color([0.7,0.7,0.7]), line_set])
+
+    degree = 3
+    # Fit B-spline
+    ctrl_points = fit_bspline_scipy(centerline_pts, degree=degree, smooth=1e-2, nest=20)
+    visualize_spline_with_pc(pcd, ctrl_points, degree)
+
+def fit_spline_to_pc_offline2(transforms):
+    my_class = MyClass()
+
+    images = []
+    transforms_palm = []
+    datas = [] # depth, mask, depth_masked, pointcloud_masked, pointcloud_masked_world
+    target_poses = []
+    best_alphas = []
+    best_betas = []
+    best_pcs_world = []
+
+    for i, transform in enumerate(transforms):
+        # Take image
+        images.append(cv2.imread(f'/root/workspace/images/moves/cable{i}.jpg'))
+        # Process image
+        datas.append(my_class.process_image(images[0], transforms[0], show=False))
+
+    # Estimate scale and shift
+    best_alpha, best_beta, best_pc_world, score = my_class.estimate_scale_shift_from_multiple_cameras_distance(datas, transforms[0:2], show=False)
+    best_alphas.append(best_alpha)
+    best_betas.append(best_beta)
+    best_pcs_world.append(best_pc_world)
+
+    best_depth = scale_depth_map(datas[1][0], best_alpha, best_beta)
+
+    centerline_pts_cam1 = extract_centerline_from_mask(best_depth, datas[1][1], camera_parameters)
+    centerline_pts_world = transform_points_to_world(centerline_pts_cam1, transforms[1])
+
+    # print(f"centerline_pts: {centerline_pts_world}")
+
+    # visualize centerline as a line set
+    line_set = o3d.geometry.LineSet(
+        points=o3d.utility.Vector3dVector(centerline_pts_world),
+        lines=o3d.utility.Vector2iVector([[i, i+1] for i in range(len(centerline_pts_world)-1)])
+    )
+    # o3d.visualization.draw_geometries([best_pc_world.paint_uniform_color([0.7,0.7,0.7]), line_set])
+
+    degree = 3
+    # Fit B-spline
+    ctrl_points = fit_bspline_scipy(centerline_pts_world, degree=degree, smooth=1e-5, nest=20)
+    # print(f"ctrl_points: {ctrl_points}")
+    # visualize_spline_with_pc(best_pc_world, ctrl_points, degree)
+
+    projected_spline = project_bspline(ctrl_points, transforms[1], camera_parameters, degree=degree)
+    # show_masks([datas[1][1], projected_spline], "Projected B-Spline")
+
+    correct_skeleton = skeletonize_mask(datas[1][1])
+    # show_masks([datas[1][1], correct_skeleton], "Correct Skeleton")
+
+    # show_masks([correct_skeleton, projected_spline])
+
+
+    projected_spline_pts_cam2 = project_bspline(ctrl_points, transforms[2], camera_parameters, degree=degree)
+    # show_masks([datas[2][1], projected_spline_cam2], "Projected B-Spline Cam2")
+
+    final_ctrl_pts = interactive_bspline_editor(
+        ctrl_points=ctrl_points,
+        datas=datas,
+        camera_pose=transforms[2],
+        camera_parameters=camera_parameters,
+        degree=3,
+        score_function_bspline=score_function_bspline_reg,
+        delta=0.5,
+        slider_scale=1000,
+        init_ctrl_points=ctrl_points
+    )
+    exit()
+
+    start = time.perf_counter()
+    bounds = make_bspline_bounds(ctrl_points)
+    result = opt.minimize(
+        fun=score_function_bspline_new,   # returns –score
+        x0=ctrl_points.flatten(),
+        args=(datas, transforms[2], camera_parameters, degree, False),
+        method='L-BFGS-B',                 # a quasi-Newton gradient‐based method
+        bounds=bounds,                     # same ±0.5 bounds per coord
+        options={
+            'maxiter': 1e4,
+            'ftol': 1e-4,
+            'eps': 0.002,
+            'disp': True
+        }
+    )
+    end = time.perf_counter()
+    print(f"Optimization took {end - start:.2f} seconds")
+
+    print(f"result: {result}")
+    ctrl_points_opt = result.x.reshape(-1, 3)
+
+    projected_spline_opt = project_bspline(ctrl_points_opt, transforms[2], camera_parameters, degree=degree)
+    correct_skeleton_cam2 = skeletonize_mask(datas[2][1])
+    show_masks([correct_skeleton_cam2, projected_spline_opt])
+
+    visualize_spline_with_pc(best_pc_world, ctrl_points_opt, degree)
+
 
 if __name__ == '__main__':
-    rospy.init_node('pointcloud_test', anonymous=True)
+    # rospy.init_node('pointcloud_test', anonymous=True)
     transform_stamped0 = get_stamped_transform([0.767, 0.495, 0.712], [0.707, 0.001, 0.707, -0.001])
     transform_stamped1 = get_stamped_transform([0.839, 0.493, 0.727], [0.774, 0.001, 0.633, -0.001])
     transform_stamped2 = get_stamped_transform([0.903, 0.493, 0.728], [0.834, 0.001, 0.552, -0.000])
@@ -1420,7 +1578,9 @@ if __name__ == '__main__':
     # calculate_angle_test()
     # pipeline_offline_test(offline_transforms=transforms)
     # pipeline2_offline_test(offline_transforms=transforms)
-    fit_spline_to_pc()
+    # fit_spline_to_pc()
+    # fit_spline_to_pc_offline()
+    fit_spline_to_pc_offline2(transforms)
 
     cv2.waitKey(0)
     cv2.destroyAllWindows()
