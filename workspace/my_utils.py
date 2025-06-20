@@ -1999,9 +1999,6 @@ def extract_centerline_mst(pointcloud: o3d.geometry.PointCloud, k: int = 6) -> n
     return centerline
 
 
-
-
-
 #endregion
 
 
@@ -2531,6 +2528,7 @@ def score_function_bspline_reg(x, datas, camera_pose, camera_parameters, degree,
     Returns:
         loss: float to MINIMIZE.
     """
+    if rospy.is_shutdown(): exit()
     # ----- 1) Reshape and penalty -----
     ctrl_pts = np.array(x, dtype=float).reshape(-1, 3)
     # compute average L2‐displacement per control‐point (in world units)
@@ -2574,9 +2572,108 @@ def score_function_bspline_reg(x, datas, camera_pose, camera_parameters, degree,
                    title=f"Fit: {assd:.2f}px, Drift: {displacement:.3f}m")
 
     # ----- 7) Final loss -----
-    print(f"reg_weighot: {reg_weight}, punishment. {reg_weight * displacement}")
+    # print(f"reg_weighot: {reg_weight}, punishment. {reg_weight * displacement}")
     loss = assd + reg_weight * displacement
     return loss
+
+def score_function_bspline_reg_multiple(x, datas, camera_poses, camera_parameters, degree, init_x, reg_weight: float = 1000.0, decay: float = 1.0, curvature_weight: float = 1.0, show: bool = False):
+    """
+    Loss = decayed mean ASSD over multiple frames
+           + reg_weight * mean control‐point drift
+           + curvature_weight * mean squared turn‐angle of control‐points.
+
+    Args:
+        x:                 flat array (3*n_ctrl) of current ctrl‐pts.
+        datas:             list of data tuples; mask = data_i[1].
+        camera_poses:      list of TransformStamped, per frame.
+        camera_parameters: (fx, fy, cx, cy) intrinsics.
+        degree:            spline degree.
+        init_x:            flat array same shape as x, original ctrl‐pts.
+        reg_weight:        weight for drift penalty.
+        decay:             exponential decay ∈(0,1] for older frames.
+        curvature_weight:  weight for sharp‐turns penalty.
+        show:              if True, visualize overlays.
+
+    Returns:
+        loss: float to MINIMIZE.
+    """
+    # 1) reshape and drift penalty
+    if rospy.is_shutdown(): exit()
+    ctrl_pts = np.array(x, dtype=float).reshape(-1, 3)
+    n_ctrl = ctrl_pts.shape[0]
+    drift = np.linalg.norm(x - init_x) / n_ctrl
+
+    # 2) curvature penalty: mean squared turn‐angle at interior ctrl‐pts
+    if n_ctrl >= 3:
+        # vectors between successive control points
+        diffs = ctrl_pts[1:] - ctrl_pts[:-1]        # shape (n_ctrl-1, 3)
+        # compute angles between consecutive diffs
+        v1 = diffs[:-1]
+        v2 = diffs[1:]
+        # dot products and norms
+        dot = np.einsum('ij,ij->i', v1, v2)
+        n1 = np.linalg.norm(v1, axis=1)
+        n2 = np.linalg.norm(v2, axis=1)
+        # avoid division by zero
+        cos_theta = np.clip(dot / (n1 * n2 + 1e-8), -1.0, 1.0)
+        angles = np.arccos(cos_theta)               # radians
+        curvature_penalty = np.mean(angles**2)
+    else:
+        curvature_penalty = 0.0
+
+    # 3) decayed ASSD over frames
+    n_frames = len(datas)
+    weights = np.array([decay**(n_frames - 1 - i) for i in range(n_frames)], dtype=float)
+    wsum = weights.sum()
+
+    assd_sum = 0.0
+    for i, (data_i, cam_pose) in enumerate(zip(datas, camera_poses)):
+        _, mask, _, _, _ = data_i
+        skeleton = skeletonize(mask > 0)
+
+        pts2d = project_bspline_pts(ctrl_pts,
+                                    cam_pose,
+                                    camera_parameters,
+                                    degree=degree,
+                                    num_samples=200)
+
+        dt = distance_transform_edt(~skeleton)
+        H, W = skeleton.shape
+        interp = RegularGridInterpolator(
+            (np.arange(H), np.arange(W)),
+            dt,
+            bounds_error=False,
+            fill_value=dt.max()
+        )
+        sample_pts = np.stack([pts2d[:,1], pts2d[:,0]], axis=1)
+        dists = interp(sample_pts)
+        assd_sum += weights[i] * dists.mean()
+
+        # if show:
+        #     proj_mask = project_bspline(ctrl_pts,
+        #                                 cam_pose,
+        #                                 camera_parameters,
+        #                                 width=W, height=H,
+        #                                 degree=degree)
+        #     show_masks(
+        #         [ (skeleton.astype(np.uint8)*255, f"Skeleton F{i}"),
+        #           (proj_mask,                 f"Spline F{i}") ],
+        #         title=(f"F{i} ASSD={dists.mean():.2f}, "
+        #                f"w={weights[i]:.3f}")
+        #     )
+
+    mean_assd = assd_sum / wsum
+
+    # 4) total loss
+    loss = mean_assd + reg_weight * drift + curvature_weight * curvature_penalty
+
+    # debug
+    if show:
+        print(f"Mean ASSD: {mean_assd:.2f}, Drift: {drift*reg_weight:.2f}, "
+              f"Curvature: {curvature_penalty:.2f}")
+    return loss
+
+
 
 def interactive_bspline_editor(ctrl_points: np.ndarray,
                                datas,
@@ -2681,20 +2778,48 @@ def get_highest_point_and_angle_spline(ctrl_points):
 
     # Compute azimuth angle in the XY-plane
     x, y = highest_pt[0], highest_pt[1]
-    angle = np.arctan2(y, x)  # radians, in range [-pi, pi]
-
+    angle = np.arctan2(x, y)  # radians, in range [-pi, pi]
+    print(f'Angle: {angle/np.pi*180:.0f}°')
     return highest_pt, angle
 
-# Example usage:
-# ctrl_pts = np.array([[0,0,0.5], [1,1,2.0], [-1,2,1.8]])
-# pt, ang = get_highest_point_spline(ctrl_pts)
-# print("Highest point:", pt, "Angle (rad):", ang)
+def convert_bspline_to_pointcloud(ctrl_points: np.ndarray, samples: int = 150, degree: int = 3) -> o3d.geometry.PointCloud:
+    """
+    Converts a B-spline defined by control points into an Open3D PointCloud
+    by sampling points along the curve.
 
+    Args:
+        ctrl_points: (N_control × 3) array of control points.
+        samples:     Number of points to sample along the spline (integer ≥ 2).
+        degree:      Spline degree (k). Must satisfy N_control > degree.
 
-# Example usage:
-# ctrl_points = np.array([[0,0,0.5], [0,0,1.2], [0,0,0.9]])
-# highest = get_highest_point_spline(ctrl_points)
-# print(highest)  # [0, 0, 1.2]
+    Returns:
+        pcd: Open3D.geometry.PointCloud containing `samples` points sampled
+             along the B-spline.
+    """
+    pts = np.asarray(ctrl_points, dtype=float)
+    n_ctrl = pts.shape[0]
+    k = degree
+    if n_ctrl <= k:
+        raise ValueError("Number of control points must exceed spline degree")
+
+    # Open-uniform knot vector: (k+1) zeros, inner knots, (k+1) ones
+    n_inner = n_ctrl - k - 1
+    if n_inner > 0:
+        inner = np.linspace(0, 1, n_inner + 2)[1:-1]
+        knots = np.concatenate((np.zeros(k+1), inner, np.ones(k+1)))
+    else:
+        knots = np.concatenate((np.zeros(k+1), np.ones(k+1)))
+
+    # Build the spline and sample
+    spline = BSpline(knots, pts, k, axis=0)
+    u = np.linspace(0, 1, samples)
+    samples_3d = spline(u)  # shape: (samples, 3)
+
+    # Create Open3D PointCloud
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(samples_3d)
+
+    return pcd
 
 
 #endregion

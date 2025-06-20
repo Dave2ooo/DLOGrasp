@@ -886,6 +886,9 @@ def pipeline_spline():
     transforms_palm.append(ros_handler.get_current_pose("hand_palm_link", "map"))
     # Process image
     data.append(my_class.process_image(images[-1], transforms[-1], show=False))
+    data[-1][1][:] = cleanup_mask(data[-1][1])
+    show_masks(data[-1][1])
+
     usr_input = input("Mask Correct? [y]/n: ")
     if usr_input == "n": exit()
     # Move arm
@@ -904,26 +907,15 @@ def pipeline_spline():
     transforms_palm.append(ros_handler.get_current_pose("hand_palm_link", "map"))
     # Process image
     data.append(my_class.process_image(images[-1], transforms[-1], show=False))
+    data[-1][1][:] = cleanup_mask(data[-1][1])
+    show_masks(data[-1][1])
     # Estimate scale and shift
     # best_alpha, best_beta, best_pc_world, num_inliers, num_inliers_union = my_class.estimate_scale_shift_new(data[-2], data[-1], transforms[-2], transforms[-1], show=True)
-    best_alpha, best_beta, best_pc_world, score = my_class.estimate_scale_shift_from_multiple_cameras_distance(data, transforms, show=False)
+    best_alpha, best_beta, best_pc_world, score = my_class.estimate_scale_shift_from_multiple_cameras_distance(data, transforms, show=True)
     best_alphas.append(best_alpha)
     best_betas.append(best_beta)
     best_pcs_world.append(best_pc_world)
-    pointcloud_publisher.publish(best_pcs_world[-1])
-    # Get highest Point in pointcloud
-    target_point = my_class.get_highest_point(best_pcs_world[-1])
-    tarrget_point_offset = target_point
-    tarrget_point_offset[2] += 0.098 + 0.010# - 0.020 # Make target Pose hover above actual target pose - tested offset
-    # Convert to Pose
-    target_poses.append(my_class.get_desired_pose(tarrget_point_offset))
-    # Calculate Path
-    target_path = interpolate_poses(transforms_palm[-1], target_poses[-1], num_steps=3)
-    # Move arm a step
-    path_publisher.publish(target_path)
-    pose_publisher.publish(target_path[1])
-    # input("Press Enter when moves are finished…")
-    rospy.sleep(5)
+    # pointcloud_publisher.publish(best_pcs_world[-1])
     #endregion -------------------- Depth Enything --------------------
 
     #region -------------------- Spline --------------------
@@ -934,15 +926,36 @@ def pipeline_spline():
     # Fit B-spline
     ctrl_points.append(fit_bspline_scipy(centerline_pts_world, degree=degree, smooth=1e-5, nest=20))
     print(f"ctrl_points: {ctrl_points[0]}")
+
+    spline_pc = convert_bspline_to_pointcloud(ctrl_points[-1])
+    pointcloud_publisher.publish(spline_pc)
+
     visualize_spline_with_pc(best_pc_world, ctrl_points[0], degree, title="Scaled PointCloud & Spline")
 
-    projected_spline = project_bspline(ctrl_points[0], transforms[1], camera_parameters, degree=degree)
-    show_masks([data[-1][1], projected_spline], "Projected B-Spline")
+    projected_spline_cam1 = project_bspline(ctrl_points[0], transforms[1], camera_parameters, degree=degree)
+    show_masks([data[1][1], projected_spline_cam1], "Projected B-Spline Cam1 - 1")
     
     correct_skeleton = skeletonize_mask(data[-1][1])
     show_masks([data[-1][1], correct_skeleton], "Correct Skeleton")
 
-    show_masks([correct_skeleton, projected_spline])
+    show_masks([correct_skeleton, projected_spline_cam1], "Correct Skeleton and Projected Spline (CAM1)")
+
+
+    # Get highest Point in pointcloud
+    target_point, target_angle = get_highest_point_and_angle_spline(ctrl_points[-1])
+    tarrget_point_offset = target_point.copy()
+    tarrget_point_offset[2] += 0.098 + 0.010 # - 0.020 # Make target Pose hover above actual target pose - tested offset
+  
+    # Convert to Pose
+    target_poses.append(my_class.get_desired_pose(tarrget_point_offset))
+    # Calculate Path
+    target_path = interpolate_poses(transforms_palm[-1], target_poses[-1], num_steps=4)
+    # Move arm a step
+    path_publisher.publish(target_path)
+    pose_publisher.publish(target_path[1])
+    # input("Press Enter when moves are finished…")
+    rospy.sleep(5)
+
 
     while not rospy.is_shutdown():
         # Take image
@@ -954,22 +967,27 @@ def pipeline_spline():
         transforms_palm.append(ros_handler.get_current_pose("hand_palm_link", "map"))
         # Process image
         data.append(my_class.process_image(images[-1], transforms[-1], show=False))
+        data[-1][1][:] = cleanup_mask(data[-1][1])
+        show_masks(data[-1][1])
 
-        projected_spline_cam2 = project_bspline(ctrl_points[-1], transforms[2], camera_parameters, degree=degree)
+        projected_spline_cam1 = project_bspline(ctrl_points[-1], transforms[-2], camera_parameters, degree=degree)
+        show_masks([data[-2][1], projected_spline_cam1], "Projected B-Spline Cam1")
+
+        projected_spline_cam2 = project_bspline(ctrl_points[-1], transforms[-1], camera_parameters, degree=degree)
         show_masks([data[-1][1], projected_spline_cam2], "Projected B-Spline Cam2")
 
         start = time.perf_counter()
         bounds = make_bspline_bounds(ctrl_points[-1])
         result = opt.minimize(
-            fun=score_function_bspline_reg,   # returns –score
+            fun=score_function_bspline_reg_multiple,   # returns –score
             x0=ctrl_points[-1].flatten(),
-            args=(data, transforms[-1], camera_parameters, degree, ctrl_points[-1].flatten(), 1000, False),
-            method='L-BFGS-B',                 # a quasi-Newton gradient‐based method
+            args=(data, transforms, camera_parameters, degree, ctrl_points[-1].flatten(), 10, 1, 10, True),
+            method='Powell', # 'L-BFGS-B',                 # a quasi-Newton gradient‐based method
             bounds=bounds,                     # same ±0.5 bounds per coord
             options={
-                'maxiter': 1e4,
+                'maxiter': 1e6,
                 'ftol': 1e-4,
-                'eps': 0.002,
+                'eps': 0.001,
                 'disp': True
             }
         )
@@ -978,6 +996,9 @@ def pipeline_spline():
 
         print(f"result: {result}")
         ctrl_points.append(result.x.reshape(-1, 3))
+
+        spline_pc = convert_bspline_to_pointcloud(ctrl_points[-1])
+        pointcloud_publisher.publish(spline_pc)
 
         projected_spline_opt = project_bspline(ctrl_points[-1], transforms[-1], camera_parameters, degree=degree)
         correct_skeleton_cam2 = skeletonize_mask(data[-1][1])
@@ -988,12 +1009,12 @@ def pipeline_spline():
         # Movement
         # Get highest Point in pointcloud
         target_point, target_angle = get_highest_point_and_angle_spline(ctrl_points[-1])
-        tarrget_point_offset = target_point
-        tarrget_point_offset[2] += 0.098 + 0.010# - 0.020 # Make target Pose hover above actual target pose - tested offset
+        tarrget_point_offset = target_point.copy()
+        tarrget_point_offset[2] += 0.098 + 0.010 - 0.030 # Make target Pose hover above actual target pose - tested offset
         # Convert to Pose
         target_poses.append(my_class.get_desired_pose(tarrget_point_offset))
         # Calculate Path
-        target_path = interpolate_poses(transforms_palm[-1], target_poses[-1], num_steps=3)
+        target_path = interpolate_poses(transforms_palm[-1], target_poses[-1], num_steps=4)
         # Move arm a step
         path_publisher.publish(target_path)
         usr_input = input("Go to final Pose? y/[n]: ")
