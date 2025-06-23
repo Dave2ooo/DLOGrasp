@@ -853,8 +853,8 @@ def pipeline2():
 
 def pipeline_spline():
     my_class = MyClass()
-    # ros_handler = ROSHandler()
-    # image_subscriber = ImageSubscriber('/hsrb/hand_camera/image_rect_color')
+    ros_handler = ROSHandler()
+    image_subscriber = ImageSubscriber('/hsrb/hand_camera/image_rect_color')
     pose_publisher = PosePublisher("/next_pose")
     path_publisher = PathPublisher("/my_path")
     pointcloud_publisher = PointcloudPublisher(topic="my_pointcloud", frame_id="map")
@@ -878,16 +878,16 @@ def pipeline_spline():
     ctrl_points = []
 
     # Take image
-    # images.append(image_subscriber.get_current_image()) # <- online
-    images.append(cv2.imread(f'/root/workspace/images/moves/cable{0}.jpg')) # <- offline
+    images.append(image_subscriber.get_current_image()) # <- online
+    # images.append(cv2.imread(f'/root/workspace/images/moves/cable{0}.jpg')) # <- offline
     # Get current transform
-    # transforms.append(ros_handler.get_current_pose("hand_camera_frame", "map")) # <- online
-    transforms.append(transform_stamped0) # <- offline
-    # transforms_palm.append(ros_handler.get_current_pose("hand_palm_link", "map")) # <- online
+    transforms.append(ros_handler.get_current_pose("hand_camera_frame", "map")) # <- online
+    # transforms.append(transform_stamped0) # <- offline
+    transforms_palm.append(ros_handler.get_current_pose("hand_palm_link", "map")) # <- online
     # Process image
     data.append(my_class.process_image(images[-1], transforms[-1], show=False))
     data[-1][1][:] = cleanup_mask(data[-1][1])
-    show_masks(data[-1][1])
+    # show_masks(data[-1][1])
 
     usr_input = input("Mask Correct? [y]/n: ")
     if usr_input == "n": exit()
@@ -899,23 +899,23 @@ def pipeline_spline():
 
     #region -------------------- Depth Anything --------------------
     # Take image
-    # images.append(image_subscriber.get_current_image()) # <- online
-    images.append(cv2.imread(f'/root/workspace/images/moves/cable{1}.jpg')) # <- offline
+    images.append(image_subscriber.get_current_image()) # <- online
+    # images.append(cv2.imread(f'/root/workspace/images/moves/cable{1}.jpg')) # <- offline
     # Get current transform
-    # transforms.append(ros_handler.get_current_pose("hand_camera_frame", "map")) # <- online
-    transforms.append(transform_stamped1) # <- offline
-    # transforms_palm.append(ros_handler.get_current_pose("hand_palm_link", "map")) # <- online
+    transforms.append(ros_handler.get_current_pose("hand_camera_frame", "map")) # <- online
+    # transforms.append(transform_stamped1) # <- offline
+    transforms_palm.append(ros_handler.get_current_pose("hand_palm_link", "map")) # <- online
     # Process image
     data.append(my_class.process_image(images[-1], transforms[-1], show=False))
     data[-1][1][:] = cleanup_mask(data[-1][1])
-    show_masks(data[-1][1])
+    # show_masks(data[-1][1])
     # Estimate scale and shift
     # best_alpha, best_beta, best_pc_world, num_inliers, num_inliers_union = my_class.estimate_scale_shift_new(data[-2], data[-1], transforms[-2], transforms[-1], show=True)
     best_alpha, best_beta, best_pc_world, score = my_class.estimate_scale_shift_from_multiple_cameras_distance(data, transforms, show=True)
     best_alphas.append(best_alpha)
     best_betas.append(best_beta)
     best_pcs_world.append(best_pc_world)
-    # pointcloud_publisher.publish(best_pcs_world[-1])
+    pointcloud_publisher.publish(best_pcs_world[-1])
     #endregion -------------------- Depth Enything --------------------
 
     #region -------------------- Spline --------------------
@@ -924,7 +924,7 @@ def pipeline_spline():
     centerline_pts_world = transform_points_to_world(centerline_pts_cam2, transforms[-1])
     degree = 3
     # Fit B-spline
-    ctrl_points.append(fit_bspline_scipy(centerline_pts_world, degree=degree, smooth=1e-5, nest=20))
+    ctrl_points.append(fit_bspline_scipy(centerline_pts_world, degree=degree, smooth=1e-5, nest=20)[3:-3,:])
     print(f"ctrl_points: {ctrl_points[0]}")
 
     spline_pc = convert_bspline_to_pointcloud(ctrl_points[-1])
@@ -949,8 +949,8 @@ def pipeline_spline():
     # Convert to Pose
     target_poses.append(my_class.get_desired_pose(tarrget_point_offset))
     # Calculate Path
-    # target_path = interpolate_poses(transforms_palm[-1], target_poses[-1], num_steps=4) # <- online
-    target_path = interpolate_poses(transforms[-1], target_poses[-1], num_steps=4) # <- offline
+    target_path = interpolate_poses(transforms_palm[-1], target_poses[-1], num_steps=4) # <- online
+    # target_path = interpolate_poses(transforms[-1], target_poses[-1], num_steps=4) # <- offline
     # Move arm a step
     path_publisher.publish(target_path)
     pose_publisher.publish(target_path[1])
@@ -960,16 +960,16 @@ def pipeline_spline():
 
     while not rospy.is_shutdown():
         # Take image
-        # images.append(image_subscriber.get_current_image()) # <- online
-        images.append(cv2.imread(f'/root/workspace/images/moves/cable{1}.jpg')) # <- offline
+        images.append(image_subscriber.get_current_image()) # <- online
+        # images.append(cv2.imread(f'/root/workspace/images/moves/cable{1}.jpg')) # <- offline
         # Get current transform
-        # transforms.append(ros_handler.get_current_pose("hand_camera_frame", "map")) # <- online
-        transforms.append(transform_stamped2) # <- offline
-        # transforms_palm.append(ros_handler.get_current_pose("hand_palm_link", "map")) # <- online
+        transforms.append(ros_handler.get_current_pose("hand_camera_frame", "map")) # <- online
+        # transforms.append(transform_stamped2) # <- offline
+        transforms_palm.append(ros_handler.get_current_pose("hand_palm_link", "map")) # <- online
         # Process image
         data.append(my_class.process_image(images[-1], transforms[-1], show=False))
         data[-1][1][:] = cleanup_mask(data[-1][1])
-        show_masks(data[-1][1])
+        # show_masks(data[-1][1])
 
         projected_spline_cam1 = project_bspline(ctrl_points[-1], transforms[-2], camera_parameters, degree=degree)
         show_masks([data[-2][1], projected_spline_cam1], "Projected B-Spline Cam1")
@@ -977,13 +977,13 @@ def pipeline_spline():
         projected_spline_cam2 = project_bspline(ctrl_points[-1], transforms[-1], camera_parameters, degree=degree)
         show_masks([data[-1][1], projected_spline_cam2], "Projected B-Spline Cam2")
 
-        # Translate b-spline
+        #region Translate b-spline
         start = time.perf_counter()
         bounds = [(-0.1, 0.1), (-0.1, 0.1)] # [(x_min, x_max), (y_min,  y_max)]
         result_translation = opt.minimize(
             fun=score_bspline_translation,   # returns –score
             x0=[0, 0],
-            args=(data[-1], transforms[-1], camera_parameters, degree, ctrl_points[-1].flatten()),
+            args=(data[-1], transforms[-1], camera_parameters, degree, ctrl_points[-1]),
             method='L-BFGS-B', # 'Powell',                  # a quasi-Newton gradient‐based method
             bounds=bounds,                     # same ±0.5 bounds per coord
             options={
@@ -995,35 +995,81 @@ def pipeline_spline():
         )
         end = time.perf_counter()
         print(f"B-spline translation took {end - start:.2f} seconds")
-
         ctrl_points_translated = apply_translation_to_ctrl_points(ctrl_points[-1], result_translation.x, transforms[-1])
+
+        # ctrl_points_translated = shift_control_points(ctrl_points[-1], data[-1][1], transforms[-1], camera_parameters, degree)
+
         projected_spline_cam2_translated = project_bspline(ctrl_points_translated, transforms[-1], camera_parameters, degree=degree)
         show_masks([data[-1][1], projected_spline_cam2_translated], "Projected B-Spline Cam2 Translated")
 
-        # Optimize control points
+        #region Coarse optimize control points
+        # 1) Precompute once:
+        skeletons, interps = precompute_skeletons_and_interps(data)        # 2) Call optimizer with our new score:
+        bounds = make_bspline_bounds(ctrl_points_translated, delta=0.5)
+        init_x_coarse = ctrl_points_translated.flatten()
+        reg_weight = 500
+        decay = 0.7
+        curvature_weight = 1
+        # 2) Coarse/fine minimization calls:
         start = time.perf_counter()
-        # bounds = make_bspline_bounds(ctrl_points[-1]) 
-        bounds = make_bspline_bounds(ctrl_points_translated)
-        result = opt.minimize(
-            fun=score_function_bspline_reg_multiple,   # returns –score
-            # x0=ctrl_points[-1].flatten(),
-            x0=ctrl_points_translated.flatten(),
-            # args=(data, transforms, camera_parameters, degree, ctrl_points[-1].flatten(), 10, 1, 10, True),
-            args=(data, transforms, camera_parameters, degree, ctrl_points_translated.flatten(), 10, 1, 10, True),
-            method='Powell', # 'L-BFGS-B',                 # a quasi-Newton gradient‐based method
-            bounds=bounds,                     # same ±0.5 bounds per coord
-            options={
-                'maxiter': 1e6,
-                'ftol': 1e-4,
-                'eps': 0.001,
-                'disp': True
-            }
+        result_coarse = opt.minimize(
+            fun=score_function_bspline_reg_multiple_pre,
+            x0=init_x_coarse,
+            args=(
+                transforms,
+                camera_parameters,
+                degree,
+                init_x_coarse,
+                reg_weight,
+                decay,
+                curvature_weight,
+                skeletons,
+                interps,
+                50
+            ),
+            method='Powell', # 'L-BFGS-B',
+            bounds=bounds,
+            options={'maxiter':1e6, 'ftol':1e-3, 'eps':1e-6, 'xtol':1e-3, 'disp':True}
         )
         end = time.perf_counter()
-        print(f"Optimization took {end - start:.2f} seconds")
+        print(f"Coarse optimization took {end - start:.2f} seconds")
+        print(f"result: {result_coarse}")
+        ctrl_points_coarse = result_coarse.x.reshape(-1, 3)
+        projected_spline_cam2_coarse = project_bspline(ctrl_points_coarse, transforms[-1], camera_parameters, degree=degree)
+        show_masks([data[-1][1], projected_spline_cam2_coarse], "Projected B-Spline Cam2 Coarse")
+        #endregion
 
-        print(f"result: {result}")
-        ctrl_points.append(result.x.reshape(-1, 3))
+        #region Fine optimizer
+        init_x_fine = ctrl_points_coarse.flatten()
+        start = time.perf_counter()
+        result_fine = opt.minimize(
+            fun=score_function_bspline_reg_multiple_pre,
+            x0=init_x_fine,
+            args=(
+                transforms,
+                camera_parameters,
+                degree,
+                init_x_fine,
+                reg_weight,
+                decay,
+                curvature_weight,
+                skeletons,
+                interps,
+                200
+            ),
+            method='Powell', # 'L-BFGS-B',
+            bounds=bounds,
+            options={'maxiter':1e6, 'ftol':1e-3, 'eps':1e-8, 'xtol':1e-4, 'disp':True}
+        )
+        end = time.perf_counter()
+        print(f"Fine optimization took {end - start:.2f} seconds")
+        print(f"result: {result_fine}")
+        ctrl_points_fine = result_fine.x.reshape(-1, 3)
+        projected_spline_cam2_fine = project_bspline(ctrl_points_fine, transforms[-1], camera_parameters, degree=degree)
+        show_masks([data[-1][1], projected_spline_cam2_fine], "Projected B-Spline Cam2 Fine")
+
+        ctrl_points.append(ctrl_points_fine)
+        #endregion
 
         spline_pc = convert_bspline_to_pointcloud(ctrl_points[-1])
         pointcloud_publisher.publish(spline_pc)
@@ -1038,15 +1084,16 @@ def pipeline_spline():
         # Get highest Point in pointcloud
         target_point, target_angle = get_highest_point_and_angle_spline(ctrl_points[-1])
         tarrget_point_offset = target_point.copy()
-        tarrget_point_offset[2] += 0.098 + 0.010 - 0.030 # Make target Pose hover above actual target pose - tested offset
+        tarrget_point_offset[2] += 0.098 + 0.010 - 0.035 # Make target Pose hover above actual target pose - tested offset
         # Convert to Pose
         target_poses.append(my_class.get_desired_pose(tarrget_point_offset))
         # Calculate Path
-        # target_path = interpolate_poses(transforms_palm[-1], target_poses[-1], num_steps=4) # <- online
-        target_path = interpolate_poses(transforms[-1], target_poses[-1], num_steps=4) # <- offline
+        target_path = interpolate_poses(transforms_palm[-1], target_poses[-1], num_steps=4) # <- online
+        # target_path = interpolate_poses(transforms[-1], target_poses[-1], num_steps=4) # <- offline
         # Move arm a step
         path_publisher.publish(target_path)
         usr_input = input("Go to final Pose? y/[n]: ")
+        if usr_input == "c": exit()
         if usr_input == "y":
             rotated_target_pose = rotate_pose_around_z(target_poses[-1], target_angle)
             pose_publisher.publish(rotated_target_pose)

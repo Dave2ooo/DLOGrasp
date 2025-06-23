@@ -2576,6 +2576,114 @@ def score_function_bspline_reg(x, datas, camera_pose, camera_parameters, degree,
     loss = assd + reg_weight * displacement
     return loss
 
+def precompute_skeletons_and_interps(datas):
+    """
+    One‐time preprocessing: from each mask in datas, build:
+      - skeleton (bool H×W)
+      - dt = distance transform of the skeleton complement
+      - interp DT → fast subpixel lookup
+    
+    Returns:
+      skeletons: list of bool arrays
+      interps:   list of RegularGridInterpolator objects
+    """
+    skeletons = []
+    interps   = []
+    for (_, mask, _, _, _) in datas:
+        sk = skeletonize(mask > 0)
+        dt = distance_transform_edt(~sk)
+        H, W = sk.shape
+        interp = RegularGridInterpolator(
+            (np.arange(H), np.arange(W)),
+            dt,
+            bounds_error=False,
+            fill_value=dt.max()
+        )
+        skeletons.append(sk)
+        interps.append(interp)
+    return skeletons, interps
+
+
+def score_function_bspline_reg_multiple_pre(x, camera_poses, camera_parameters, degree, init_x, reg_weight: float, decay: float, curvature_weight: float, skeletons: list, interps: list, num_samples: int):
+    """
+    Loss = decayed mean ASSD over multiple frames
+           + reg_weight * mean control‐point drift
+           + curvature_weight * mean squared turn‐angle of control‐points.
+
+    All per‐mask work (skeleton/DT/interp) is precomputed.
+
+    Args:
+        x:                 flat array (3*n_ctrl) of current ctrl‐pts.
+        camera_poses:      list of TransformStamped, per frame.
+        camera_parameters: (fx, fy, cx, cy) intrinsics.
+        degree:            spline degree.
+        init_x:            flat array same shape as x, original ctrl‐pts.
+        reg_weight:        weight for drift penalty.
+        decay:             exponential decay ∈(0,1] for older frames.
+        curvature_weight:  weight for sharp‐turns penalty.
+        skeletons:         list of H×W bool skeletons.
+        interps:           list of RegularGridInterpolator for each frame.
+        num_samples:       how many points to sample along the spline.
+
+    Returns:
+        loss: float to MINIMIZE (never NaN).
+    """
+    # 1) reshape & drift penalty
+    ctrl_pts = x.reshape(-1, 3)
+    n_ctrl = ctrl_pts.shape[0]
+    drift = np.linalg.norm(x - init_x) / n_ctrl
+
+    # 2) curvature penalty
+    if n_ctrl >= 3:
+        diffs = ctrl_pts[1:] - ctrl_pts[:-1]
+        v1, v2 = diffs[:-1], diffs[1:]
+        dot = np.einsum('ij,ij->i', v1, v2)
+        n1 = np.linalg.norm(v1, axis=1)
+        n2 = np.linalg.norm(v2, axis=1)
+        cos_t = np.clip(dot/(n1*n2 + 1e-8), -1, 1)
+        angles = np.arccos(cos_t)
+        curvature_penalty = np.mean(angles**2)
+    else:
+        curvature_penalty = 0.0
+
+    # 3) frame weights
+    n_frames = len(skeletons)
+    weights = np.array([decay**(n_frames - 1 - i) for i in range(n_frames)], dtype=float)
+    wsum = weights.sum()
+
+    # 4) accumulate decayed ASSD
+    assd_sum = 0.0
+    fx, fy, cx, cy = camera_parameters
+
+    for i, cam_pose in enumerate(camera_poses):
+        # project to subpixel 2D
+        pts2d = project_bspline_pts(
+            ctrl_pts,
+            cam_pose,
+            camera_parameters,
+            degree=degree,
+            num_samples=num_samples
+        )  # shape (M,2) floats
+
+        # guard against empty projection
+        if pts2d.size == 0:
+            # no points visible → huge penalty
+            assd_i = np.max(interps[i].values)  # max distance
+        else:
+            # sample the precomputed interpolator
+            sample_pts = np.stack([pts2d[:,1], pts2d[:,0]], axis=1)
+            dists = interps[i](sample_pts)
+            # guard NaNs
+            assd_i = np.nanmean(dists) if np.isfinite(dists).any() else np.max(interps[i].values)
+
+        assd_sum += weights[i] * assd_i
+
+    mean_assd = assd_sum / wsum
+
+    # 5) final loss
+    loss = mean_assd + reg_weight * drift + curvature_weight * curvature_penalty
+    return float(loss)
+
 def score_function_bspline_reg_multiple(x, datas, camera_poses, camera_parameters, degree, init_x, reg_weight: float = 1000.0, decay: float = 1.0, curvature_weight: float = 1.0, show: bool = False):
     """
     Loss = decayed mean ASSD over multiple frames
@@ -2648,19 +2756,6 @@ def score_function_bspline_reg_multiple(x, datas, camera_poses, camera_parameter
         sample_pts = np.stack([pts2d[:,1], pts2d[:,0]], axis=1)
         dists = interp(sample_pts)
         assd_sum += weights[i] * dists.mean()
-
-        # if show:
-        #     proj_mask = project_bspline(ctrl_pts,
-        #                                 cam_pose,
-        #                                 camera_parameters,
-        #                                 width=W, height=H,
-        #                                 degree=degree)
-        #     show_masks(
-        #         [ (skeleton.astype(np.uint8)*255, f"Skeleton F{i}"),
-        #           (proj_mask,                 f"Spline F{i}") ],
-        #         title=(f"F{i} ASSD={dists.mean():.2f}, "
-        #                f"w={weights[i]:.3f}")
-        #     )
 
     mean_assd = assd_sum / wsum
 
@@ -2785,6 +2880,93 @@ def apply_translation_to_ctrl_points(ctrl_points: np.ndarray, shift_xy: np.ndarr
 
     return shifted_ctrl_points
 
+def shift_control_points(ctrl_points: np.ndarray, mask: np.ndarray, camera_pose, camera_parameters: tuple, degree: int = 3, num_samples: int = 200) -> np.ndarray:
+    """
+    Shift the entire B-spline parallel to the camera's image plane so that
+    the centroid of its projection aligns with the centroid of the mask.
+
+    Args:
+        ctrl_points:        (N_ctrl×3) array of control points (world coords).
+        mask:               (H×W) binary mask (0/1 or bool).
+        camera_pose:        TransformStamped with .transform.translation & rotation.
+        camera_parameters:  (fx, fy, cx, cy) intrinsics.
+        degree:             spline degree (default=3).
+        num_samples:        how many points to sample along the spline.
+
+    Returns:
+        shifted_ctrl_points: (N_ctrl×3) array of translated control points.
+    """
+    fx, fy, cx, cy = camera_parameters
+
+    # 1) Build the B-spline and sample points in world coords
+    pts = np.asarray(ctrl_points, dtype=float)
+    n_ctrl = pts.shape[0]
+    k = degree
+    # knot vector: open-uniform
+    n_inner = n_ctrl - k - 1
+    if n_inner > 0:
+        inner = np.linspace(0, 1, n_inner+2)[1:-1]
+        knots = np.concatenate((np.zeros(k+1), inner, np.ones(k+1)))
+    else:
+        knots = np.concatenate((np.zeros(k+1), np.ones(k+1)))
+    spline = BSpline(knots, pts, k, axis=0)
+    u = np.linspace(0, 1, num_samples)
+    samples_world = spline(u)  # (M,3)
+
+    # 2) Compute camera->world rotation matrix R (world = R @ cam)
+    q = camera_pose.transform.rotation
+    qx, qy, qz, qw = q.x, q.y, q.z, q.w
+    xx, yy, zz = qx*qx, qy*qy, qz*qz
+    xy, xz, yz = qx*qy, qx*qz, qy*qz
+    wx, wy, wz = qw*qx, qw*qy, qw*qz
+    R = np.array([
+        [1-2*(yy+zz),   2*(xy - wz),   2*(xz + wy)],
+        [2*(xy + wz),   1-2*(xx+zz),   2*(yz - wx)],
+        [2*(xz - wy),   2*(yz + wx),   1-2*(xx+yy)]
+    ])
+
+    # camera translation in world coords
+    t = np.array([camera_pose.transform.translation.x,
+                  camera_pose.transform.translation.y,
+                  camera_pose.transform.translation.z], dtype=float)
+
+    # 3) Transform samples into camera frame: p_cam = R^T @ (p_world - t)
+    diff = samples_world - t
+    samples_cam = diff.dot(R.T)
+    x_cam, y_cam, z_cam = samples_cam[:,0], samples_cam[:,1], samples_cam[:,2]
+    valid = z_cam > 0
+    x_cam, y_cam, z_cam = x_cam[valid], y_cam[valid], z_cam[valid]
+
+    # 4) Project to pixel coords (float)
+    u_proj = fx * x_cam / z_cam + cx
+    v_proj = fy * y_cam / z_cam + cy
+
+    # 5) Centroids
+    # mask centroid (u_mask, v_mask)
+    rows, cols = np.where(mask > 0)
+    u_mask = cols.mean()
+    v_mask = rows.mean()
+    # spline centroid (u_spline, v_spline)
+    u_spline = u_proj.mean()
+    v_spline = v_proj.mean()
+
+    # 6) Compute pixel shifts
+    du = u_mask - u_spline
+    dv = v_mask - v_spline
+
+    # 7) Convert pixel shift to camera-frame meters at mean depth
+    z_ref = z_cam.mean()
+    dx = du * z_ref / fx
+    dy = dv * z_ref / fy
+    shift_cam = np.array([dx, dy, 0.0], dtype=float)
+
+    # 8) Convert to world-frame shift: shift_world = R @ shift_cam
+    shift_world = R.dot(shift_cam)
+
+    # 9) Apply to all control points
+    shifted_ctrl_points = pts + shift_world[np.newaxis, :]
+
+    return shifted_ctrl_points
 
 def interactive_bspline_editor(ctrl_points: np.ndarray,
                                datas,
