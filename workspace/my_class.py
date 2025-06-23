@@ -853,8 +853,8 @@ def pipeline2():
 
 def pipeline_spline():
     my_class = MyClass()
-    ros_handler = ROSHandler()
-    image_subscriber = ImageSubscriber('/hsrb/hand_camera/image_rect_color')
+    # ros_handler = ROSHandler()
+    # image_subscriber = ImageSubscriber('/hsrb/hand_camera/image_rect_color')
     pose_publisher = PosePublisher("/next_pose")
     path_publisher = PathPublisher("/my_path")
     pointcloud_publisher = PointcloudPublisher(topic="my_pointcloud", frame_id="map")
@@ -878,12 +878,12 @@ def pipeline_spline():
     ctrl_points = []
 
     # Take image
-    images.append(image_subscriber.get_current_image())
-    # images.append(cv2.imread(f'/root/workspace/images/moves/cable{0}.jpg'))
+    # images.append(image_subscriber.get_current_image()) # <- online
+    images.append(cv2.imread(f'/root/workspace/images/moves/cable{0}.jpg')) # <- offline
     # Get current transform
-    transforms.append(ros_handler.get_current_pose("hand_camera_frame", "map"))
-    # transforms.append(transform_stamped0)
-    transforms_palm.append(ros_handler.get_current_pose("hand_palm_link", "map"))
+    # transforms.append(ros_handler.get_current_pose("hand_camera_frame", "map")) # <- online
+    transforms.append(transform_stamped0) # <- offline
+    # transforms_palm.append(ros_handler.get_current_pose("hand_palm_link", "map")) # <- online
     # Process image
     data.append(my_class.process_image(images[-1], transforms[-1], show=False))
     data[-1][1][:] = cleanup_mask(data[-1][1])
@@ -899,12 +899,12 @@ def pipeline_spline():
 
     #region -------------------- Depth Anything --------------------
     # Take image
-    images.append(image_subscriber.get_current_image())
-    # images.append(cv2.imread(f'/root/workspace/images/moves/cable{1}.jpg'))
+    # images.append(image_subscriber.get_current_image()) # <- online
+    images.append(cv2.imread(f'/root/workspace/images/moves/cable{1}.jpg')) # <- offline
     # Get current transform
-    transforms.append(ros_handler.get_current_pose("hand_camera_frame", "map"))
-    # transforms.append(transform_stamped1)
-    transforms_palm.append(ros_handler.get_current_pose("hand_palm_link", "map"))
+    # transforms.append(ros_handler.get_current_pose("hand_camera_frame", "map")) # <- online
+    transforms.append(transform_stamped1) # <- offline
+    # transforms_palm.append(ros_handler.get_current_pose("hand_palm_link", "map")) # <- online
     # Process image
     data.append(my_class.process_image(images[-1], transforms[-1], show=False))
     data[-1][1][:] = cleanup_mask(data[-1][1])
@@ -949,7 +949,8 @@ def pipeline_spline():
     # Convert to Pose
     target_poses.append(my_class.get_desired_pose(tarrget_point_offset))
     # Calculate Path
-    target_path = interpolate_poses(transforms_palm[-1], target_poses[-1], num_steps=4)
+    # target_path = interpolate_poses(transforms_palm[-1], target_poses[-1], num_steps=4) # <- online
+    target_path = interpolate_poses(transforms[-1], target_poses[-1], num_steps=4) # <- offline
     # Move arm a step
     path_publisher.publish(target_path)
     pose_publisher.publish(target_path[1])
@@ -959,12 +960,12 @@ def pipeline_spline():
 
     while not rospy.is_shutdown():
         # Take image
-        images.append(image_subscriber.get_current_image())
-        # images.append(cv2.imread(f'/root/workspace/images/moves/cable{1}.jpg'))
+        # images.append(image_subscriber.get_current_image()) # <- online
+        images.append(cv2.imread(f'/root/workspace/images/moves/cable{1}.jpg')) # <- offline
         # Get current transform
-        transforms.append(ros_handler.get_current_pose("hand_camera_frame", "map"))
-        # transforms.append(transform_stamped2)
-        transforms_palm.append(ros_handler.get_current_pose("hand_palm_link", "map"))
+        # transforms.append(ros_handler.get_current_pose("hand_camera_frame", "map")) # <- online
+        transforms.append(transform_stamped2) # <- offline
+        # transforms_palm.append(ros_handler.get_current_pose("hand_palm_link", "map")) # <- online
         # Process image
         data.append(my_class.process_image(images[-1], transforms[-1], show=False))
         data[-1][1][:] = cleanup_mask(data[-1][1])
@@ -976,12 +977,39 @@ def pipeline_spline():
         projected_spline_cam2 = project_bspline(ctrl_points[-1], transforms[-1], camera_parameters, degree=degree)
         show_masks([data[-1][1], projected_spline_cam2], "Projected B-Spline Cam2")
 
+        # Translate b-spline
         start = time.perf_counter()
-        bounds = make_bspline_bounds(ctrl_points[-1])
+        bounds = [(-0.1, 0.1), (-0.1, 0.1)] # [(x_min, x_max), (y_min,  y_max)]
+        result_translation = opt.minimize(
+            fun=score_bspline_translation,   # returns –score
+            x0=[0, 0],
+            args=(data[-1], transforms[-1], camera_parameters, degree, ctrl_points[-1].flatten()),
+            method='L-BFGS-B', # 'Powell',                  # a quasi-Newton gradient‐based method
+            bounds=bounds,                     # same ±0.5 bounds per coord
+            options={
+                'maxiter': 1e6,
+                'ftol': 1e-5,
+                'eps': 0.0005,
+                'disp': True
+            }
+        )
+        end = time.perf_counter()
+        print(f"B-spline translation took {end - start:.2f} seconds")
+
+        ctrl_points_translated = apply_translation_to_ctrl_points(ctrl_points[-1], result_translation.x, transforms[-1])
+        projected_spline_cam2_translated = project_bspline(ctrl_points_translated, transforms[-1], camera_parameters, degree=degree)
+        show_masks([data[-1][1], projected_spline_cam2_translated], "Projected B-Spline Cam2 Translated")
+
+        # Optimize control points
+        start = time.perf_counter()
+        # bounds = make_bspline_bounds(ctrl_points[-1]) 
+        bounds = make_bspline_bounds(ctrl_points_translated)
         result = opt.minimize(
             fun=score_function_bspline_reg_multiple,   # returns –score
-            x0=ctrl_points[-1].flatten(),
-            args=(data, transforms, camera_parameters, degree, ctrl_points[-1].flatten(), 10, 1, 10, True),
+            # x0=ctrl_points[-1].flatten(),
+            x0=ctrl_points_translated.flatten(),
+            # args=(data, transforms, camera_parameters, degree, ctrl_points[-1].flatten(), 10, 1, 10, True),
+            args=(data, transforms, camera_parameters, degree, ctrl_points_translated.flatten(), 10, 1, 10, True),
             method='Powell', # 'L-BFGS-B',                 # a quasi-Newton gradient‐based method
             bounds=bounds,                     # same ±0.5 bounds per coord
             options={
@@ -1014,7 +1042,8 @@ def pipeline_spline():
         # Convert to Pose
         target_poses.append(my_class.get_desired_pose(tarrget_point_offset))
         # Calculate Path
-        target_path = interpolate_poses(transforms_palm[-1], target_poses[-1], num_steps=4)
+        # target_path = interpolate_poses(transforms_palm[-1], target_poses[-1], num_steps=4) # <- online
+        target_path = interpolate_poses(transforms[-1], target_poses[-1], num_steps=4) # <- offline
         # Move arm a step
         path_publisher.publish(target_path)
         usr_input = input("Go to final Pose? y/[n]: ")

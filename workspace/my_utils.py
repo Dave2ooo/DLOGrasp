@@ -2597,8 +2597,8 @@ def score_function_bspline_reg_multiple(x, datas, camera_poses, camera_parameter
     Returns:
         loss: float to MINIMIZE.
     """
-    # 1) reshape and drift penalty
     if rospy.is_shutdown(): exit()
+    # 1) reshape and drift penalty
     ctrl_pts = np.array(x, dtype=float).reshape(-1, 3)
     n_ctrl = ctrl_pts.shape[0]
     drift = np.linalg.norm(x - init_x) / n_ctrl
@@ -2673,6 +2673,117 @@ def score_function_bspline_reg_multiple(x, datas, camera_poses, camera_parameter
               f"Curvature: {curvature_penalty:.2f}")
     return loss
 
+def score_bspline_translation(shift_xy: np.ndarray, data, camera_pose, camera_parameters: tuple, degree: int, ctrl_points: np.ndarray, num_samples: int = 200) -> float:
+    """
+    Score (mean symmetric distance) of a B-spline after translating it
+    parallel to the camera's image plane by shift_xy = [dx, dy] in camera coords.
+
+    Args:
+        shift_xy:            length-2 array [dx, dy] in camera-frame meters.
+        ctrl_points:         (N_ctrl×3) original control points (world).
+        data:                a tuple whose second element is the H×W mask.
+        camera_pose:         TransformStamped of camera in world.
+        camera_parameters:   (fx, fy, cx, cy) intrinsics.
+        degree:              spline degree.
+        num_samples:         how many points to sample along the spline.
+
+    Returns:
+        assd: mean distance (in pixels) between projected spline and mask skeleton.
+    """
+    if rospy.is_shutdown(): exit()
+    # 1) Apply translation in camera frame to control points
+    #    Build rotation matrix R from camera_pose quaternion (cam->world)
+    q = camera_pose.transform.rotation
+    tx, ty, tz = (camera_pose.transform.translation.x,
+                  camera_pose.transform.translation.y,
+                  camera_pose.transform.translation.z)
+    qx, qy, qz, qw = q.x, q.y, q.z, q.w
+    # rotation matrix from quaternion
+    xx, yy, zz = qx*qx, qy*qy, qz*qz
+    xy, xz, yz = qx*qy, qx*qz, qy*qz
+    wx, wy, wz = qw*qx, qw*qy, qw*qz
+    R = np.array([
+        [1 - 2*(yy + zz),   2*(xy - wz),     2*(xz + wy)    ],
+        [2*(xy + wz),       1 - 2*(xx + zz), 2*(yz - wx)    ],
+        [2*(xz - wy),       2*(yz + wx),     1 - 2*(xx + yy)]
+    ])  # world <- camera
+
+    # translation vector in world coords
+    dx, dy = shift_xy
+    shift_cam = np.array([dx, dy, 0.0], dtype=float)
+    shift_world = R.dot(shift_cam)
+
+    # shifted control points
+    ctrl_pts_shifted = np.asarray(ctrl_points, dtype=float) + shift_world
+
+    # 2) get mask and skeleton
+    _, mask, _, _, _ = data
+    skeleton = skeletonize(mask > 0)
+
+    # 3) project shifted spline to subpixel 2D points
+    pts2d = project_bspline_pts(ctrl_pts_shifted,
+                                camera_pose,
+                                camera_parameters,
+                                degree=degree,
+                                num_samples=num_samples)  # (M,2) floats (u,v)
+
+    # 4) compute distance transform of skeleton complement
+    dt = distance_transform_edt(~skeleton)
+    H, W = skeleton.shape
+    interp = RegularGridInterpolator(
+        (np.arange(H), np.arange(W)),
+        dt,
+        bounds_error=False,
+        fill_value=dt.max()
+    )
+
+    # 5) sample distances (interpolator expects (row, col))
+    sample_pts = np.stack([pts2d[:,1], pts2d[:,0]], axis=1)
+    dists = interp(sample_pts)
+
+    # 6) return mean distance (ASSD)
+    return float(dists.mean())
+
+def apply_translation_to_ctrl_points(ctrl_points: np.ndarray, shift_xy: np.ndarray, camera_pose) -> np.ndarray:
+    """
+    Applies a 2D translation (dx, dy) in camera image plane to all B-spline control points.
+
+    Args:
+        ctrl_points: (N×3) array of original control points in world coordinates.
+        shift_xy:    length-2 array [dx, dy] representing translation in camera-frame meters.
+        camera_pose: TransformStamped of camera in world.
+
+    Returns:
+        shifted_ctrl_points: (N×3) array of translated control points in world coordinates.
+    """
+    # Extract translation and quaternion from camera_pose
+    tx, ty, tz = (camera_pose.transform.translation.x,
+                  camera_pose.transform.translation.y,
+                  camera_pose.transform.translation.z)
+    qx = camera_pose.transform.rotation.x
+    qy = camera_pose.transform.rotation.y
+    qz = camera_pose.transform.rotation.z
+    qw = camera_pose.transform.rotation.w
+
+    # Build rotation matrix from quaternion (camera->world)
+    xx, yy, zz = qx*qx, qy*qy, qz*qz
+    xy, xz, yz = qx*qy, qx*qz, qy*qz
+    wx, wy, wz = qw*qx, qw*qy, qw*qz
+    R = np.array([
+        [1-2*(yy+zz),   2*(xy-wz),   2*(xz+wy)],
+        [2*(xy+wz),     1-2*(xx+zz), 2*(yz-wx)],
+        [2*(xz-wy),     2*(yz+wx),   1-2*(xx+yy)]
+    ])
+
+    # Create camera-frame shift vector and convert to world frame
+    dx, dy = shift_xy
+    shift_cam = np.array([dx, dy, 0.0], dtype=float)
+    shift_world = R.dot(shift_cam)
+
+    # Apply shift to each control point
+    shifted_ctrl_points = np.asarray(ctrl_points, dtype=float) + shift_world[np.newaxis, :]
+
+    return shifted_ctrl_points
 
 
 def interactive_bspline_editor(ctrl_points: np.ndarray,
