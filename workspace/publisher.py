@@ -5,6 +5,7 @@ import open3d as o3d
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs import point_cloud2
 from std_msgs.msg import Header
+from geometry_msgs.msg import Point, PointStamped
 import numpy as np
 
 
@@ -117,3 +118,59 @@ class PointcloudPublisher:
         # Publish
         self.pub.publish(pc2_msg)
 
+
+class PointStampedPublisher:
+    def __init__(self, topic: str, frame_id: str = "map"):
+        """
+        Initialize a ROS publisher for PointStamped messages.
+
+        Parameters
+        ----------
+        topic : str
+            The name of the ROS topic to publish the PointStamped on.
+        frame_id : str
+            The frame_id to stamp each message with (default: "map").
+        """
+        self.pub = rospy.Publisher(topic, PointStamped, queue_size=1, latch=True)
+        self.frame_id = frame_id
+
+    def publish(self, pt):
+        """
+        Publish a 3D point as a PointStamped, accepting:
+          - numpy array of shape (3,) or (3,1)
+          - geometry_msgs.msg.Point
+          - geometry_msgs.msg.PointStamped
+
+        Parameters
+        ----------
+        pt : numpy.ndarray or Point or PointStamped
+            The point to publish.
+        """
+        # Build the stamped message
+        if isinstance(pt, PointStamped):
+            # Update header only
+            msg = pt
+        else:
+            # Convert to Point if needed
+            if isinstance(pt, Point):
+                p = pt
+            elif isinstance(pt, np.ndarray):
+                arr = pt.flatten()
+                if arr.size != 3:
+                    raise ValueError("NumPy array must have 3 elements")
+                p = Point(float(arr[0]), float(arr[1]), float(arr[2]))
+            else:
+                raise TypeError("publish() accepts numpy.ndarray, Point, or PointStamped")
+
+            # Wrap into a fresh PointStamped
+            msg = PointStamped()
+            msg.point = p
+
+        # Stamp the header
+        header = Header()
+        header.stamp = rospy.Time.now()
+        header.frame_id = self.frame_id
+        msg.header = header
+
+        # Publish
+        self.pub.publish(msg)

@@ -2189,11 +2189,7 @@ def fit_bspline_scipy(centerline_pts: np.ndarray, degree: int = 3, smooth: float
     
     return ctrl_pts
 
-def extract_centerline_from_mask(depth_image: np.ndarray,
-                                 mask: np.ndarray,
-                                 camera_parameters,
-                                 depth_scale: float = 1.0,
-                                 connectivity: int = 8) -> np.ndarray:
+def extract_centerline_from_mask(depth_image: np.ndarray, mask: np.ndarray, camera_parameters, depth_scale: float = 1.0, connectivity: int = 8) -> np.ndarray:
     """
     Extracts an ordered 3D centerline from a binary mask and its corresponding depth image
     via 2D skeletonization and back-projection.
@@ -2682,6 +2678,7 @@ def score_function_bspline_reg_multiple_pre(x, camera_poses, camera_parameters, 
 
     # 5) final loss
     loss = mean_assd + reg_weight * drift + curvature_weight * curvature_penalty
+    print(f"loss: {loss:.3f}")
     return float(loss)
 
 def score_function_bspline_reg_multiple(x, datas, camera_poses, camera_parameters, degree, init_x, reg_weight: float = 1000.0, decay: float = 1.0, curvature_weight: float = 1.0, show: bool = False):
@@ -3047,33 +3044,67 @@ def interactive_bspline_editor(ctrl_points: np.ndarray,
     cv2.destroyWindow(window_name)
     return final_ctrl_pts
 
-def get_highest_point_and_angle_spline(ctrl_points):
+def get_highest_point_and_angle_spline(ctrl_points: np.ndarray, degree: int = 3, num_samples: int = 1000):
     """
-    Returns the 3D control point with the highest z-value and its azimuth angle
-    in the XY-plane (angle from +x axis towards +y axis).
+    Samples the B-spline densely, finds the 3D point of maximum z,
+    and computes the tangent angle at that point (projection onto XY-plane),
+    normalized to the range [-pi/2, pi/2].
 
     Args:
-        ctrl_points (array-like): An (N×3) array of control points.
+        ctrl_points:  (N×3) array of control points.
+        degree:       spline degree (default 3).
+        num_samples:  number of samples along the spline for search.
 
     Returns:
-        highest_pt: numpy.ndarray of shape (3,), the (x, y, z) point with max z.
-        angle: float, azimuth angle in radians: atan2(y, x), measured from +x axis.
+        highest_pt:   (x, y, z) numpy array of the highest point on the spline.
+        angle:        tangent angle in radians in [-pi/2, pi/2].
     """
     pts = np.asarray(ctrl_points, dtype=float)
-    if pts.ndim != 2 or pts.shape[1] != 3:
-        raise ValueError("ctrl_points must be an (N, 3) array-like")
-    if pts.size == 0:
-        raise ValueError("ctrl_points is empty")
+    N, dim = pts.shape
+    if dim != 3:
+        raise ValueError("ctrl_points must be an (N,3) array")
+    if N <= degree:
+        raise ValueError("Need at least degree+1 control points")
 
-    # Find the index of the maximum z-value
-    max_idx = np.argmax(pts[:, 2])
-    highest_pt = pts[max_idx]
+    # build open-uniform knot vector
+    k = degree
+    n_inner = N - k - 1
+    if n_inner > 0:
+        inner = np.linspace(0, 1, n_inner+2)[1:-1]
+        knots = np.concatenate((np.zeros(k+1), inner, np.ones(k+1)))
+    else:
+        knots = np.concatenate((np.zeros(k+1), np.ones(k+1)))
 
-    # Compute azimuth angle in the XY-plane
-    x, y = highest_pt[0], highest_pt[1]
-    angle = np.arctan2(x, y)  # radians, in range [-pi, pi]
-    print(f'Angle: {angle/np.pi*180:.0f}°')
+    spline = BSpline(knots, pts, k, axis=0)
+    u = np.linspace(0, 1, num_samples)
+    samples = spline(u)  # (num_samples, 3)
+
+    # find index of max z
+    idx_max = np.argmax(samples[:, 2])
+    highest_pt = samples[idx_max]
+
+    # compute derivative spline and evaluate at same u
+    dspline = spline.derivative()
+    d_samples = dspline(u)  # (num_samples, 3)
+    dx, dy = d_samples[idx_max, 0], d_samples[idx_max, 1]
+
+    # angle of tangent in XY-plane
+    angle = np.arctan(dx/dy)
+    angle += np.pi/2
+    # normalize to [-pi/2, pi/2]
+    while angle > np.pi/2:
+        angle -= np.pi
+    while angle < -np.pi/2:
+        angle += np.pi
+
     return highest_pt, angle
+
+# Example usage:
+# ctrl_pts = np.random.rand(10, 3)
+# pt, ang = get_highest_point_and_tangent_angle(ctrl_pts)
+# print("Highest:", pt, "Angle (rad):", ang)
+
+
 
 def convert_bspline_to_pointcloud(ctrl_points: np.ndarray, samples: int = 150, degree: int = 3) -> o3d.geometry.PointCloud:
     """
@@ -3113,6 +3144,112 @@ def convert_bspline_to_pointcloud(ctrl_points: np.ndarray, samples: int = 150, d
     pcd.points = o3d.utility.Vector3dVector(samples_3d)
 
     return pcd
+
+
+#endregion
+
+
+#region new spline initialization
+import numpy as np
+import networkx as nx
+from skimage.morphology import skeletonize
+from scipy.ndimage import distance_transform_edt
+import cv2
+
+def extract_2d_spline(mask: np.ndarray,
+                      connectivity: int = 8,
+                      alpha: float = 5.0) -> np.ndarray:
+    """
+    Extract a continuous 2D centerline from a binary DLO mask—even through overlaps—
+    by skeletonizing, measuring local mask thickness, and taking the shortest path
+    between the two endpoints in a graph where edge‐costs rise in thicker regions.
+
+    Args:
+        mask:        H×W binary (0/1 or bool) mask of the DLO.
+        connectivity:4 or 8-connected for the skeleton graph.
+        alpha:       thickness penalty factor (>0). Larger α avoids overlaps harder.
+
+    Returns:
+        centerline:  (N×2) array of (row, col) pixel coordinates along the cable.
+    """
+    # 1) Skeletonize to 1-px centerline
+    sk = skeletonize(mask > 0)
+    rows, cols = np.where(sk)
+    coords = list(zip(rows, cols))
+    if not coords:
+        return np.zeros((0,2), int)
+
+    # 2) Precompute mask thickness (distance to background)
+    thick = distance_transform_edt(mask > 0)
+    max_th = thick.max() if thick.max()>0 else 1.0
+
+    # 3) Build graph over skeleton pixels
+    idx = {pt:i for i, pt in enumerate(coords)}
+    if connectivity == 8:
+        neigh = [(-1,-1),(-1,0),(-1,1),(0,-1),(0,1),(1,-1),(1,0),(1,1)]
+    else:
+        neigh = [(-1,0),(0,-1),(0,1),(1,0)]
+
+    G = nx.Graph()
+    G.add_nodes_from(range(len(coords)))
+    for i, (r,c) in enumerate(coords):
+        for dr,dc in neigh:
+            j = idx.get((r+dr, c+dc))
+            if j is None: 
+                continue
+            # base length
+            d = np.hypot(dr, dc)
+            # thickness penalty: average of the two nodes
+            t_avg = (thick[r,c] + thick[coords[j][0], coords[j][1]]) / 2.0
+            w = d * (1.0 + alpha * (t_avg / max_th))
+            G.add_edge(i, j, weight=w)
+
+    # 4) Identify the two cable endpoints (degree==1)
+    deg = dict(G.degree())
+    ends = [n for n,d in deg.items() if d==1]
+    if len(ends) < 2:
+        # fallback: pick the two farthest nodes in unweighted graph
+        dists = dict(nx.all_pairs_shortest_path_length(G))
+        a,b,maxd = 0,0,0
+        for i in deg:
+            for j in deg:
+                if dists[i][j] > maxd:
+                    a, b, maxd = i, j, dists[i][j]
+        ends = [a, b]
+    start, goal = ends[:2]
+
+    # 5) Compute the weighted shortest path
+    path = nx.shortest_path(G, source=start, target=goal, weight='weight')
+
+    # 6) Map back to pixel coords
+    centerline = np.array([coords[i] for i in path], dtype=int)
+    return centerline
+
+
+def display_2d_spline_gradient(mask: np.ndarray,
+                               centerline: np.ndarray,
+                               window: str = "Centerline"):
+    """
+    Overlay the 2D centerline on the mask with a blue→red gradient.
+
+    Args:
+        mask:        H×W binary mask.
+        centerline:  (N×2) array of (row, col) coordinates.
+        window:      OpenCV window name.
+    """
+    img = (mask.astype(np.uint8)*255)
+    img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    N = len(centerline)
+    for i in range(N-1):
+        r0, c0 = centerline[i]
+        r1, c1 = centerline[i+1]
+        t = i / (N-1)
+        color = (int(255*(1-t)), 0, int(255*t))  # B→R gradient
+        cv2.line(img, (c0, r0), (c1, r1), color, 2)
+    cv2.imshow(window, img)
+    cv2.waitKey(0)
+    cv2.destroyWindow(window)
+
 
 
 #endregion

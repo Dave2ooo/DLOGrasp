@@ -39,7 +39,7 @@ class MyClass:
         print('Processing image...')
 
         depth = self.depth_anything_wrapper.get_depth_map(image)
-        mask = self.grounded_sam_wrapper.get_mask(image, 'black cable.transparent tube.')[0][0]
+        mask = self.grounded_sam_wrapper.get_mask(image, 'cable.')[0][0]
         mask_reduced = reduce_mask(mask, 1)
 
         depth_masked = mask_depth_map(depth, mask)
@@ -858,6 +858,7 @@ def pipeline_spline():
     pose_publisher = PosePublisher("/next_pose")
     path_publisher = PathPublisher("/my_path")
     pointcloud_publisher = PointcloudPublisher(topic="my_pointcloud", frame_id="map")
+    grasp_point_publisher = PointStampedPublisher("/grasp_point")
 
     transform_stamped0 = create_stamped_transform_from_trans_and_rot([0.767, 0.495, 0.712], [0.707, 0.001, 0.707, -0.001])
     transform_stamped1 = create_stamped_transform_from_trans_and_rot([0.839, 0.493, 0.727], [0.774, 0.001, 0.633, -0.001])
@@ -895,7 +896,12 @@ def pipeline_spline():
     next_pose_stamped = create_pose(z=0.1, pitch=-0.4, reference_frame="hand_palm_link")
     pose_publisher.publish(next_pose_stamped)
     # input("Press Enter when moves are finished…")
-    rospy.sleep(5)
+    # rospy.sleep(5)
+    # spline_2d = extract_2d_spline(data[-1][1])
+    # display_2d_spline_gradient(data[-1][1], spline_2d)
+    # exit()
+
+    input("Press Enter when image is correct")
 
     #region -------------------- Depth Anything --------------------
     # Take image
@@ -920,11 +926,13 @@ def pipeline_spline():
 
     #region -------------------- Spline --------------------
     best_depth = scale_depth_map(data[-1][0], best_alpha, best_beta)
-    centerline_pts_cam2 = extract_centerline_from_mask(best_depth, data[-1][1], camera_parameters)
+    # centerline_pts_cam2 = extract_centerline_from_mask(best_depth, data[-1][1], camera_parameters)
+    centerline_pts_cam2 = extract_centerline_from_mask_overlap(best_depth, data[-1][1], camera_parameters)
     centerline_pts_world = transform_points_to_world(centerline_pts_cam2, transforms[-1])
     degree = 3
     # Fit B-spline
-    ctrl_points.append(fit_bspline_scipy(centerline_pts_world, degree=degree, smooth=1e-5, nest=20)[3:-3,:])
+    ctrl_points.append(fit_bspline_scipy(centerline_pts_world, degree=degree, smooth=1e-5, nest=20))
+    # ctrl_points.append(fit_bspline_scipy(centerline_pts_world, degree=degree, smooth=1e-5, nest=20)[3:-3,:])
     print(f"ctrl_points: {ctrl_points[0]}")
 
     spline_pc = convert_bspline_to_pointcloud(ctrl_points[-1])
@@ -945,7 +953,7 @@ def pipeline_spline():
     target_point, target_angle = get_highest_point_and_angle_spline(ctrl_points[-1])
     tarrget_point_offset = target_point.copy()
     tarrget_point_offset[2] += 0.098 + 0.010 # - 0.020 # Make target Pose hover above actual target pose - tested offset
-  
+    grasp_point_publisher.publish(target_point)
     # Convert to Pose
     target_poses.append(my_class.get_desired_pose(tarrget_point_offset))
     # Calculate Path
@@ -955,10 +963,11 @@ def pipeline_spline():
     path_publisher.publish(target_path)
     pose_publisher.publish(target_path[1])
     # input("Press Enter when moves are finished…")
-    rospy.sleep(5)
+    # rospy.sleep(5)
 
 
     while not rospy.is_shutdown():
+        input("Press Enter when image is correct")
         # Take image
         images.append(image_subscriber.get_current_image()) # <- online
         # images.append(cv2.imread(f'/root/workspace/images/moves/cable{1}.jpg')) # <- offline
@@ -1007,8 +1016,8 @@ def pipeline_spline():
         skeletons, interps = precompute_skeletons_and_interps(data)        # 2) Call optimizer with our new score:
         bounds = make_bspline_bounds(ctrl_points_translated, delta=0.5)
         init_x_coarse = ctrl_points_translated.flatten()
-        reg_weight = 500
-        decay = 0.7
+        reg_weight = 0 # 500
+        decay = 1 # 0..1
         curvature_weight = 1
         # 2) Coarse/fine minimization calls:
         start = time.perf_counter()
@@ -1027,9 +1036,9 @@ def pipeline_spline():
                 interps,
                 50
             ),
-            method='Powell', # 'L-BFGS-B',
+            method='L-BFGS-B', # 'Powell', # 
             bounds=bounds,
-            options={'maxiter':1e6, 'ftol':1e-3, 'eps':1e-6, 'xtol':1e-3, 'disp':True}
+            options={'maxiter':1e6, 'ftol':1e-6, 'eps':1e-6, 'xtol':1e-4, 'disp':True}
         )
         end = time.perf_counter()
         print(f"Coarse optimization took {end - start:.2f} seconds")
@@ -1057,9 +1066,9 @@ def pipeline_spline():
                 interps,
                 200
             ),
-            method='Powell', # 'L-BFGS-B',
+            method='L-BFGS-B', # 'Powell', # 
             bounds=bounds,
-            options={'maxiter':1e6, 'ftol':1e-3, 'eps':1e-8, 'xtol':1e-4, 'disp':True}
+            options={'maxiter':1e6, 'ftol':1e-6, 'eps':1e-8, 'xtol':1e-4, 'disp':True}
         )
         end = time.perf_counter()
         print(f"Fine optimization took {end - start:.2f} seconds")
@@ -1090,16 +1099,21 @@ def pipeline_spline():
         # Calculate Path
         target_path = interpolate_poses(transforms_palm[-1], target_poses[-1], num_steps=4) # <- online
         # target_path = interpolate_poses(transforms[-1], target_poses[-1], num_steps=4) # <- offline
+        grasp_point_publisher.publish(target_point)
         # Move arm a step
         path_publisher.publish(target_path)
-        usr_input = input("Go to final Pose? y/[n]: ")
+        usr_input = input("Go to final Pose? y/[n] or enter pose index: ").strip().lower()
         if usr_input == "c": exit()
         if usr_input == "y":
             rotated_target_pose = rotate_pose_around_z(target_poses[-1], target_angle)
             pose_publisher.publish(rotated_target_pose)
             break
         else:
-            pose_publisher.publish(target_path[1])
+            try:
+                idx = int(usr_input)
+                pose_publisher.publish(target_path[idx])
+            except ValueError:
+                pose_publisher.publish(target_path[1])
         # input("Press Enter when moves are finished…")
         rospy.sleep(5)
 
