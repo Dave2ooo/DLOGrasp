@@ -853,7 +853,7 @@ def pipeline2():
 
 def pipeline_spline():
     my_class = MyClass()
-    ros_handler = ROSHandler()
+    # ros_handler = ROSHandler()
     image_subscriber = ImageSubscriber('/hsrb/hand_camera/image_rect_color')
     pose_publisher = PosePublisher("/next_pose")
     path_publisher = PathPublisher("/my_path")
@@ -867,7 +867,7 @@ def pipeline_spline():
     transform_stamped4 = create_stamped_transform_from_trans_and_rot([0.991, 0.492, 0.698], [0.927, 0.001, 0.376, -0.000])
     transform_stamped5 = create_stamped_transform_from_trans_and_rot([1.014, 0.493, 0.672], [0.960, 0.001, 0.282, -0.000])
     transform_stamped6 = create_stamped_transform_from_trans_and_rot([1.025, 0.493, 0.643], [0.983, 0.001, 0.184, -0.000])
-
+    offline_image_name = "tube"
     images = []
     transforms = []
     transforms_palm = []
@@ -879,12 +879,12 @@ def pipeline_spline():
     ctrl_points = []
 
     # Take image
-    images.append(image_subscriber.get_current_image()) # <- online
-    # images.append(cv2.imread(f'/root/workspace/images/moves/cable{0}.jpg')) # <- offline
+    # images.append(image_subscriber.get_current_image()) # <- online
+    images.append(cv2.imread(f'/root/workspace/images/moves/{offline_image_name}{0}.jpg')) # <- offline
     # Get current transform
-    transforms.append(ros_handler.get_current_pose("hand_camera_frame", "map")) # <- online
-    # transforms.append(transform_stamped0) # <- offline
-    transforms_palm.append(ros_handler.get_current_pose("hand_palm_link", "map")) # <- online
+    # transforms.append(ros_handler.get_current_pose("hand_camera_frame", "map")) # <- online
+    transforms.append(transform_stamped0) # <- offline
+    # transforms_palm.append(ros_handler.get_current_pose("hand_palm_link", "map")) # <- online
     # Process image
     data.append(my_class.process_image(images[-1], transforms[-1], show=False))
     data[-1][1][:] = cleanup_mask(data[-1][1])
@@ -905,12 +905,12 @@ def pipeline_spline():
 
     #region -------------------- Depth Anything --------------------
     # Take image
-    images.append(image_subscriber.get_current_image()) # <- online
-    # images.append(cv2.imread(f'/root/workspace/images/moves/cable{1}.jpg')) # <- offline
+    # images.append(image_subscriber.get_current_image()) # <- online
+    images.append(cv2.imread(f'/root/workspace/images/moves/{offline_image_name}{1}.jpg')) # <- offline
     # Get current transform
-    transforms.append(ros_handler.get_current_pose("hand_camera_frame", "map")) # <- online
-    # transforms.append(transform_stamped1) # <- offline
-    transforms_palm.append(ros_handler.get_current_pose("hand_palm_link", "map")) # <- online
+    # transforms.append(ros_handler.get_current_pose("hand_camera_frame", "map")) # <- online
+    transforms.append(transform_stamped1) # <- offline
+    # transforms_palm.append(ros_handler.get_current_pose("hand_palm_link", "map")) # <- online
     # Process image
     data.append(my_class.process_image(images[-1], transforms[-1], show=False))
     data[-1][1][:] = cleanup_mask(data[-1][1])
@@ -947,7 +947,7 @@ def pipeline_spline():
     show_masks([data[-1][1], correct_skeleton], "Correct Skeleton")
 
     show_masks([correct_skeleton, projected_spline_cam1], "Correct Skeleton and Projected Spline (CAM1)")
-
+    exit()
 
     # Get highest Point in pointcloud
     target_point, target_angle = get_highest_point_and_angle_spline(ctrl_points[-1])
@@ -970,7 +970,7 @@ def pipeline_spline():
         input("Press Enter when image is correct")
         # Take image
         images.append(image_subscriber.get_current_image()) # <- online
-        # images.append(cv2.imread(f'/root/workspace/images/moves/cable{1}.jpg')) # <- offline
+        # images.append(cv2.imread(f'/root/workspace/images/moves/{offline_image_name}{1}.jpg')) # <- offline
         # Get current transform
         transforms.append(ros_handler.get_current_pose("hand_camera_frame", "map")) # <- online
         # transforms.append(transform_stamped2) # <- offline

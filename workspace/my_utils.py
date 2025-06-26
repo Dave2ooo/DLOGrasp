@@ -3145,111 +3145,208 @@ def convert_bspline_to_pointcloud(ctrl_points: np.ndarray, samples: int = 150, d
 
     return pcd
 
-
 #endregion
 
 
 #region new spline initialization
-import numpy as np
-import networkx as nx
-from skimage.morphology import skeletonize
-from scipy.ndimage import distance_transform_edt
-import cv2
-
-def extract_2d_spline(mask: np.ndarray,
-                      connectivity: int = 8,
-                      alpha: float = 5.0) -> np.ndarray:
+def extract_centerline_from_mask_overlap(depth_image: np.ndarray,
+                                 mask: np.ndarray,
+                                 camera_parameters,
+                                 depth_scale: float = 1.0,
+                                 connectivity: int = 8,
+                                 min_length: int = 20,
+                                 conn_radius: float = 30.0,
+                                 w_angle: float = 1.0,
+                                 w_dist: float  = 2.0,
+                                 w_curv: float  = 5.0) -> np.ndarray:
     """
-    Extract a continuous 2D centerline from a binary DLO mask—even through overlaps—
-    by skeletonizing, measuring local mask thickness, and taking the shortest path
-    between the two endpoints in a graph where edge‐costs rise in thicker regions.
+    Extracts an ordered 3D centerline from a binary mask and its corresponding depth image
+    via 2D skeletonization and back-projection.
 
     Args:
-        mask:        H×W binary (0/1 or bool) mask of the DLO.
-        connectivity:4 or 8-connected for the skeleton graph.
-        alpha:       thickness penalty factor (>0). Larger α avoids overlaps harder.
+        depth_image: (H×W) depth values.
+        mask:        (H×W) binary mask (0/1 or False/True).
+        camera_parameters: either a dict with keys 'fx','fy','cx','cy', 
+                           or an object with attribute .intrinsic_matrix.
+        depth_scale: Factor to divide depth_image values by (default=1.0).
+        connectivity: 4 or 8 connectivity for cc‐label (default=8).
+        min_length:   Remove skeleton segments shorter than this (pixels).
+        conn_radius:  Only reconnect endpoints closer than this (pixels).
+        w_angle, w_dist, w_curv: weights for angle, distance, curvature in matching.
 
     Returns:
-        centerline:  (N×2) array of (row, col) pixel coordinates along the cable.
+        centerline_pts: (N×3) array of ordered 3D points along the centerline.
     """
-    # 1) Skeletonize to 1-px centerline
-    sk = skeletonize(mask > 0)
-    rows, cols = np.where(sk)
-    coords = list(zip(rows, cols))
-    if not coords:
-        return np.zeros((0,2), int)
+    H, W = mask.shape
 
-    # 2) Precompute mask thickness (distance to background)
-    thick = distance_transform_edt(mask > 0)
-    max_th = thick.max() if thick.max()>0 else 1.0
+    # 1. Skeletonize the mask
+    skel = skeletonize(mask.astype(bool))
+    skel_uint8 = skel.astype(np.uint8)
 
-    # 3) Build graph over skeleton pixels
-    idx = {pt:i for i, pt in enumerate(coords)}
-    if connectivity == 8:
-        neigh = [(-1,-1),(-1,0),(-1,1),(0,-1),(0,1),(1,-1),(1,0),(1,1)]
+    # build neighbor kernel
+    neigh_k = np.array([[1,1,1],[1,0,1],[1,1,1]], np.uint8)
+
+    # 2. Excise intersection zones
+    dist_map = distance_transform_edt(mask.astype(np.uint8))
+    nbr_count = cv2.filter2D(skel_uint8, -1, neigh_k)
+    intersections = np.argwhere((skel) & (nbr_count >= 3))
+    to_remove = np.zeros_like(skel, bool)
+    for y, x in intersections:
+        r = dist_map[y, x]
+        R = int(np.ceil(r))
+        y0, y1 = max(0, y-R), min(H, y+R+1)
+        x0, x1 = max(0, x-R), min(W, x+R+1)
+        yy, xx = np.ogrid[y0:y1, x0:x1]
+        circle = (yy - y)**2 + (xx - x)**2 <= r**2
+        to_remove[y0:y1, x0:x1][circle] = True
+    skel_exc = skel & ~to_remove
+
+    # 3. Remove short spurious segments
+    num_lbls, labels = cv2.connectedComponents(skel_exc.astype(np.uint8),
+                                               connectivity=connectivity)
+    for lbl in range(1, num_lbls):
+        comp = (labels == lbl)
+        if comp.sum() < min_length:
+            skel_exc[comp] = False
+
+    # 4. Find endpoints of excised skeleton
+    nbr_count_exc = cv2.filter2D(skel_exc.astype(np.uint8), -1, neigh_k)
+    endpoints_all = np.argwhere((skel_exc) & (nbr_count_exc == 1))
+
+    # 5. Cluster‐filter: only reconnect endpoints close to another endpoint
+    pts = endpoints_all
+    if pts.size == 0:
+        # no endpoints at all, closed loop
+        skel_conn = skel_exc.astype(np.uint8) * 255
     else:
-        neigh = [(-1,0),(0,-1),(0,1),(1,0)]
+        dmat = np.linalg.norm(pts[:,None,:] - pts[None,:,:], axis=2)
+        nbrs_per_pt = (dmat < conn_radius).sum(axis=1) - 1
+        reconnect = nbrs_per_pt >= 1
+        conn_eps  = endpoints_all[reconnect]
+        leave_eps = endpoints_all[~reconnect]
 
-    G = nx.Graph()
-    G.add_nodes_from(range(len(coords)))
-    for i, (r,c) in enumerate(coords):
-        for dr,dc in neigh:
-            j = idx.get((r+dr, c+dc))
-            if j is None: 
-                continue
-            # base length
-            d = np.hypot(dr, dc)
-            # thickness penalty: average of the two nodes
-            t_avg = (thick[r,c] + thick[coords[j][0], coords[j][1]]) / 2.0
-            w = d * (1.0 + alpha * (t_avg / max_th))
-            G.add_edge(i, j, weight=w)
+        # if odd, drop the most isolated
+        if len(conn_eps) % 2 == 1:
+            sub = dmat[reconnect][:, reconnect]
+            np.fill_diagonal(sub, np.inf)
+            drop_idx = np.argmax(sub.min(axis=1))
+            global_idx = np.where(reconnect)[0][drop_idx]
+            reconnect[global_idx] = False
+            conn_eps = endpoints_all[reconnect]
 
-    # 4) Identify the two cable endpoints (degree==1)
-    deg = dict(G.degree())
-    ends = [n for n,d in deg.items() if d==1]
-    if len(ends) < 2:
-        # fallback: pick the two farthest nodes in unweighted graph
-        dists = dict(nx.all_pairs_shortest_path_length(G))
-        a,b,maxd = 0,0,0
-        for i in deg:
-            for j in deg:
-                if dists[i][j] > maxd:
-                    a, b, maxd = i, j, dists[i][j]
-        ends = [a, b]
-    start, goal = ends[:2]
+        # if fewer than 2 to connect, skip matching
+        if len(conn_eps) < 2:
+            skel_conn = skel_exc.astype(np.uint8) * 255
+        else:
+            # compute tangents
+            vectors = []
+            for y, x in conn_eps:
+                for dy in (-1,0,1):
+                    for dx in (-1,0,1):
+                        if dy==dx==0: continue
+                        ny, nx = y+dy, x+dx
+                        if 0 <= ny < H and 0 <= nx < W and skel_exc[ny,nx]:
+                            v = np.array([y-ny, x-nx], float)
+                            vectors.append(v/np.linalg.norm(v))
+                            break
+                    else:
+                        continue
+                    break
 
-    # 5) Compute the weighted shortest path
-    path = nx.shortest_path(G, source=start, target=goal, weight='weight')
+            # distances & curvatures
+            n = len(conn_eps)
+            dists = np.linalg.norm(conn_eps[:,None,:] - conn_eps[None,:,:], axis=2)
+            d_max = dists.max()
+            curvs = []
+            for y, x in conn_eps:
+                nbrs1 = [(y+dy, x+dx) for dy in (-1,0,1) for dx in (-1,0,1)
+                         if not(dy==dx==0) and 0<=y+dy<H and 0<=x+dx<W and skel_exc[y+dy,x+dx]]
+                if not nbrs1:
+                    curvs.append(0.0); continue
+                y1,x1 = nbrs1[0]
+                nbrs2 = [(y1+dy, x1+dx) for dy in (-1,0,1) for dx in (-1,0,1)
+                         if not(dy==dx==0) and (y1+dy,x1+dx)!=(y,x)
+                            and 0<=y1+dy<H and 0<=x1+dx<W and skel_exc[y1+dy,x1+dx]]
+                if not nbrs2:
+                    curvs.append(0.0); continue
+                y2,x2 = nbrs2[0]
+                v1 = np.array([y1-y, x1-x], float)
+                v2 = np.array([y2-y1, x2-x1], float)
+                ang = np.arccos(np.dot(v1,v2)/(np.linalg.norm(v1)*np.linalg.norm(v2)+1e-8))
+                curvs.append(ang/(np.linalg.norm(v1)+1e-8))
+            curvs = np.array(curvs)
+            curv_norm = curvs / (curvs.max()+1e-8)
 
-    # 6) Map back to pixel coords
-    centerline = np.array([coords[i] for i in path], dtype=int)
-    return centerline
+            # build cost matrix
+            A = np.zeros((n,n), float)
+            for i in range(n):
+                for j in range(i+1, n):
+                    ang_cost  = np.pi - np.arccos(abs(np.dot(vectors[i], vectors[j])))
+                    dist_cost = dists[i,j]/(d_max+1e-8)
+                    curv_cost = abs(curv_norm[i] - curv_norm[j])
+                    A[i,j] = A[j,i] = w_angle*ang_cost + w_dist*dist_cost + w_curv*curv_cost
 
+            # brute‐force perfect matching
+            from itertools import combinations
+            def find_min_pairs(A):
+                m = A.shape[0]
+                assert m%2==0
+                best_cost, best = float('inf'), None
+                def recurse(rem, pairs):
+                    nonlocal best_cost, best
+                    if not rem:
+                        total = sum(A[i,j] for i,j in pairs)
+                        if total < best_cost:
+                            best_cost, best = total, pairs.copy()
+                        return
+                    i = rem[0]
+                    for j in rem[1:]:
+                        recurse([k for k in rem if k not in (i,j)], pairs+[(i,j)])
+                recurse(list(range(m)), [])
+                return best
 
-def display_2d_spline_gradient(mask: np.ndarray,
-                               centerline: np.ndarray,
-                               window: str = "Centerline"):
-    """
-    Overlay the 2D centerline on the mask with a blue→red gradient.
+            pairs = find_min_pairs(A)
+            # draw bridges
+            skel_conn = skel_exc.astype(np.uint8) * 255
+            for i,j in pairs:
+                y0,x0 = conn_eps[i]
+                y1,x1 = conn_eps[j]
+                cv2.line(skel_conn, (x0,y0), (x1,y1), 255, 1)
 
-    Args:
-        mask:        H×W binary mask.
-        centerline:  (N×2) array of (row, col) coordinates.
-        window:      OpenCV window name.
-    """
-    img = (mask.astype(np.uint8)*255)
-    img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-    N = len(centerline)
-    for i in range(N-1):
-        r0, c0 = centerline[i]
-        r1, c1 = centerline[i+1]
-        t = i / (N-1)
-        color = (int(255*(1-t)), 0, int(255*t))  # B→R gradient
-        cv2.line(img, (c0, r0), (c1, r1), color, 2)
-    cv2.imshow(window, img)
-    cv2.waitKey(0)
-    cv2.destroyWindow(window)
+    # 6. Walk the final skeleton (skel_conn) to get an ordered 2D path
+    skel_bool_conn = (skel_conn > 0)
+    nbr_final = cv2.filter2D(skel_bool_conn.astype(np.uint8), -1, neigh_k)
+    ends = np.argwhere((skel_bool_conn) & (nbr_final == 1))
+    if len(ends):
+        start = tuple(ends[0])
+    else:
+        start = tuple(np.argwhere(skel_bool_conn)[0])
+    path2d = [start]
+    prev = None
+    cur  = start
+    while True:
+        y, x = cur
+        neighs = []
+        for dy in (-1,0,1):
+            for dx in (-1,0,1):
+                if dy==dx==0: continue
+                ny, nx = y+dy, x+dx
+                if 0<=ny<H and 0<=nx<W and skel_bool_conn[ny,nx] and (prev is None or (ny,nx)!=prev):
+                    neighs.append((ny,nx))
+        if not neighs:
+            break
+        prev, cur = cur, neighs[0]
+        path2d.append(cur)
 
+    # 7. Back‐project 2D path to 3D
+    fx, fy, cx, cy = camera_parameters
 
+    centerline_pts = []
+    for y, x in path2d:
+        z = float(depth_image[y, x]) / depth_scale
+        X = (x - cx) * z / fx
+        Y = (y - cy) * z / fy
+        centerline_pts.append((X, Y, z))
 
+    return np.array(centerline_pts)
 #endregion

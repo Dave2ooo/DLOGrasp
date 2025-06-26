@@ -16,9 +16,12 @@ from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
 from utils.track_utils import sample_points_from_masks
 from utils.video_utils import create_video_from_images
 
+import tempfile
+import time
 
 class GroundedSamWrapper:
     def __init__(self):
+        self.previous_frames = [] 
         """
         Step 1: Environment settings and model initialization
         """
@@ -45,7 +48,13 @@ class GroundedSamWrapper:
         self.processor = AutoProcessor.from_pretrained(self.model_id)
         self.grounding_model = AutoModelForZeroShotObjectDetection.from_pretrained(self.model_id).to(self.device)
 
-    def get_mask(self, image: NDArray[np.uint8], prompt="tube.cable."):
+        # **new**: video predictor
+        self.video_predictor = build_sam2_video_predictor(
+            config_file=self.model_cfg,
+            ckpt_path=self.sam2_checkpoint
+        )  # :contentReference[oaicite:4]{index=4}
+
+    def get_mask_grounded(self, image: NDArray[np.uint8], prompt="tube.cable."):
         image_pil = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
         text = prompt
 
@@ -92,7 +101,95 @@ class GroundedSamWrapper:
 
         # print(f'masks.shape = {masks.shape}')
         return masks
-    
+
+    def get_mask(self, image: NDArray[np.uint8], prompt="tube.cable."):
+        """
+        Accumulates frames and—once we have at least one prior frame—
+        uses track_sequence to propagate the mask forward.
+        Falls back to get_mask_grounded for the very first frame.
+        """
+        # 1. Append this frame to history
+        self.previous_frames.append(image)
+
+        # 2. If this is the very first frame, just ground it directly
+        if len(self.previous_frames) == 1:
+            # run the original grounded SAM on this single image
+            masks = self.get_mask_grounded(image, prompt=prompt)
+            # store the chosen mask (take first mask) for future tracking
+            self._last_mask = masks[0]
+            return masks
+
+        # 3. For frame 2+, run track_sequence over all frames so far
+        results = self.track_sequence(self.previous_frames, prompt=prompt)
+        # extract the mask for the **last** frame (index = len–1) and obj_id=1
+        last_idx = len(self.previous_frames) - 1
+        frame_masks = results[last_idx]
+        # assume single object with id=1
+        mask = frame_masks.get(1)  
+        if mask is None:
+            # if tracking lost the object, fall back
+            mask = self.get_mask_grounded(image, prompt=prompt)[0]
+
+        # update _last_mask so that future logic could reuse it if needed
+        self._last_mask = mask
+        # wrap into the same shape your original returned
+        return mask[None, ...]   # shape (1, H, W)
+
+    def track_sequence(self, frames: list[np.ndarray], prompt="tube.cable."):
+        """
+        frames: list of BGR images (np.ndarray)
+        prompt: text query to ground the object in the first frame
+        returns: dict mapping frame_idx → {obj_id: binary_mask}
+        """
+        # 1. Ground the object in the first frame to get its mask
+        first_frame = frames[0]
+        masks = self.get_mask_grounded(first_frame, prompt=prompt)
+        if masks.size == 0:
+            raise RuntimeError("No masks found in the first frame.")
+        # ensure we have a 2D mask
+        first_mask = masks[0]
+        first_mask = np.squeeze(first_mask)
+        first_mask = first_mask.astype(bool)
+
+        # 2. Write frames to a temporary directory as JPEGs
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for idx, frame in enumerate(frames):
+                cv2.imwrite(os.path.join(tmpdir, f"{idx:06d}.jpg"), frame)
+
+            # 3. Initialize the video-tracking state
+            with torch.inference_mode():
+                state = self.video_predictor.init_state(
+                    video_path=tmpdir,
+                    async_loading_frames=False
+                )
+
+                # 4. Prime frame 0 with the 2D mask
+                fidx0, obj_ids0, mask_logits0 = self.video_predictor.add_new_mask(
+                    inference_state=state,
+                    frame_idx=0,
+                    obj_id=1,
+                    mask=first_mask
+                )
+
+                # 5. Collect the mask for frame 0
+                results = {
+                    fidx0: {
+                        oid: (mask_logits0[i].cpu().numpy() > 0.0)
+                        for i, oid in enumerate(obj_ids0)
+                    }
+                }
+
+                # 6. Propagate the mask prompt through the rest of the video
+                for fidx, obj_ids, mask_logits in self.video_predictor.propagate_in_video(state):
+                    results[fidx] = {
+                        oid: (mask_logits[i].cpu().numpy() > 0.0)
+                        for i, oid in enumerate(obj_ids)
+                    }
+
+        return results
+
+
+    #region Misc/obsolete
     def show_mask(self, mask: NDArray[np.ndarray], title="mask", wait = True):
         """
         Display a binary or float mask using OpenCV, with nothing else overlaid.
@@ -398,11 +495,43 @@ class GroundedSamWrapper:
         eroded = cv2.erode(m, kernel, iterations=1)
 
         return eroded
-
+    #endregion
 
 if __name__ == "__main__":
-    image = cv2.imread('/root/workspace/images/moves/cable0.jpg')
+    image0 = cv2.imread('/root/workspace/images/moves/cable0.jpg')
+    image1 = cv2.imread('/root/workspace/images/moves/cable1.jpg')
+    image2 = cv2.imread('/root/workspace/images/moves/cable2.jpg')
+    image3 = cv2.imread('/root/workspace/images/moves/cable3.jpg')
+    image4 = cv2.imread('/root/workspace/images/moves/cable4.jpg')
+    image5 = cv2.imread('/root/workspace/images/moves/cable5.jpg')
+    image6 = cv2.imread('/root/workspace/images/moves/cable6.jpg')
+
+    image0_tube = cv2.imread('/root/workspace/images/moves/tube0.jpg')
+    image1_tube = cv2.imread('/root/workspace/images/moves/tube1.jpg')
+    image2_tube = cv2.imread('/root/workspace/images/moves/tube2.jpg')
+    image3_tube = cv2.imread('/root/workspace/images/moves/tube3.jpg')
+    image4_tube = cv2.imread('/root/workspace/images/moves/tube4.jpg')
+    image5_tube = cv2.imread('/root/workspace/images/moves/tube5.jpg')
+    image6_tube = cv2.imread('/root/workspace/images/moves/tube6.jpg')
+
+    image_cables = [image0, image1, image2, image3, image4, image5, image6]
+    image_tubes = [image0_tube, image1_tube, image2_tube, image3_tube, image4_tube, image5_tube, image6_tube]
 
     grounded_sam_wrapper = GroundedSamWrapper()
-    masks = grounded_sam_wrapper.get_mask(image)
-    grounded_sam_wrapper.show_mask(masks[0])
+
+    # masks = grounded_sam_wrapper.get_mask(image0)
+    # grounded_sam_wrapper.show_mask(masks[0])
+
+    # # video tracking
+    # results = grounded_sam_wrapper.track_sequence(image_cables, prompt="black cable.")
+    # results = grounded_sam_wrapper.track_sequence(image_cables, prompt="tube.")
+    # for frame_idx in sorted(results):
+    #     mask = results[frame_idx][1]
+    #     grounded_sam_wrapper.show_mask(mask)
+
+    for i, image in enumerate(image_tubes):
+        start = time.time()
+        masks = grounded_sam_wrapper.get_mask(image)
+        end = time.time()
+        print(f"Time {i}: {end - start}")
+        grounded_sam_wrapper.show_mask(masks[0])
