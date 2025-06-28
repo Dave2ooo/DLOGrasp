@@ -853,7 +853,7 @@ def pipeline2():
 
 def pipeline_spline():
     my_class = MyClass()
-    # ros_handler = ROSHandler()
+    ros_handler = ROSHandler()
     image_subscriber = ImageSubscriber('/hsrb/hand_camera/image_rect_color')
     pose_publisher = PosePublisher("/next_pose")
     path_publisher = PathPublisher("/my_path")
@@ -879,12 +879,12 @@ def pipeline_spline():
     ctrl_points = []
 
     # Take image
-    # images.append(image_subscriber.get_current_image()) # <- online
-    images.append(cv2.imread(f'/root/workspace/images/moves/{offline_image_name}{0}.jpg')) # <- offline
+    images.append(image_subscriber.get_current_image()) # <- online
+    # images.append(cv2.imread(f'/root/workspace/images/moves/{offline_image_name}{0}.jpg')) # <- offline
     # Get current transform
-    # transforms.append(ros_handler.get_current_pose("hand_camera_frame", "map")) # <- online
-    transforms.append(transform_stamped0) # <- offline
-    # transforms_palm.append(ros_handler.get_current_pose("hand_palm_link", "map")) # <- online
+    transforms.append(ros_handler.get_current_pose("hand_camera_frame", "map")) # <- online
+    # transforms.append(transform_stamped0) # <- offline
+    transforms_palm.append(ros_handler.get_current_pose("hand_palm_link", "map")) # <- online
     # Process image
     data.append(my_class.process_image(images[-1], transforms[-1], show=False))
     data[-1][1][:] = cleanup_mask(data[-1][1])
@@ -901,16 +901,16 @@ def pipeline_spline():
     # display_2d_spline_gradient(data[-1][1], spline_2d)
     # exit()
 
-    input("Press Enter when image is correct")
-
+    usr_input = input("Press Enter when image is correct")
+    if usr_input == "c": exit()
     #region -------------------- Depth Anything --------------------
     # Take image
-    # images.append(image_subscriber.get_current_image()) # <- online
-    images.append(cv2.imread(f'/root/workspace/images/moves/{offline_image_name}{1}.jpg')) # <- offline
+    images.append(image_subscriber.get_current_image()) # <- online
+    # images.append(cv2.imread(f'/root/workspace/images/moves/{offline_image_name}{1}.jpg')) # <- offline
     # Get current transform
-    # transforms.append(ros_handler.get_current_pose("hand_camera_frame", "map")) # <- online
-    transforms.append(transform_stamped1) # <- offline
-    # transforms_palm.append(ros_handler.get_current_pose("hand_palm_link", "map")) # <- online
+    transforms.append(ros_handler.get_current_pose("hand_camera_frame", "map")) # <- online
+    # transforms.append(transform_stamped1) # <- offline
+    transforms_palm.append(ros_handler.get_current_pose("hand_palm_link", "map")) # <- online
     # Process image
     data.append(my_class.process_image(images[-1], transforms[-1], show=False))
     data[-1][1][:] = cleanup_mask(data[-1][1])
@@ -927,8 +927,9 @@ def pipeline_spline():
     #region -------------------- Spline --------------------
     best_depth = scale_depth_map(data[-1][0], best_alpha, best_beta)
     # centerline_pts_cam2 = extract_centerline_from_mask(best_depth, data[-1][1], camera_parameters)
-    centerline_pts_cam2 = extract_centerline_from_mask_overlap(best_depth, data[-1][1], camera_parameters)
+    centerline_pts_cam2 = extract_centerline_from_mask_overlap(best_depth, data[-1][1], camera_parameters, show=True)
     centerline_pts_world = transform_points_to_world(centerline_pts_cam2, transforms[-1])
+    show_pointclouds([centerline_pts_world])
     degree = 3
     # Fit B-spline
     ctrl_points.append(fit_bspline_scipy(centerline_pts_world, degree=degree, smooth=1e-5, nest=20))
@@ -947,7 +948,6 @@ def pipeline_spline():
     show_masks([data[-1][1], correct_skeleton], "Correct Skeleton")
 
     show_masks([correct_skeleton, projected_spline_cam1], "Correct Skeleton and Projected Spline (CAM1)")
-    exit()
 
     # Get highest Point in pointcloud
     target_point, target_angle = get_highest_point_and_angle_spline(ctrl_points[-1])
@@ -967,7 +967,8 @@ def pipeline_spline():
 
 
     while not rospy.is_shutdown():
-        input("Press Enter when image is correct")
+        usr_input = input("Press Enter when image is correct")
+        if usr_input == "c": exit()
         # Take image
         images.append(image_subscriber.get_current_image()) # <- online
         # images.append(cv2.imread(f'/root/workspace/images/moves/{offline_image_name}{1}.jpg')) # <- offline

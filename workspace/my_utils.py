@@ -1293,55 +1293,79 @@ def show_mask_and_points(mask: np.ndarray, points, title = "Mask with Points") -
     cv2.waitKey(0)
     cv2.destroyAllWindows()
 
-def show_pointclouds(pointclouds: 'o3d.geometry.PointCloud', max_points: int = 200_000, voxel_size: float | None = None, axis_size: float = 0.2, title: str = 'Point Cloud') -> None:
-    """Display a point cloud via *Open3D*'s built‑in viewer, showing axes.
+def show_pointclouds(pointclouds: list,  frames: list[TransformStamped] = None, title: str = 'Point Clouds') -> None:
+    """
+    Display multiple point clouds (each colored differently), optionally with frames.
+    Accepts either Open3D PointClouds or numpy arrays of shape (N,3).
 
     Parameters
     ----------
-    pointcloud
-        Cloud to display (camera‑frame coordinates).
-    max_points
-        Random down‑sample threshold for interactivity.
-    voxel_size
-        If given, voxel grid down‑sampling size **in metres**.
-    axis_size
-        Size of the origin coordinate frame (in metres).
-    window_name
-        Title of the visualiser window.
+    pointclouds : list of o3d.geometry.PointCloud or np.ndarray
+        The point clouds to display. If an entry is an (N×3) array, it will be
+        converted into an Open3D PointCloud.
+    frames : list of TransformStamped, optional
+        Coordinate frames to draw as triads.
+    title : str
+        Window title for the visualizer.
     """
-    if not isinstance(pointclouds[0], o3d.geometry.PointCloud):
-        raise TypeError("show_pointcloud expects an open3d.geometry.PointCloud")
-    
-    # Origin coordinate frame ---------------------------------------------
-    geometries = [o3d.geometry.TriangleMesh.create_coordinate_frame(size=axis_size, origin=[0, 0, 0])]
+    import copy
+    import numpy as np
+    import open3d as o3d
+    from tf.transformations import quaternion_matrix
+    from geometry_msgs.msg import TransformStamped
 
-    # for pc in pointclouds:
-    #     if voxel_size is not None and voxel_size > 0:
-    #         pc = pc.voxel_down_sample(voxel_size)
-    #     elif len(pc.points) > max_points:
-    #         pc = pc.random_down_sample(max_points / len(pc.points))
-    #     geometries.append(pc)
+    geometries = []
 
-    # colored pointclouds
-    palette = [[1,0,0],[0,1,0],[0,0,1],[1,1,0],[1,0,1],[0,1,1]]
+    # draw origin triad
+    geometries.append(o3d.geometry.TriangleMesh.create_coordinate_frame(
+        size=0.2, origin=(0,0,0)))
+
+    # draw any provided frames
+    if frames:
+        for tf in frames:
+            if not isinstance(tf, TransformStamped):
+                raise TypeError("Each frame must be a TransformStamped")
+            t = tf.transform.translation; q = tf.transform.rotation
+            T = quaternion_matrix((q.x, q.y, q.z, q.w))
+            T[:3,3] = (t.x, t.y, t.z)
+            mesh = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
+            mesh.transform(T)
+            geometries.append(mesh)
+
+    # color palette for point clouds
+    palette = [
+        [1,0,0], [0,1,0], [0,0,1],
+        [1,1,0], [1,0,1], [0,1,1],
+    ]
+
+    # process each cloud
     for idx, pc in enumerate(pointclouds):
-        if not isinstance(pc, o3d.geometry.PointCloud):
-            raise TypeError("Expected PointCloud")
-        pc2 = copy.deepcopy(pc)
-        color = palette[idx % len(palette)]
-        pc2.colors = o3d.utility.Vector3dVector(
-            np.tile(color, (len(pc2.points),1)))
-        geometries.append(pc2)
+        # convert numpy array to PointCloud if needed
+        if isinstance(pc, np.ndarray):
+            if pc.ndim != 2 or pc.shape[1] != 3:
+                raise ValueError(f"NumPy array at index {idx} must be shape (N,3)")
+            pc_obj = o3d.geometry.PointCloud()
+            pc_obj.points = o3d.utility.Vector3dVector(pc)
+        elif isinstance(pc, o3d.geometry.PointCloud):
+            pc_obj = copy.deepcopy(pc)
+        else:
+            raise TypeError("Each entry must be an Open3D PointCloud or an (N×3) ndarray")
 
-    # Viewer ---------------------------------------------------------------
+        # assign a solid color
+        color = palette[idx % len(palette)]
+        colors = np.tile(color, (len(pc_obj.points), 1))
+        pc_obj.colors = o3d.utility.Vector3dVector(colors)
+        geometries.append(pc_obj)
+
+    # launch the visualizer
     o3d.visualization.draw_geometries(
         geometries,
         window_name=title,
-        width=1280,
-        height=720,
+        width=1280, height=720,
         point_show_normal=False,
         mesh_show_wireframe=False,
-        mesh_show_back_face=False)
+        mesh_show_back_face=False
+    )
 
 def show_pointclouds_with_frames(pointclouds: list[o3d.geometry.PointCloud],
                                     frames: list[TransformStamped],
@@ -1575,6 +1599,63 @@ def interactive_scale_shift(depth1: np.ndarray,
 
     cv2.destroyWindow(window)
     return result['scale'], result['shift'], result['inliers']
+
+# def show_spline_gradient(mask: np.ndarray, centerline: np.ndarray, title: str = "Centerline"):
+#     """
+#     Overlay the 2D centerline on the mask with a blue→red gradient.
+
+#     Args:
+#         mask:        H×W binary mask.
+#         centerline:  (N×2) array of (row, col) coordinates.
+#         title:      OpenCV window name.
+#     """
+#     img = (mask.astype(np.uint8)*255)
+#     img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+#     N = len(centerline)
+#     for i in range(N-1):
+#         r0, c0 = centerline[i]
+#         r1, c1 = centerline[i+1]
+#         t = i / (N-1)
+#         color = (int(255*(1-t)), 0, int(255*t))  # B→R gradient
+#         cv2.line(img, (c0, r0), (c1, r1), color, 2)
+#     cv2.imshow(title, img)
+#     cv2.waitKey(0)
+#     cv2.destroyWindow(title)
+
+
+def show_spline_gradient(mask: np.ndarray, centerline: np.ndarray, title: str = "Centerline Points"):
+    """
+    Overlay the 2D centerline points on the mask with a blue→red gradient.
+
+    Args:
+        mask:        H×W binary mask.
+        centerline:  (N×2) array of (row, col) coordinates.
+        title:       OpenCV window name.
+    """
+    # Prepare the background image
+    img = (mask.astype(np.uint8) * 255)
+    img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+
+    N = len(centerline)
+    if N == 0:
+        cv2.imshow(title, img)
+        cv2.waitKey(0)
+        cv2.destroyWindow(title)
+        return
+
+    # Draw each point with its own gradient color
+    for i, (r, c) in enumerate(centerline):
+        t = i / (N - 1) if N > 1 else 0
+        # Compute B→R gradient: blue at start, red at end
+        color = (int(255 * (1 - t)), 0, int(255 * t))
+        # Draw a filled circle at each centerline point
+        cv2.circle(img, (int(c), int(r)), radius=1, color=color, thickness=-1)
+
+    # Show the result
+    cv2.imshow(title, img)
+    cv2.waitKey(0)
+    cv2.destroyWindow(title)
+
 #endregion
 
 # ----------------------------------------------------------------------------
@@ -3148,205 +3229,506 @@ def convert_bspline_to_pointcloud(ctrl_points: np.ndarray, samples: int = 150, d
 #endregion
 
 
-#region new spline initialization
-def extract_centerline_from_mask_overlap(depth_image: np.ndarray,
-                                 mask: np.ndarray,
-                                 camera_parameters,
-                                 depth_scale: float = 1.0,
-                                 connectivity: int = 8,
-                                 min_length: int = 20,
-                                 conn_radius: float = 30.0,
-                                 w_angle: float = 1.0,
-                                 w_dist: float  = 2.0,
-                                 w_curv: float  = 5.0) -> np.ndarray:
-    """
-    Extracts an ordered 3D centerline from a binary mask and its corresponding depth image
-    via 2D skeletonization and back-projection.
+#region new spline initialization old
+# def extract_centerline_from_mask_overlap(
+#     depth_image: np.ndarray,
+#     mask: np.ndarray,
+#     camera_parameters,
+#     depth_scale: float = 1.0,
+#     connectivity: int = 8,
+#     min_length: int = 20,
+#     conn_radius: float = 30.0,
+#     w_angle: float = 4.0,
+#     w_dist: float = 2.0,
+#     w_curv: float = 5.0,
+#     show: bool = False
+# ) -> np.ndarray:
+#     """
+#     Extracts the 3D centerline from a binary mask of a cable-like structure,
+#     handling overlaps by skeletonizing, excising intersections, removing short
+#     branches, and reconnecting endpoints based on curvature and distance.
 
-    Args:
-        depth_image: (H×W) depth values.
-        mask:        (H×W) binary mask (0/1 or False/True).
-        camera_parameters: either a dict with keys 'fx','fy','cx','cy', 
-                           or an object with attribute .intrinsic_matrix.
-        depth_scale: Factor to divide depth_image values by (default=1.0).
-        connectivity: 4 or 8 connectivity for cc‐label (default=8).
-        min_length:   Remove skeleton segments shorter than this (pixels).
-        conn_radius:  Only reconnect endpoints closer than this (pixels).
-        w_angle, w_dist, w_curv: weights for angle, distance, curvature in matching.
+#     Parameters:
+#         depth_image (np.ndarray): 2D array of depth values (same resolution as mask).
+#         mask (np.ndarray): 2D binary mask (0 or 255) of the object.
+#         camera_parameters: tuple (fx, fy, cx, cy) intrinsic parameters.
+#         depth_scale (float): Scale factor to convert depth units.
+#         connectivity (int): Pixel connectivity for skeleton and components (4 or 8).
+#         min_length (int): Minimum branch length (in pixels) to keep.
+#         conn_radius (float): Radius (in px) to consider endpoints for reconnection.
+#         w_angle (float): Weight for angle cost in matching.
+#         w_dist (float): Weight for distance cost in matching.
+#         w_curv (float): Weight for curvature cost in matching.
+#         show (bool): If True, display intermediate masks via show_masks().
+
+#     Returns:
+#         np.ndarray: Ordered centerline points in 3D, shape (N, 3).
+#     """
+#     fx, fy, cx, cy = camera_parameters
+#     # 1. Binarize mask to {0,1}
+#     binary = (mask > 0).astype(np.uint8)
+#     if show:
+#         show_masks([binary * 255], title="Binary mask")
+
+#     # 2. Skeletonize
+#     skeleton = skeletonize(binary.astype(bool)).astype(np.uint8)
+#     if show:
+#         show_masks([skeleton * 255], title="Skeleton")
+
+#     # 3. Excise intersections
+#     kernel = np.array([[1,1,1],[1,0,1],[1,1,1]], dtype=np.uint8)
+#     neighbor_count = cv2.filter2D(skeleton, -1, kernel)
+#     ints = np.argwhere((skeleton == 1) & (neighbor_count >= 3))
+#     dist_map = distance_transform_edt(binary)
+#     to_remove = np.zeros_like(skeleton, dtype=bool)
+#     H, W = skeleton.shape
+#     for y, x in ints:
+#         r = dist_map[y, x]
+#         R = int(np.ceil(r))
+#         y0, y1 = max(0, y - R), min(H, y + R + 1)
+#         x0, x1 = max(0, x - R), min(W, x + R + 1)
+#         yy, xx = np.ogrid[y0:y1, x0:x1]
+#         circle = (yy - y)**2 + (xx - x)**2 <= r**2
+#         to_remove[y0:y1, x0:x1][circle] = True
+#     skeleton_excised = (skeleton.astype(bool) & ~to_remove).astype(np.uint8)
+#     if show:
+#         show_masks([skeleton * 255, skeleton_excised * 255], title="After excising intersections")
+
+#     # 4. Remove short segments
+#     num_labels, labels = cv2.connectedComponents(skeleton_excised, connectivity=connectivity)
+#     for lbl in range(1, num_labels):
+#         comp = (labels == lbl)
+#         if comp.sum() < min_length:
+#             skeleton_excised[comp] = 0
+#     if show:
+#         show_masks([skeleton * 255, skeleton_excised * 255], title=f"Pruned < {min_length}px segments")
+
+#     # Debug: display each branch individually after removing crossover
+#     if show:
+#         num_branches, branch_labels = cv2.connectedComponents(skeleton_excised, connectivity=connectivity)
+#         for b in range(1, num_branches):
+#             branch_mask = (branch_labels == b).astype(np.uint8) * 255
+#             show_masks([branch_mask], title=f"Branch {b}")
+
+#     # 5. Reconnect endpoints with curvature
+#     neighbor_count2 = cv2.filter2D(skeleton_excised, -1, kernel)
+#     endpoints = np.argwhere((skeleton_excised == 1) & (neighbor_count2 == 1))
+#     pts = endpoints
+#     dmat = np.linalg.norm(pts[:, None, :] - pts[None, :, :], axis=2)
+#     counts = (dmat < conn_radius).sum(axis=1) - 1
+#     to_conn = counts >= 1
+#     if to_conn.sum() % 2 == 1:
+#         sub = dmat[to_conn][:, to_conn]
+#         np.fill_diagonal(sub, np.inf)
+#         drop = np.argmax(sub.min(axis=1))
+#         global_idx = np.where(to_conn)[0][drop]
+#         to_conn[global_idx] = False
+#     conn_eps = endpoints[to_conn]
+#     # compute tangents & curvatures
+#     vectors, curv = [], []
+#     for y, x in conn_eps:
+#         # tangent
+#         for dy in (-1,0,1):
+#             for dx in (-1,0,1):
+#                 if dy==dx==0: continue
+#                 ny, nx = y+dy, x+dx
+#                 if 0 <= ny < H and 0 <= nx < W and skeleton_excised[ny, nx]:
+#                     v = np.array([y-ny, x-nx], float)
+#                     vectors.append(v/np.linalg.norm(v))
+#                     break
+#             else:
+#                 continue
+#             break
+#         # curvature (identical to previous)
+#         nbr1 = [(y+dy, x+dx) for dy in (-1,0,1) for dx in (-1,0,1)
+#                 if not (dy==dx==0) and 0<=y+dy<H and 0<=x+dx<W and skeleton_excised[y+dy,x+dx]]
+#         if nbr1:
+#             y1, x1 = nbr1[0]
+#             nbr2 = [(y1+dy, x1+dx) for dy in (-1,0,1) for dx in (-1,0,1)
+#                     if (dy!=0 or dx!=0) and (y1+dy, x1+dx)!=(y,x)
+#                     and 0<=y1+dy<H and 0<=x1+dx<W and skeleton_excised[y1+dy,x1+dx]]
+#             if nbr2:
+#                 y2, x2 = nbr2[0]
+#                 v1 = np.array([y1-y, x1-x], float)
+#                 v2 = np.array([y2-y1, x2-x1], float)
+#                 angle = np.arccos(np.dot(v1,v2)/(np.linalg.norm(v1)*np.linalg.norm(v2)+1e-8))
+#                 curv.append(angle/(np.linalg.norm(v1)+1e-8))
+#         else:
+#             curv.append(0.0)
+#     curv = np.array(curv)
+#     curv_norm = curv/(curv.max()+1e-8)
+#     # build cost matrix & match
+#     n = len(conn_eps)
+#     dists = np.linalg.norm(conn_eps[:,None,:]-conn_eps[None,:,:],axis=2)
+#     d_max = dists.max() if n>1 else 1
+#     A = np.zeros((n,n),float)
+#     for i in range(n):
+#         for j in range(i+1,n):
+#             val = np.dot(vectors[i],vectors[j])
+#             val = np.clip(val, -1.0, 1.0)
+#             ang_cost = np.pi - np.arccos(val)
+#             d_cost = dists[i,j]/(d_max+1e-8)
+#             k_cost = abs(curv_norm[i]-curv_norm[j])
+#             A[i,j] = A[j,i] = w_angle*ang_cost + w_dist*d_cost + w_curv*k_cost
+#     from itertools import combinations
+#     def find_min_pairs(A_mat):
+#         m=A_mat.shape[0]
+#         assert m%2==0
+#         best_cost, best_pairs=float('inf'),None
+#         def recurse(rem,pairs):
+#             nonlocal best_cost,best_pairs
+#             if not rem:
+#                 c=sum(A_mat[i,j] for i,j in pairs)
+#                 if c<best_cost:
+#                     best_cost,best_pairs=c,pairs.copy()
+#                 return
+#             i=rem[0]
+#             for j in rem[1:]: recurse([k for k in rem if k not in (i,j)],pairs+[(i,j)])
+#         recurse(list(range(m)),[])
+#         return best_pairs
+#     pairs = find_min_pairs(A) if n>0 else []
+#     connected = skeleton_excised.copy()
+#     disp = (connected*255).astype(np.uint8)
+#     for i,j in pairs:
+#         y0,x0 = conn_eps[i]
+#         y1,x1 = conn_eps[j]
+#         cv2.line(disp,(x0,y0),(x1,y1),255,1)
+#     connected = (disp>0).astype(np.uint8)
+#     if show:
+#         show_masks([skeleton_excised*255, disp], title="Reconnected skeleton")
+#     # 6. Simplified linear walk from endpoint A to B
+#     # Compute degree-1 endpoints
+#     neighbor_count3 = cv2.filter2D(connected, -1, kernel)
+#     end_pts = np.argwhere((connected == 1) & (neighbor_count3 == 1))
+#     # Determine start and end
+#     if len(end_pts) >= 2:
+#         start = tuple(end_pts[0])
+#         end_pt = tuple(end_pts[1])
+#     elif len(end_pts) == 1:
+#         start = tuple(end_pts[0])
+#         end_pt = None
+#     else:
+#         # No endpoints: pick arbitrary start
+#         pts_all = np.argwhere(connected == 1)
+#         start = tuple(pts_all[0])
+#         end_pt = None
+#     # Walk greedily
+#     ordered = [start]
+#     prev = None
+#     cur = start
+#     while True:
+#         if cur == end_pt:
+#             break
+#         y, x = cur
+#         # collect neighbors (8-connectivity) excluding prev
+#         nexts = []
+#         for dy in (-1,0,1):
+#             for dx in (-1,0,1):
+#                 if dy == 0 and dx == 0: continue
+#                 ny, nx = y + dy, x + dx
+#                 if 0 <= ny < H and 0 <= nx < W and connected[ny, nx]:
+#                     if prev is None or (ny, nx) != prev:
+#                         nexts.append((ny, nx))
+#         if not nexts:
+#             break
+#         # pick the first
+#         nxt = nexts[0]
+#         ordered.append(nxt)
+#         prev, cur = cur, nxt
+#     # 7. Show ordered spline
+#     if show:
+#         from my_utils import show_spline_gradient
+#         centerline_2d = np.array(ordered)
+#         show_spline_gradient(mask, centerline_2d, title="Ordered Centerline")
+#     # 8. Back-project to 3D Show ordered spline
+#     if show:
+#         from my_utils import show_spline_gradient
+#         centerline_2d = np.array(ordered)
+#         show_spline_gradient(mask, centerline_2d, title="Ordered Centerline")
+
+# # 8. Back-project to 3D Show ordered spline
+#     if show:
+#         from my_utils import show_spline_gradient
+#         centerline_2d=np.array(ordered)
+#         show_spline_gradient(mask, centerline_2d, title="Ordered Centerline")
+#     # 8. Back-project to 3D
+#     pts3d=[]
+#     for y,x in ordered:
+#         z=float(depth_image[y,x])*depth_scale
+#         X=(x-cx)*z/fx;Y=(y-cy)*z/fy
+#         pts3d.append([X,Y,z])
+#     return np.array(pts3d)
+
+
+#endregion
+
+
+#region new spline initialization
+def extract_centerline_from_mask_overlap(
+    depth_image: np.ndarray,
+    mask: np.ndarray,
+    camera_parameters: tuple,
+    depth_scale: float = 1.0,
+    connectivity: int = 8,
+    min_length: int = 20,
+    conn_radius: float = 30.0,
+    w_angle: float = 50.0,
+    w_dist: float = 0.5,
+    w_curv: float = 50.0,
+    show: bool = False
+    ) -> np.ndarray:
+    """
+    Extracts a single ordered 3D centerline spline from a cable mask+depth.
 
     Returns:
-        centerline_pts: (N×3) array of ordered 3D points along the centerline.
+        pts3d: (N,3) array of (X,Y,Z) in camera coords.
     """
-    H, W = mask.shape
+    fx, fy, cx, cy = camera_parameters
 
-    # 1. Skeletonize the mask
-    skel = skeletonize(mask.astype(bool))
-    skel_uint8 = skel.astype(np.uint8)
+    # 1. Binarise mask
+    _, binary = cv2.threshold(mask, 127, 1, cv2.THRESH_BINARY)
 
-    # build neighbor kernel
-    neigh_k = np.array([[1,1,1],[1,0,1],[1,1,1]], np.uint8)
+    # 2. Skeletonize
+    skeleton_bool = skeletonize(binary.astype(bool))
+    skeleton_disp = skeleton_bool.astype(np.uint8) * 255
+    if show:
+        show_masks([binary*255, skeleton_disp], title="Skeleton")
 
-    # 2. Excise intersection zones
-    dist_map = distance_transform_edt(mask.astype(np.uint8))
-    nbr_count = cv2.filter2D(skel_uint8, -1, neigh_k)
-    intersections = np.argwhere((skel) & (nbr_count >= 3))
-    to_remove = np.zeros_like(skel, bool)
-    for y, x in intersections:
+    # 3. Excise intersections
+    kernel = np.array([[1,1,1],[1,0,1],[1,1,1]], np.uint8)
+    neighbor_count = cv2.filter2D(skeleton_bool.astype(np.uint8), -1, kernel)
+    ints = np.argwhere((skeleton_bool) & (neighbor_count >= 3))
+    dist_map = distance_transform_edt(binary)
+    to_remove = np.zeros_like(skeleton_bool, bool)
+    H, W = skeleton_bool.shape
+    for y, x in ints:
         r = dist_map[y, x]
         R = int(np.ceil(r))
         y0, y1 = max(0, y-R), min(H, y+R+1)
         x0, x1 = max(0, x-R), min(W, x+R+1)
         yy, xx = np.ogrid[y0:y1, x0:x1]
-        circle = (yy - y)**2 + (xx - x)**2 <= r**2
+        circle = (yy-y)**2 + (xx-x)**2 <= r**2
         to_remove[y0:y1, x0:x1][circle] = True
-    skel_exc = skel & ~to_remove
+    skeleton_excised = skeleton_bool & ~to_remove
+    skeleton_excised_disp = skeleton_excised.astype(np.uint8) * 255
+    if show:
+        show_masks([skeleton_disp, skeleton_excised_disp],
+                            title="Before vs After Excising Intersection Zone")
 
-    # 3. Remove short spurious segments
-    num_lbls, labels = cv2.connectedComponents(skel_exc.astype(np.uint8),
-                                               connectivity=connectivity)
-    for lbl in range(1, num_lbls):
+    # 4. Remove short segments
+    num_labels, labels = cv2.connectedComponents(skeleton_excised.astype(np.uint8), connectivity)
+    for lbl in range(1, num_labels):
         comp = (labels == lbl)
         if comp.sum() < min_length:
-            skel_exc[comp] = False
+            skeleton_excised[comp] = False
+    skeleton_excised_disp = skeleton_excised.astype(np.uint8) * 255
+    if show:
+        show_masks([skeleton_disp, skeleton_excised_disp],
+                            title=f"Removed segments shorter than {min_length}px")
 
-    # 4. Find endpoints of excised skeleton
-    nbr_count_exc = cv2.filter2D(skel_exc.astype(np.uint8), -1, neigh_k)
-    endpoints_all = np.argwhere((skel_exc) & (nbr_count_exc == 1))
+    # 5. Extract paths
+    num_labels2, labels2 = cv2.connectedComponents(skeleton_excised.astype(np.uint8), connectivity)
+    real_paths = []
+    connection_paths = []
+    for lbl in range(1, num_labels2):
+        comp_mask = (labels2 == lbl)
+        pixels = [tuple(pt) for pt in np.argwhere(comp_mask)]
+        nbrs = {p: [] for p in pixels}
+        for y, x in pixels:
+            for dy in (-1,0,1):
+                for dx in (-1,0,1):
+                    if dy==dx==0: continue
+                    q = (y+dy, x+dx)
+                    if q in nbrs:
+                        nbrs[(y,x)].append(q)
+        ends = [p for p,ne in nbrs.items() if len(ne)==1]
+        start = ends[0] if ends else pixels[0]
+        ordered, prev, curr = [], None, start
+        while True:
+            ordered.append(curr)
+            nxt = [n for n in nbrs[curr] if n!=prev]
+            if not nxt: break
+            prev, curr = curr, nxt[0]
+        if show:
+            show_spline_gradient(binary, np.array(ordered),
+                                          title=f"Segment {lbl}")
+        real_paths.append(np.array(ordered))
 
-    # 5. Cluster‐filter: only reconnect endpoints close to another endpoint
-    pts = endpoints_all
-    if pts.size == 0:
-        # no endpoints at all, closed loop
-        skel_conn = skel_exc.astype(np.uint8) * 255
-    else:
-        dmat = np.linalg.norm(pts[:,None,:] - pts[None,:,:], axis=2)
-        nbrs_per_pt = (dmat < conn_radius).sum(axis=1) - 1
-        reconnect = nbrs_per_pt >= 1
-        conn_eps  = endpoints_all[reconnect]
-        leave_eps = endpoints_all[~reconnect]
+    # 6. Pair endpoints
+    neighbor_count_exc = cv2.filter2D(skeleton_excised.astype(np.uint8), -1, kernel)
+    endpoints = np.argwhere((skeleton_excised) & (neighbor_count_exc==1))
+    pts = endpoints
+    dmat = np.linalg.norm(pts[:,None,:] - pts[None,:,:], axis=2)
+    neigh_counts = (dmat < conn_radius).sum(axis=1) - 1
+    mask_conn = neigh_counts>=1
+    if mask_conn.sum()%2==1:
+        sub = dmat[mask_conn][:,mask_conn]
+        np.fill_diagonal(sub, np.inf)
+        drop = np.argmax(sub.min(axis=1))
+        idx_global = np.where(mask_conn)[0][drop]
+        mask_conn[idx_global] = False
+    endpoints = endpoints[mask_conn]
+    n = len(endpoints)
 
-        # if odd, drop the most isolated
-        if len(conn_eps) % 2 == 1:
-            sub = dmat[reconnect][:, reconnect]
-            np.fill_diagonal(sub, np.inf)
-            drop_idx = np.argmax(sub.min(axis=1))
-            global_idx = np.where(reconnect)[0][drop_idx]
-            reconnect[global_idx] = False
-            conn_eps = endpoints_all[reconnect]
-
-        # if fewer than 2 to connect, skip matching
-        if len(conn_eps) < 2:
-            skel_conn = skel_exc.astype(np.uint8) * 255
-        else:
-            # compute tangents
-            vectors = []
-            for y, x in conn_eps:
-                for dy in (-1,0,1):
-                    for dx in (-1,0,1):
-                        if dy==dx==0: continue
-                        ny, nx = y+dy, x+dx
-                        if 0 <= ny < H and 0 <= nx < W and skel_exc[ny,nx]:
-                            v = np.array([y-ny, x-nx], float)
-                            vectors.append(v/np.linalg.norm(v))
-                            break
-                    else:
-                        continue
-                    break
-
-            # distances & curvatures
-            n = len(conn_eps)
-            dists = np.linalg.norm(conn_eps[:,None,:] - conn_eps[None,:,:], axis=2)
-            d_max = dists.max()
-            curvs = []
-            for y, x in conn_eps:
-                nbrs1 = [(y+dy, x+dx) for dy in (-1,0,1) for dx in (-1,0,1)
-                         if not(dy==dx==0) and 0<=y+dy<H and 0<=x+dx<W and skel_exc[y+dy,x+dx]]
-                if not nbrs1:
-                    curvs.append(0.0); continue
-                y1,x1 = nbrs1[0]
-                nbrs2 = [(y1+dy, x1+dx) for dy in (-1,0,1) for dx in (-1,0,1)
-                         if not(dy==dx==0) and (y1+dy,x1+dx)!=(y,x)
-                            and 0<=y1+dy<H and 0<=x1+dx<W and skel_exc[y1+dy,x1+dx]]
-                if not nbrs2:
-                    curvs.append(0.0); continue
-                y2,x2 = nbrs2[0]
-                v1 = np.array([y1-y, x1-x], float)
-                v2 = np.array([y2-y1, x2-x1], float)
-                ang = np.arccos(np.dot(v1,v2)/(np.linalg.norm(v1)*np.linalg.norm(v2)+1e-8))
-                curvs.append(ang/(np.linalg.norm(v1)+1e-8))
-            curvs = np.array(curvs)
-            curv_norm = curvs / (curvs.max()+1e-8)
-
-            # build cost matrix
-            A = np.zeros((n,n), float)
-            for i in range(n):
-                for j in range(i+1, n):
-                    ang_cost  = np.pi - np.arccos(abs(np.dot(vectors[i], vectors[j])))
-                    dist_cost = dists[i,j]/(d_max+1e-8)
-                    curv_cost = abs(curv_norm[i] - curv_norm[j])
-                    A[i,j] = A[j,i] = w_angle*ang_cost + w_dist*dist_cost + w_curv*curv_cost
-
-            # brute‐force perfect matching
-            from itertools import combinations
-            def find_min_pairs(A):
-                m = A.shape[0]
-                assert m%2==0
-                best_cost, best = float('inf'), None
-                def recurse(rem, pairs):
-                    nonlocal best_cost, best
-                    if not rem:
-                        total = sum(A[i,j] for i,j in pairs)
-                        if total < best_cost:
-                            best_cost, best = total, pairs.copy()
-                        return
-                    i = rem[0]
-                    for j in rem[1:]:
-                        recurse([k for k in rem if k not in (i,j)], pairs+[(i,j)])
-                recurse(list(range(m)), [])
-                return best
-
-            pairs = find_min_pairs(A)
-            # draw bridges
-            skel_conn = skel_exc.astype(np.uint8) * 255
-            for i,j in pairs:
-                y0,x0 = conn_eps[i]
-                y1,x1 = conn_eps[j]
-                cv2.line(skel_conn, (x0,y0), (x1,y1), 255, 1)
-
-    # 6. Walk the final skeleton (skel_conn) to get an ordered 2D path
-    skel_bool_conn = (skel_conn > 0)
-    nbr_final = cv2.filter2D(skel_bool_conn.astype(np.uint8), -1, neigh_k)
-    ends = np.argwhere((skel_bool_conn) & (nbr_final == 1))
-    if len(ends):
-        start = tuple(ends[0])
-    else:
-        start = tuple(np.argwhere(skel_bool_conn)[0])
-    path2d = [start]
-    prev = None
-    cur  = start
-    while True:
-        y, x = cur
-        neighs = []
+    # compute tangents & curvatures
+    vectors, curv = [], []
+    for y,x in endpoints:
+        # tangent
         for dy in (-1,0,1):
             for dx in (-1,0,1):
                 if dy==dx==0: continue
-                ny, nx = y+dy, x+dx
-                if 0<=ny<H and 0<=nx<W and skel_bool_conn[ny,nx] and (prev is None or (ny,nx)!=prev):
-                    neighs.append((ny,nx))
-        if not neighs:
+                ny,nx=y+dy,x+dx
+                if 0<=ny<H and 0<=nx<W and skeleton_excised[ny,nx]:
+                    v=np.array([y-ny,x-nx],float)
+                    vectors.append(v/ (np.linalg.norm(v)+1e-8))
+                    break
+            else:
+                continue
             break
-        prev, cur = cur, neighs[0]
-        path2d.append(cur)
+        # curvature
+        nbrs1=[(y+dy,x+dx) for dy in (-1,0,1) for dx in (-1,0,1)
+               if not(dy==dx==0) and 0<=y+dy<H and 0<=x+dx<W and skeleton_excised[y+dy,x+dx]]
+        if not nbrs1:
+            curv.append(0.0); continue
+        y1,x1=nbrs1[0]
+        nbrs2=[(y1+dy,x1+dx) for dy in (-1,0,1) for dx in (-1,0,1)
+               if not(dy==dx==0) and (y1+dy,x1+dx)!=(y,x)
+               and 0<=y1+dy<H and 0<=x1+dx<W and skeleton_excised[y1+dy,x1+dx]]
+        if not nbrs2:
+            curv.append(0.0); continue
+        y2,x2=nbrs2[0]
+        v1=np.array([y1-y,x1-x],float)
+        v2=np.array([y2-y1,x2-x1],float)
+        angle=np.arccos(np.dot(v1,v2)/(np.linalg.norm(v1)*np.linalg.norm(v2)+1e-8))
+        curv.append(angle/(np.linalg.norm(v1)+1e-8))
+    curv=np.array(curv)
+    curv_norm=curv/(curv.max()+1e-8)
+    dists=dmat[mask_conn][:,mask_conn]
+    d_max=dists.max()
 
-    # 7. Back‐project 2D path to 3D
-    fx, fy, cx, cy = camera_parameters
+    # build cost matrix with clamp and signed-dot
+    A=np.zeros((n,n),float)
+    for i in range(n):
+        for j in range(i+1,n):
+            dij=dists[i,j]
+            if dij>conn_radius:
+                cost=np.inf
+            else:
+                dot=np.dot(vectors[i],vectors[j])
+                ang=np.arccos(-dot)
+                dcost=dij/(d_max+1e-8)
+                kcost=abs(curv_norm[i]-curv_norm[j])
+                cost=w_angle*ang + w_dist*dcost + w_curv*kcost
+            A[i,j]=A[j,i]=cost
 
-    centerline_pts = []
-    for y, x in path2d:
-        z = float(depth_image[y, x]) / depth_scale
+    def find_min_pairs(M):
+        m=M.shape[0]
+        assert m%2==0
+        best_cost,best=float('inf'),None
+        def recurse(rem,pairs):
+            nonlocal best_cost,best
+            if not rem:
+                c=sum(M[i,j] for i,j in pairs)
+                if c<best_cost:
+                    best_cost,best=c,pairs.copy()
+                return
+            i=rem[0]
+            for j in rem[1:]:
+                recurse([k for k in rem if k not in (i,j)],pairs+[(i,j)])
+        recurse(list(range(m)),[])
+        return best
+    pairs=find_min_pairs(A)
+
+    # draw & store connections
+    disp_conn=skeleton_excised_disp.copy()
+    for i,j in pairs:
+        y0,x0=endpoints[i]
+        y1,x1=endpoints[j]
+        cv2.line(disp_conn,(x0,y0),(x1,y1),255,1)
+    if show:
+        show_masks([disp_conn],title="Connected Skeleton w/ Curvature")
+    for i,j in pairs:
+        y0,x0=endpoints[i]
+        y1,x1=endpoints[j]
+        rr,cc=skline(y0,x0,y1,x1)
+        connection_paths.append(np.stack([rr,cc],axis=1))
+        if show:
+            show_spline_gradient(binary, np.stack([rr,cc],axis=1),
+                                          title="Connection")
+
+    # build connection set
+    conn_set = {tuple(pt) for cp in connection_paths for pt in cp}
+
+    # merge all paths into one chain, storing tuples
+    def endpoints_of(p): return tuple(p[0]), tuple(p[-1])
+    total = []
+    for p in real_paths: total.append({'coords': p, 'type': 'real'})
+    for p in connection_paths: total.append({'coords': p, 'type': 'conn'})
+
+    ep_map = {}
+    for idx, entry in enumerate(total):
+        a, b = endpoints_of(entry['coords'])
+        for e in (a, b): ep_map.setdefault(e, []).append(idx)
+
+    # find starting endpoint
+    start = None
+    for idx, entry in enumerate(total):
+        if entry['type'] != 'real': continue
+        a, b = endpoints_of(entry['coords'])
+        for e in (a, b):
+            if len(ep_map[e]) == 1:
+                start = (idx, e)
+                break
+        if start: break
+    if start is None:
+        raise RuntimeError("No unique starting endpoint.")
+
+    merged = []
+    used = set()
+    curr_idx, curr_pt = start
+
+    # initialize merged with first real segment
+    coords = total[curr_idx]['coords']
+    seq = [tuple(pt) for pt in coords]
+    if seq[0] != curr_pt:
+        seq = seq[::-1]
+    merged.extend(seq)
+    used.add(curr_idx)
+    curr_pt = merged[-1]
+
+    # iteratively append connected segments
+    while True:
+        next_idxs = [i for i in ep_map[curr_pt] if i not in used]
+        if not next_idxs:
+            break
+        idx_next = next_idxs[0]
+        coords = total[idx_next]['coords']
+        seq = [tuple(pt) for pt in coords]
+        if seq[0] != curr_pt:
+            seq = seq[::-1]
+        merged.extend(seq[1:])
+        used.add(idx_next)
+        curr_pt = merged[-1]
+
+    merged_arr = np.array(merged)
+    if show:
+        show_spline_gradient(binary, merged_arr,
+                                      title="Full Merged Skeleton")
+
+    # remove connection points
+    merged_real = [pt for pt in merged if pt not in conn_set]
+
+    # convert to 3D
+    points_3d = []
+    for y, x in merged_real:
+        z = float(depth_image[y, x]) * depth_scale
+        if z <= 0:
+            continue
         X = (x - cx) * z / fx
         Y = (y - cy) * z / fy
-        centerline_pts.append((X, Y, z))
+        points_3d.append((X, Y, z))
 
-    return np.array(centerline_pts)
+    return np.array(points_3d, dtype=float)
+
+
 #endregion

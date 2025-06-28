@@ -5,8 +5,8 @@ from scipy.ndimage import distance_transform_edt
 from my_utils import show_masks
 
 # 1. Load your mask in grayscale
-#mask = cv2.imread('/root/workspace/images/cable_loop_mask.png', cv2.IMREAD_GRAYSCALE)
-mask = cv2.imread('/root/workspace/images/tube_mask_holes.png', cv2.IMREAD_GRAYSCALE)
+mask = cv2.imread('/root/workspace/images/cable_loop_mask.png', cv2.IMREAD_GRAYSCALE)
+# mask = cv2.imread('/root/workspace/images/tube_mask_holes.png', cv2.IMREAD_GRAYSCALE)
 if mask is None:
     raise FileNotFoundError("Couldn’t load mask — check your path")
 
@@ -190,3 +190,4 @@ for i,j in pairs:
 
 # 6. Show final path
 show_masks([connected_disp], title="Connected Skeleton w/ Curvature")
+
