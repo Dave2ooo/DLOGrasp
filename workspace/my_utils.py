@@ -1,3 +1,4 @@
+import os
 import cv2, numpy as np
 import cv2
 import numpy as np
@@ -1600,29 +1601,6 @@ def interactive_scale_shift(depth1: np.ndarray,
     cv2.destroyWindow(window)
     return result['scale'], result['shift'], result['inliers']
 
-# def show_spline_gradient(mask: np.ndarray, centerline: np.ndarray, title: str = "Centerline"):
-#     """
-#     Overlay the 2D centerline on the mask with a blue→red gradient.
-
-#     Args:
-#         mask:        H×W binary mask.
-#         centerline:  (N×2) array of (row, col) coordinates.
-#         title:      OpenCV window name.
-#     """
-#     img = (mask.astype(np.uint8)*255)
-#     img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-#     N = len(centerline)
-#     for i in range(N-1):
-#         r0, c0 = centerline[i]
-#         r1, c1 = centerline[i+1]
-#         t = i / (N-1)
-#         color = (int(255*(1-t)), 0, int(255*t))  # B→R gradient
-#         cv2.line(img, (c0, r0), (c1, r1), color, 2)
-#     cv2.imshow(title, img)
-#     cv2.waitKey(0)
-#     cv2.destroyWindow(title)
-
-
 def show_spline_gradient(mask: np.ndarray, centerline: np.ndarray, title: str = "Centerline Points"):
     """
     Overlay the 2D centerline points on the mask with a blue→red gradient.
@@ -1655,6 +1633,226 @@ def show_spline_gradient(mask: np.ndarray, centerline: np.ndarray, title: str = 
     cv2.imshow(title, img)
     cv2.waitKey(0)
     cv2.destroyWindow(title)
+
+#endregion
+
+#region Save
+def save_depth_map(depth_map: np.ndarray,
+                    folder: str,
+                    filename: str,
+                    vmin: float = None,
+                    vmax: float = None,
+                    colormap: int = None) -> None:
+    """
+    Save a depth map to a PNG in the specified folder, using `filename` + ".png".
+
+    Parameters
+    ----------
+    depth_map : np.ndarray
+        2D array of depth values (float or int).
+    folder : str
+        Directory in which to save the image (will be created if needed).
+    filename : str
+        Base name (without extension) for the PNG file.
+    vmin : float, optional
+        Minimum depth for normalization (default = min of depth_map).
+    vmax : float, optional
+        Maximum depth for normalization (default = max of depth_map).
+    colormap : int, optional
+        OpenCV colormap (e.g. cv2.COLORMAP_JET). If None, grayscale is used.
+    """
+    import os
+    import numpy as np
+    import cv2
+
+    # ensure folder exists
+    if not os.path.exists(folder):
+        os.makedirs(folder, exist_ok=True)
+
+    # build path
+    save_path = os.path.join(folder, f"{filename}.png")
+
+    # normalize to [0,255]
+    dm = depth_map.astype(np.float32)
+    mn = vmin if vmin is not None else np.nanmin(dm)
+    mx = vmax if vmax is not None else np.nanmax(dm)
+    if mx <= mn:
+        img8 = np.zeros(dm.shape, dtype=np.uint8)
+    else:
+        norm = (dm - mn) / (mx - mn)
+        norm = np.clip(norm, 0.0, 1.0)
+        img8 = (norm * 255).astype(np.uint8)
+
+    # apply colormap if requested
+    if colormap is not None:
+        img_color = cv2.applyColorMap(img8, colormap)
+    else:
+        img_color = cv2.cvtColor(img8, cv2.COLOR_GRAY2BGR)
+
+    # write out PNG
+    cv2.imwrite(save_path, img_color)
+
+def save_masks(masks: list[np.ndarray],
+               folder: str,
+               filename: str,
+               colors: list[tuple[int,int,int]] = None) -> None:
+    """
+    Overlay and save multiple binary masks as a single color PNG.
+
+    Parameters
+    ----------
+    masks : list of np.ndarray or np.ndarray (2D or 3D)
+        Binary or uint8 masks to overlay. Can be a single 2D mask, a 3D array
+        of shape (N, H, W), or a list of 2D arrays.
+    folder : str
+        Directory to write the output PNG into (will be created if needed).
+    filename : str
+        Base name (without extension) for the saved file.
+    colors : list of (B, G, R) tuples, optional
+        Colors for each mask in 0–255. If omitted, defaults to:
+        white, red, green, blue, yellow, magenta, cyan, …
+    """
+    import os
+    import numpy as np
+    import cv2
+
+    # Normalize input into a list of 2D masks
+    if isinstance(masks, np.ndarray):
+        if masks.ndim == 2:
+            mask_list = [masks]
+        elif masks.ndim == 3:
+            mask_list = [masks[i] for i in range(masks.shape[0])]
+        else:
+            raise ValueError("If masks is an ndarray it must be 2D or 3D (N,H,W)")
+    elif isinstance(masks, (list, tuple)):
+        mask_list = list(masks)
+    else:
+        raise TypeError("masks must be an ndarray or a list/tuple of ndarrays")
+
+    if not mask_list:
+        raise ValueError("No masks provided")
+
+    # Verify all masks have the same shape
+    H, W = mask_list[0].shape
+    for m in mask_list:
+        if m.shape != (H, W):
+            raise ValueError("All masks must have the same shape")
+
+    # Default color palette (BGR)
+    default_palette = [
+        (255, 255, 255),  # white
+        (0, 0, 255),      # red
+        (0, 255, 0),      # green
+        (255, 0, 0),      # blue
+        (0, 255, 255),    # yellow
+        (255, 0, 255),    # magenta
+        (255, 255, 0),    # cyan
+        (128, 128, 128),  # gray
+    ]
+    palette = colors if colors is not None else default_palette
+
+    # Ensure output folder exists
+    os.makedirs(folder, exist_ok=True)
+
+    # Prepare blank color image
+    out = np.zeros((H, W, 3), dtype=np.uint8)
+    for idx, m in enumerate(mask_list):
+        # Binarize mask
+        mb = (m > 0)
+        color = palette[idx % len(palette)]
+        out[mb] = color
+
+    # Save image
+    path = os.path.join(folder, f"{filename}.png")
+    cv2.imwrite(path, out)
+
+def save_mask_spline(mask: np.ndarray,
+                        ctrl_points: np.ndarray,
+                        order: int,
+                        camera_parameters,
+                        camera_pose: TransformStamped,
+                        folder: str,
+                        filename: str,
+                        num_samples: int = 200,
+                        line_color = (0, 0, 255),
+                        line_thickness: int = 2) -> None:
+    """
+    Overlay a projected 3D B‐spline on top of a binary mask and save as PNG.
+    Projects the spline (in world coords) into the image plane defined by camera_pose.
+
+    Parameters
+    ----------
+    mask : np.ndarray, shape (H, W)
+        Binary mask (0/255 or bool) to serve as the background.
+    ctrl_points : np.ndarray, shape (N,3)
+        Control points of the 3D spline in world coordinates.
+    order : int
+        Degree of the B‐spline.
+    camera_parameters : (fx, fy, cx, cy)
+        Intrinsic parameters.
+    camera_pose : TransformStamped
+        The ROS transform from camera frame to world frame.
+    folder : str
+        Directory to save the output (will be created if needed).
+    filename : str
+        Base name (without extension) for the saved file.
+    num_samples : int
+        How many points to sample along the spline for a smooth curve.
+    line_color : (B, G, R)
+        Color to draw the spline.
+    line_thickness : int
+        Thickness of the polyline segments.
+    """
+    # 1) ensure folder
+    os.makedirs(folder, exist_ok=True)
+    save_path = os.path.join(folder, f"{filename}.png")
+
+    # 2) prepare background
+    H, W = mask.shape[:2]
+    bg = (mask.astype(bool).astype(np.uint8) * 255) if mask.dtype != np.uint8 else mask.copy()
+    img = cv2.cvtColor(bg, cv2.COLOR_GRAY2BGR)
+
+    # 3) build knot vector
+    n_ctrl = ctrl_points.shape[0]
+    m = n_ctrl - order - 1
+    interior = np.linspace(0,1,m+2)[1:-1] if m>0 else np.array([])
+    knots = np.concatenate([np.zeros(order+1), interior, np.ones(order+1)])
+
+    # 4) sample spline in world coords
+    spline = BSpline(knots, ctrl_points, order)
+    t0, t1 = knots[order], knots[-order-1]
+    ts = np.linspace(t0, t1, num_samples)
+    world_pts = spline(ts)  # (num_samples,3)
+
+    # 5) build world→camera transform
+    if not isinstance(camera_pose, TransformStamped):
+        raise TypeError("camera_pose must be a TransformStamped")
+    t = camera_pose.transform.translation
+    q = camera_pose.transform.rotation
+    trans = np.array([t.x, t.y, t.z], dtype=np.float64)
+    quat  = np.array([q.x, q.y, q.z, q.w], dtype=np.float64)
+    Tcw = quaternion_matrix(quat)
+    Tcw[:3,3] = trans
+    Twc = np.linalg.inv(Tcw)
+
+    # 6) project each world point into pixel coords
+    fx, fy, cx, cy = camera_parameters
+    pts_h = np.hstack([world_pts, np.ones((world_pts.shape[0],1))])
+    cam_pts = (Twc @ pts_h.T).T
+    x_cam, y_cam, z_cam = cam_pts[:,0], cam_pts[:,1], cam_pts[:,2]
+    u = (x_cam * fx / z_cam + cx).round().astype(int)
+    v = (y_cam * fy / z_cam + cy).round().astype(int)
+
+    # 7) draw polyline
+    for i in range(len(u)-1):
+        u0, v0, u1, v1 = u[i], v[i], u[i+1], v[i+1]
+        if 0 <= u0 < W and 0 <= v0 < H and 0 <= u1 < W and 0 <= v1 < H:
+            cv2.line(img, (u0,v0), (u1,v1), line_color, line_thickness)
+
+    # 8) save
+    cv2.imwrite(save_path, img)
+
+
 
 #endregion
 
@@ -3731,4 +3929,83 @@ def extract_centerline_from_mask_overlap(
     return np.array(points_3d, dtype=float)
 
 
+def extract_centerline_from_mask_individual(
+    depth_image: np.ndarray,
+    mask: np.ndarray,
+    camera_parameters: tuple,
+    depth_scale: float = 1.0,
+    connectivity: int = 8,
+    min_length: int = 20,
+    show: bool = False
+    ) -> list:
+    """
+    Extracts individual 3D centerline segments (no connections).
+
+    Returns:
+        centerlines: list of (Ni,3) arrays of segment points in camera coords.
+    """
+    fx, fy, cx, cy = camera_parameters
+
+    # 1. Binarise and skeletonize + excise + remove short segments
+    _, binary = cv2.threshold(mask, 127, 1, cv2.THRESH_BINARY)
+    skeleton_bool = skeletonize(binary.astype(bool))
+    kernel = np.array([[1,1,1],[1,0,1],[1,1,1]], np.uint8)
+    neighbor_count = cv2.filter2D(skeleton_bool.astype(np.uint8), -1, kernel)
+    ints = np.argwhere((skeleton_bool)&(neighbor_count>=3))
+    dist_map = distance_transform_edt(binary)
+    to_remove = np.zeros_like(skeleton_bool, bool)
+    H, W = skeleton_bool.shape
+    for y,x in ints:
+        r = dist_map[y, x]
+        R = int(np.ceil(r))
+        y0,y1 = max(0,y-R), min(H, y+R+1)
+        x0,x1 = max(0,x-R), min(W, x+R+1)
+        yy,xx = np.ogrid[y0:y1, x0:x1]
+        circle = (yy-y)**2 + (xx-x)**2 <= r**2
+        to_remove[y0:y1, x0:x1][circle] = True
+    skeleton_exc = skeleton_bool & ~to_remove
+    num_labels, labels = cv2.connectedComponents(skeleton_exc.astype(np.uint8), connectivity)
+    for lbl in range(1, num_labels):
+        comp = (labels==lbl)
+        if comp.sum() < min_length:
+            skeleton_exc[comp] = False
+
+    # 2. Extract each segment
+    num_labels2, labels2 = cv2.connectedComponents(skeleton_exc.astype(np.uint8), connectivity)
+    segments = []
+    for lbl in range(1, num_labels2):
+        comp_mask = (labels2 == lbl)
+        pixels = [tuple(pt) for pt in np.argwhere(comp_mask)]
+        nbrs = {p: [] for p in pixels}
+        for y, x in pixels:
+            for dy in (-1,0,1):
+                for dx in (-1,0,1):
+                    if dy==dx==0: continue
+                    q = (y+dy, x+dx)
+                    if q in nbrs:
+                        nbrs[(y,x)].append(q)
+        ends = [p for p,n in nbrs.items() if len(n)==1]
+        start = ends[0] if ends else pixels[0]
+        ordered, prev, curr = [], None, start
+        while True:
+            ordered.append(curr)
+            nxt = [n for n in nbrs[curr] if n!=prev]
+            if not nxt: break
+            prev, curr = curr, nxt[0]
+        coords = np.array(ordered)
+        if show:
+            show_spline_gradient(binary, coords, title=f"Segment {lbl}")
+
+        # 3. Convert to 3D and drop invalid
+        pts3d = []
+        for y,x in coords:
+            z = float(depth_image[y,x]) * depth_scale
+            if z <= 0:
+                continue
+            X = (x - cx) * z / fx
+            Y = (y - cy) * z / fy
+            pts3d.append((X, Y, z))
+        segments.append(np.array(pts3d, dtype=float))
+
+    return segments
 #endregion

@@ -12,6 +12,7 @@ import cv2
 import time
 import random
 import scipy.optimize as opt
+from datetime import datetime
 
 # camera_intrinsics = (203.71833, 203.71833, 319.5, 239.5) # old/wrong
 camera_parameters = (149.09148, 187.64966, 334.87706, 268.23742)
@@ -878,6 +879,9 @@ def pipeline_spline():
     best_pcs_world = []
     ctrl_points = []
 
+    timestamp = datetime.now().strftime("%Y_%m_%d_%H-%M")
+    save_image_folder = f'/root/workspace/images/pipeline_saved/{timestamp}'
+
     # Take image
     images.append(image_subscriber.get_current_image()) # <- online
     # images.append(cv2.imread(f'/root/workspace/images/moves/{offline_image_name}{0}.jpg')) # <- offline
@@ -889,6 +893,11 @@ def pipeline_spline():
     data.append(my_class.process_image(images[-1], transforms[-1], show=False))
     data[-1][1][:] = cleanup_mask(data[-1][1])
     # show_masks(data[-1][1])
+
+    save_depth_map(data[-1][0], save_image_folder, "Original_Depth")
+    save_depth_map(data[-1][2], save_image_folder, "Masked_Depth")
+    save_masks(data[-1][1], save_image_folder, "Mask")
+    # exit()
 
     usr_input = input("Mask Correct? [y]/n: ")
     if usr_input == "n": exit()
@@ -924,10 +933,15 @@ def pipeline_spline():
     pointcloud_publisher.publish(best_pcs_world[-1])
     #endregion -------------------- Depth Enything --------------------
 
+    save_masks([data[-1][1], data[-2][1]], save_image_folder, "Masks")
+
     #region -------------------- Spline --------------------
     best_depth = scale_depth_map(data[-1][0], best_alpha, best_beta)
     # centerline_pts_cam2 = extract_centerline_from_mask(best_depth, data[-1][1], camera_parameters)
-    centerline_pts_cam2 = extract_centerline_from_mask_overlap(best_depth, data[-1][1], camera_parameters, show=True)
+    # centerline_pts_cam2 = extract_centerline_from_mask_overlap(best_depth, data[-1][1], camera_parameters, show=True)
+    centerline_pts_cam2_array = extract_centerline_from_mask_individual(best_depth, data[-1][1], camera_parameters, show=True)
+    centerline_pts_cam2 = max(centerline_pts_cam2_array, key=lambda s: s.shape[0])
+
     centerline_pts_world = transform_points_to_world(centerline_pts_cam2, transforms[-1])
     show_pointclouds([centerline_pts_world])
     degree = 3
@@ -935,6 +949,8 @@ def pipeline_spline():
     ctrl_points.append(fit_bspline_scipy(centerline_pts_world, degree=degree, smooth=1e-5, nest=20))
     # ctrl_points.append(fit_bspline_scipy(centerline_pts_world, degree=degree, smooth=1e-5, nest=20)[3:-3,:])
     print(f"ctrl_points: {ctrl_points[0]}")
+
+    save_mask_spline(data[-1][1], ctrl_points[-1], degree, camera_parameters, transforms[-1], save_image_folder, "Spline")
 
     spline_pc = convert_bspline_to_pointcloud(ctrl_points[-1])
     pointcloud_publisher.publish(spline_pc)
