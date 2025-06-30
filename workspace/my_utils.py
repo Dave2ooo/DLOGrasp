@@ -1,7 +1,5 @@
 import os
 import cv2, numpy as np
-import cv2
-import numpy as np
 from numpy.typing import NDArray
 from PIL import Image
 import open3d as o3d
@@ -368,6 +366,48 @@ def transform_point_from_world(point, camera_pose: TransformStamped) -> np.ndarr
     cam_hom = T_world2cam @ hom_pt          # matrix multiplication
 
     return cam_hom[:3]
+
+def transform_points_from_world(points: np.ndarray,
+                                camera_pose: TransformStamped) -> np.ndarray:
+    """
+    Transform an array of 3D points from the world frame into the camera frame.
+
+    Parameters
+    ----------
+    points : np.ndarray, shape (N,3)
+        Points expressed in the world coordinate system.
+    camera_pose : geometry_msgs.msg.TransformStamped
+        The transform from camera frame to world frame.
+
+    Returns
+    -------
+    np.ndarray, shape (N,3)
+        The same points expressed in the camera coordinate system.
+    """
+    if not isinstance(camera_pose, TransformStamped):
+        raise TypeError("camera_pose must be a TransformStamped")
+
+    pts = np.asarray(points, dtype=np.float64)
+    if pts.ndim != 2 or pts.shape[1] != 3:
+        raise ValueError("points must have shape (N,3)")
+
+    # Extract translation and rotation (camera→world)
+    t = camera_pose.transform.translation
+    q = camera_pose.transform.rotation
+    trans = np.array([t.x, t.y, t.z], dtype=np.float64)
+    quat  = np.array([q.x, q.y, q.z, q.w], dtype=np.float64)
+
+    # Build 4×4 camera→world matrix, then invert to world→camera
+    T_cam2world = quaternion_matrix(quat)
+    T_cam2world[:3, 3] = trans
+    T_world2cam = np.linalg.inv(T_cam2world)
+
+    # Apply to all points
+    ones = np.ones((pts.shape[0], 1), dtype=np.float64)
+    hom_world = np.hstack([pts, ones])             # (N,4)
+    hom_cam   = (T_world2cam @ hom_world.T).T      # (N,4)
+    return hom_cam[:, :3]
+
 
 # get_closest_points
 def get_closest_points_in_pointclouds(pointcloud1: o3d.geometry.PointCloud, pointcloud2: o3d.geometry.PointCloud) -> np.ndarray:
@@ -2059,21 +2099,58 @@ def create_pointcloud_message(pointcloud: o3d.geometry.PointCloud, frame: str) -
     return pc2_msg
   
 
-def get_desired_pose(position, frame="map"):
-    # build Pose
-    p = Pose()
-    p.position.x = float(position[0])
-    p.position.y = float(position[1])
-    p.position.z = float(position[2])
-    p.orientation.x = float(1)
-    p.orientation.y = float(0)
-    p.orientation.z = float(0)
-    p.orientation.w = float(0)
+def get_desired_pose(position,
+                     base_footprint,
+                     frame: str = "map") -> PoseStamped:
+    """
+    Return a PoseStamped at `position` in `frame`, with orientation equal to
+    the current base_footprint orientation rotated by -90° about its local Y axis.
+
+    Parameters
+    ----------
+    position : sequence of three floats
+        Desired [x, y, z] in the `frame` coordinate.
+    base_footprint : str
+        The TF frame name of the robot base.
+    frame : str
+        The target frame in which to express the pose (default "map").
+
+    Returns
+    -------
+    geometry_msgs.msg.PoseStamped
+        Stamped pose at the given position, with orientation = (base_footprint → frame)
+        ∘ RotY(-90°).
+    """
+    # 1) look up the current base_footprint → frame transform as a PoseStamped
+    # base_ps = ros_handler.get_current_pose(base_footprint, frame)
+    # q = base_ps.pose.orientation
+    rotation = base_footprint.transform.rotation
+    # q_base = [q.x, q.y, q.z, q.w]
+    q_base = [rotation.x, rotation.y, rotation.z, rotation.w]
+
+    # 2) build a -90° rotation about Y
+    q_delta = quaternion_from_euler(np.pi, 0, 0.0)  # [x,y,z,w]
+    # q_delta = quaternion_from_euler(0.0, 0, 0.0)  # [x,y,z,w]
+
+    # 3) compose: q_new = q_base ∘ q_delta
+    q_new = quaternion_multiply(q_base, q_delta)
+
+    # 4) assemble the PoseStamped
     ps = PoseStamped()
     ps.header.stamp = rospy.Time.now()
     ps.header.frame_id = frame
-    ps.pose = p
+
+    ps.pose.position.x = float(position[0])
+    ps.pose.position.y = float(position[1])
+    ps.pose.position.z = float(position[2])
+
+    ps.pose.orientation.x = float(q_new[0])
+    ps.pose.orientation.y = float(q_new[1])
+    ps.pose.orientation.z = float(q_new[2])
+    ps.pose.orientation.w = float(q_new[3])
+
     return ps
+
 
 def get_highest_point(pointcloud: o3d.geometry.PointCloud) -> np.ndarray:
     """
@@ -2597,7 +2674,7 @@ def project_bspline(ctrl_points: np.ndarray, camera_pose, camera_parameters: tup
 
     # Transform points into camera frame: p_cam = R^T * (p_world - t)
     diff = pts_world - np.array([tx, ty, tz])
-    pts_cam = diff.dot(R.T)
+    pts_cam = diff.dot(R)
 
     # Perspective projection
     x_cam, y_cam, z_cam = pts_cam[:,0], pts_cam[:,1], pts_cam[:,2]
@@ -2929,16 +3006,32 @@ def score_function_bspline_reg_multiple_pre(x, camera_poses, camera_parameters, 
     # 4) accumulate decayed ASSD
     assd_sum = 0.0
     fx, fy, cx, cy = camera_parameters
-
     for i, cam_pose in enumerate(camera_poses):
-        # project to subpixel 2D
-        pts2d = project_bspline_pts(
-            ctrl_pts,
-            cam_pose,
-            camera_parameters,
-            degree=degree,
-            num_samples=num_samples
-        )  # shape (M,2) floats
+        # — instead of project_bspline_pts, do the same transform + intrinsics we tested before —
+        # 1) sample spline in world coords
+        # rebuild knot vector (same as project_bspline)
+        n_ctrl = ctrl_pts.shape[0]
+        k = degree
+        m = n_ctrl - k - 1
+        if m > 0:
+            interior = np.linspace(0,1,m+2)[1:-1]
+        else:
+            interior = np.array([])
+        knots = np.concatenate([np.zeros(k+1), interior, np.ones(k+1)])
+        spline = BSpline(knots, ctrl_pts, k, axis=0)
+        ts = np.linspace(knots[k], knots[-k-1], num_samples)
+        pts_world = spline(ts)  # (num_samples, 3)
+
+        # 2) transform into camera frame (using your existing helper)
+        pts_cam = transform_points_from_world(pts_world, cam_pose)  # (num_samples,3)
+
+        # 3) apply intrinsics
+        fx, fy, cx, cy = camera_parameters
+        x_c = pts_cam[:,0];  y_c = pts_cam[:,1];  z_c = pts_cam[:,2]
+        valid = (z_c > 0)
+        u = (fx * x_c[valid] / z_c[valid] + cx)
+        v = (fy * y_c[valid] / z_c[valid] + cy)
+        pts2d = np.stack([u, v], axis=1)
 
         # guard against empty projection
         if pts2d.size == 0:
@@ -2957,8 +3050,78 @@ def score_function_bspline_reg_multiple_pre(x, camera_poses, camera_parameters, 
 
     # 5) final loss
     loss = mean_assd + reg_weight * drift + curvature_weight * curvature_penalty
-    print(f"loss: {loss:.3f}")
+    # print(f"loss: {loss:.3f}")
     return float(loss)
+
+def project_bspline_subpixel(ctrl_points: np.ndarray,
+                                camera_pose: TransformStamped,
+                                camera_parameters,
+                                degree: int,
+                                num_samples: int) -> np.ndarray:
+    """
+    Sample the 3D B-spline in world, transform into the given camera frame,
+    and return the floating-point image coordinates (u,v) for each sample.
+
+    Parameters
+    ----------
+    ctrl_points : (N_ctrl×3) array
+        Control-points in WORLD coordinates.
+    camera_pose : TransformStamped
+        camera→world transform.
+    camera_parameters : (fx, fy, cx, cy)
+    degree : int
+        Spline degree.
+    num_samples : int
+        How many points to sample along the spline.
+
+    Returns
+    -------
+    pts2d : (M×2) array of floats
+        Each row = (u, v) in pixel coordinates.  Points behind the camera
+        or outside the image plane are simply omitted.
+    """
+    fx, fy, cx, cy = camera_parameters
+
+    # 1) build knot vector
+    n_ctrl = ctrl_points.shape[0]
+    k = degree
+    m = n_ctrl - k - 1
+    interior = np.linspace(0, 1, m+2)[1:-1] if m>0 else np.array([])
+    knots = np.concatenate([
+        np.zeros(k+1),
+        interior,
+        np.ones(k+1)
+    ])
+
+    # 2) sample spline in world
+    spline = BSpline(knots, ctrl_points, k, axis=0)
+    ts = np.linspace(knots[k], knots[-k-1], num_samples)
+    world_pts = spline(ts)      # (num_samples,3)
+
+    # 3) transform to camera frame (use your helper to avoid R vs R^T mistakes)
+    #    assumes you have a method `transform_points_from_world`
+    #    which does exactly: p_cam = (T_cam2world)^{-1} * p_world
+    cam_pts = transform_points_from_world(world_pts, camera_pose)
+    x_cam, y_cam, z_cam = cam_pts.T
+
+    # 4) perspective project (float)
+    # only keep points in front of camera
+    valid = z_cam > 0
+    x_cam = x_cam[valid]
+    y_cam = y_cam[valid]
+    z_cam = z_cam[valid]
+
+    u = (fx * x_cam / z_cam) + cx
+    v = (fy * y_cam / z_cam) + cy
+
+    # 5) filter to image bounds if you like, or leave to your interpolator
+    pts2d = np.stack([u, v], axis=1)
+    in_bounds = (
+        (u >= 0) & (u < cx*2) &
+        (v >= 0) & (v < cy*2)
+    )
+    return pts2d[in_bounds]
+
 
 def score_function_bspline_reg_multiple(x, datas, camera_poses, camera_parameters, degree, init_x, reg_weight: float = 1000.0, decay: float = 1.0, curvature_weight: float = 1.0, show: bool = False):
     """

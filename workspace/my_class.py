@@ -41,7 +41,7 @@ class MyClass:
 
         depth = self.depth_anything_wrapper.get_depth_map(image)
         mask = self.grounded_sam_wrapper.get_mask(image, 'cable.')[0][0]
-        mask_reduced = reduce_mask(mask, 1)
+        # mask_reduced = reduce_mask(mask, 1)
 
         depth_masked = mask_depth_map(depth, mask)
         depth_masked_reduced = mask_depth_map(depth, mask_reduced) # Reduce mask border
@@ -533,22 +533,6 @@ class MyClass:
                 show_masks_union(projection, mask, title=f'Optimal Projection with holes fixed vs Mask {i} to fit')
 
         return alpha_opt, beta_opt, pc_cam0_opt, score
-
-    def get_desired_pose(self, position, frame="map"):
-        # build Pose
-        p = Pose()
-        p.position.x = float(position[0])
-        p.position.y = float(position[1])
-        p.position.z = float(position[2])
-        p.orientation.x = float(1)
-        p.orientation.y = float(0)
-        p.orientation.z = float(0)
-        p.orientation.w = float(0)
-        ps = PoseStamped()
-        ps.header.stamp = rospy.Time.now()
-        ps.header.frame_id = frame
-        ps.pose = p
-        return ps
     
     def get_highest_point(self, pointcloud: o3d.geometry.PointCloud) -> np.ndarray:
         """
@@ -706,7 +690,7 @@ def test3():
     my_class = MyClass()
     ros_handler = ROSHandler()
 
-    desired_pose = my_class.get_desired_pose([1, 1, 1])
+    desired_pose = get_desired_pose([1, 1, 1])
     while not rospy.is_shutdown():
         ros_handler.publish_pose(desired_pose, "/desired_pose")
         rospy.sleep(1)
@@ -760,7 +744,7 @@ def pipeline():
         tarrget_point_offset = target_point
         tarrget_point_offset[2] += 0.098 - 0.020 # Make target Pose hover above actual target pose - tested offset
         # Convert to Pose
-        target_poses.append(my_class.get_desired_pose(tarrget_point_offset))
+        target_poses.append(get_desired_pose(tarrget_point_offset))
         # Calculate Path
         target_path = interpolate_poses(transforms_palm[-1], target_poses[-1], num_steps=3)
         # Move arm a step
@@ -832,7 +816,7 @@ def pipeline2():
         tarrget_point_offset = target_point
         tarrget_point_offset[2] += 0.098 + 0.010# - 0.020 # Make target Pose hover above actual target pose - tested offset
         # Convert to Pose
-        target_poses.append(my_class.get_desired_pose(tarrget_point_offset))
+        target_poses.append(get_desired_pose(tarrget_point_offset))
         # Calculate Path
         target_path = interpolate_poses(transforms_palm[-1], target_poses[-1], num_steps=3)
         # Move arm a step
@@ -878,6 +862,7 @@ def pipeline_spline():
     best_betas = []
     best_pcs_world = []
     ctrl_points = []
+    base_footprint = []
 
     timestamp = datetime.now().strftime("%Y_%m_%d_%H-%M")
     save_image_folder = f'/root/workspace/images/pipeline_saved/{timestamp}'
@@ -894,9 +879,9 @@ def pipeline_spline():
     data[-1][1][:] = cleanup_mask(data[-1][1])
     # show_masks(data[-1][1])
 
-    save_depth_map(data[-1][0], save_image_folder, "Original_Depth")
-    save_depth_map(data[-1][2], save_image_folder, "Masked_Depth")
-    save_masks(data[-1][1], save_image_folder, "Mask")
+    # save_depth_map(data[-1][0], save_image_folder, "Original_Depth")
+    # save_depth_map(data[-1][2], save_image_folder, "Masked_Depth")
+    # save_masks(data[-1][1], save_image_folder, "Mask")
     # exit()
 
     usr_input = input("Mask Correct? [y]/n: ")
@@ -933,7 +918,7 @@ def pipeline_spline():
     pointcloud_publisher.publish(best_pcs_world[-1])
     #endregion -------------------- Depth Enything --------------------
 
-    save_masks([data[-1][1], data[-2][1]], save_image_folder, "Masks")
+    # save_masks([data[-1][1], data[-2][1]], save_image_folder, "Masks")
 
     #region -------------------- Spline --------------------
     best_depth = scale_depth_map(data[-1][0], best_alpha, best_beta)
@@ -946,18 +931,19 @@ def pipeline_spline():
     show_pointclouds([centerline_pts_world])
     degree = 3
     # Fit B-spline
-    ctrl_points.append(fit_bspline_scipy(centerline_pts_world, degree=degree, smooth=1e-5, nest=20))
-    # ctrl_points.append(fit_bspline_scipy(centerline_pts_world, degree=degree, smooth=1e-5, nest=20)[3:-3,:])
+    # ctrl_points.append(fit_bspline_scipy(centerline_pts_world, degree=degree, smooth=1e-5, nest=20))
+    ctrl_points.append(fit_bspline_scipy(centerline_pts_world, degree=degree, smooth=1e-5, nest=20)[3:-3,:]) # Remove first and last three control points
+    print(f"Number of controlpoints: {ctrl_points[-1].shape}")
     print(f"ctrl_points: {ctrl_points[0]}")
 
-    save_mask_spline(data[-1][1], ctrl_points[-1], degree, camera_parameters, transforms[-1], save_image_folder, "Spline")
+    # save_mask_spline(data[-1][1], ctrl_points[-1], degree, camera_parameters, transforms[-1], save_image_folder, "Spline")
 
     spline_pc = convert_bspline_to_pointcloud(ctrl_points[-1])
     pointcloud_publisher.publish(spline_pc)
 
-    visualize_spline_with_pc(best_pc_world, ctrl_points[0], degree, title="Scaled PointCloud & Spline")
+    visualize_spline_with_pc(best_pc_world, ctrl_points[-1], degree, title="Scaled PointCloud & Spline")
 
-    projected_spline_cam1 = project_bspline(ctrl_points[0], transforms[1], camera_parameters, degree=degree)
+    projected_spline_cam1 = project_bspline(ctrl_points[-1], transforms[-1], camera_parameters, degree=degree)
     show_masks([data[1][1], projected_spline_cam1], "Projected B-Spline Cam1 - 1")
     
     correct_skeleton = skeletonize_mask(data[-1][1])
@@ -971,7 +957,8 @@ def pipeline_spline():
     tarrget_point_offset[2] += 0.098 + 0.010 # - 0.020 # Make target Pose hover above actual target pose - tested offset
     grasp_point_publisher.publish(target_point)
     # Convert to Pose
-    target_poses.append(my_class.get_desired_pose(tarrget_point_offset))
+    base_footprint.append(ros_handler.get_current_pose("base_footprint", "map"))
+    target_poses.append(get_desired_pose(tarrget_point_offset, base_footprint[-1]))
     # Calculate Path
     target_path = interpolate_poses(transforms_palm[-1], target_poses[-1], num_steps=4) # <- online
     # target_path = interpolate_poses(transforms[-1], target_poses[-1], num_steps=4) # <- offline
@@ -1051,7 +1038,7 @@ def pipeline_spline():
                 curvature_weight,
                 skeletons,
                 interps,
-                50
+                10
             ),
             method='L-BFGS-B', # 'Powell', # 
             bounds=bounds,
@@ -1081,7 +1068,7 @@ def pipeline_spline():
                 curvature_weight,
                 skeletons,
                 interps,
-                200
+                50
             ),
             method='L-BFGS-B', # 'Powell', # 
             bounds=bounds,
@@ -1110,9 +1097,10 @@ def pipeline_spline():
         # Get highest Point in pointcloud
         target_point, target_angle = get_highest_point_and_angle_spline(ctrl_points[-1])
         tarrget_point_offset = target_point.copy()
-        tarrget_point_offset[2] += 0.098 + 0.010 - 0.035 # Make target Pose hover above actual target pose - tested offset
+        tarrget_point_offset[2] += 0.098 + 0.010 - 0.03 # Make target Pose hover above actual target pose - tested offset
         # Convert to Pose
-        target_poses.append(my_class.get_desired_pose(tarrget_point_offset))
+        base_footprint.append(ros_handler.get_current_pose("base_footprint", "map"))
+        target_poses.append(get_desired_pose(tarrget_point_offset, base_footprint[-1]))
         # Calculate Path
         target_path = interpolate_poses(transforms_palm[-1], target_poses[-1], num_steps=4) # <- online
         # target_path = interpolate_poses(transforms[-1], target_poses[-1], num_steps=4) # <- offline
@@ -1151,7 +1139,7 @@ if __name__ == "__main__":
     # path_publisher = PathPublisher("/my_path")
     # transforms = []
     # transforms.append(ros_handler.get_current_pose("hand_camera_frame", "map"))
-    # desired_pose = my_class.get_desired_pose([1, 1, 1])
+    # desired_pose = get_desired_pose([1, 1, 1])
     # path = ros_handler.interpolate_poses(transforms[-1], desired_pose, num_steps=10)
     # next_pose = path[1]
 
