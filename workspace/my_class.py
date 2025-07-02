@@ -20,9 +20,8 @@ camera_parameters = (149.09148, 187.64966, 334.87706, 268.23742)
 
 class MyClass:
     def __init__(self):
-        self.depth_anything_wrapper = DepthAnythingWrapper(intrinsics=camera_parameters)
+        self.depth_anything_wrapper = DepthAnythingWrapper()
         self.grounded_sam_wrapper = GroundedSamWrapper()
-        pass
 
     def convert_trans_and_rot_to_stamped_transform(self, translation, rotation):
         transform_stamped = TransformStamped()
@@ -41,7 +40,7 @@ class MyClass:
 
         depth = self.depth_anything_wrapper.get_depth_map(image)
         mask = self.grounded_sam_wrapper.get_mask(image, 'cable.')[0][0]
-        # mask_reduced = reduce_mask(mask, 1)
+        mask_reduced = reduce_mask(mask, 1)
 
         depth_masked = mask_depth_map(depth, mask)
         depth_masked_reduced = mask_depth_map(depth, mask_reduced) # Reduce mask border
