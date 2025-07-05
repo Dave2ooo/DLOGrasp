@@ -54,7 +54,8 @@ class ImageSubscriber:
         self.bridge = CvBridge()
         self.topic  = topic
 
-    def get_current_image(self, timeout=10.0, show=False):
+    def get_current_image(self, timeout=1000000.0, show=False):
+        print("Waiting for Image...")
         # This call always returns the next incoming Image,
         # not a buffered one.
         try:

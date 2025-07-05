@@ -1,4 +1,3 @@
-#region Imports
 import os
 import cv2, numpy as np
 from numpy.typing import NDArray
@@ -29,13 +28,15 @@ from skimage.draw import line as skline
 
 from scipy.ndimage import distance_transform_edt
 from scipy.interpolate import RegularGridInterpolator
+from scipy.interpolate import make_splprep
 
 import time
 
 import scipy.optimize as opt
 
 import torch
-#endregion
+
+from scipy.spatial.transform import Rotation
 
 # TransformStamped -> PoseStamped 
 # t = camera_pose.pose.position
@@ -1177,29 +1178,60 @@ def extract_centerline_from_mask_individual(depth_image: np.ndarray, mask: np.nd
 
     return segments
 
-def fit_bspline_scipy(centerline_pts: np.ndarray, degree: int = 3, smooth: float = None, nest: int = None) -> np.ndarray:
+# def fit_bspline_scipy(centerline_pts: np.ndarray, degree: int = 3, smooth: float = None, nest: int = None) -> np.ndarray:
+#     """
+#     Fit a B-spline to a 3D centerline using SciPy's smoothing spline.
+
+#     Args:
+#         centerline_pts: (N×3) array of ordered 3D points along the centerline.
+#         degree: Spline degree (k). Must be <= 5.
+#         smooth: Smoothing factor (s). If None, defaults to s=0 (interpolating spline).
+#         nest: Maximum number of knots. Higher values allow more control points.
+#               If None, SciPy chooses based on data size.
+
+#     Returns:
+#         ctrl_pts: (M×3) array of the spline's control points.
+#     """
+#     # Prepare data for splprep: a list of coordinate arrays
+#     coords = [centerline_pts[:, i] for i in range(3)]
+    
+#     # Compute the B-spline representation
+#     tck, u = splprep(coords, k=degree, s=smooth, nest=nest)
+    
+#     # Extract control points: tck[1] is a list of arrays for each dimension
+#     ctrl_pts = np.vstack(tck[1]).T
+    
+#     return ctrl_pts
+
+def fit_bspline_scipy(centerline_pts: np.ndarray,
+                      degree: int = 3,
+                      smooth: float = None,
+                      nest: int = None) -> np.ndarray:
     """
-    Fit a B-spline to a 3D centerline using SciPy's smoothing spline.
+    Fit a B-spline to a 3D centerline using SciPy's modern make_splprep.
 
     Args:
         centerline_pts: (N×3) array of ordered 3D points along the centerline.
         degree: Spline degree (k). Must be <= 5.
         smooth: Smoothing factor (s). If None, defaults to s=0 (interpolating spline).
-        nest: Maximum number of knots. Higher values allow more control points.
-              If None, SciPy chooses based on data size.
+        nest: Maximum number of knots. If None, SciPy chooses based on data size.
 
     Returns:
         ctrl_pts: (M×3) array of the spline's control points.
     """
-    # Prepare data for splprep: a list of coordinate arrays
-    coords = [centerline_pts[:, i] for i in range(3)]
-    
-    # Compute the B-spline representation
-    tck, u = splprep(coords, k=degree, s=smooth, nest=nest)
-    
-    # Extract control points: tck[1] is a list of arrays for each dimension
-    ctrl_pts = np.vstack(tck[1]).T
-    
+    # Split out each coordinate into a separate 1D array
+    coords = [centerline_pts[:, i] for i in range(centerline_pts.shape[1])]
+
+    # make_splprep returns (BSpline instance, parameter values u)
+    s = 0.0 if smooth is None else smooth
+    spline: np.ndarray  # BSpline
+    u: np.ndarray
+    spline, u = make_splprep(coords, k=degree, s=s, nest=nest)  # :contentReference[oaicite:0]{index=0}
+
+    # The BSpline.c attribute holds the coefficient array;
+    # for vector-valued data this is an (n_coeff × ndim) array.
+    ctrl_pts = np.asarray(spline.c)
+
     return ctrl_pts
 
 def convert_bspline_to_pointcloud(ctrl_points: np.ndarray, samples: int = 150, degree: int = 3) -> o3d.geometry.PointCloud:
@@ -1821,6 +1853,105 @@ def project_bspline_pts(ctrl_points, camera_pose, camera_parameters, degree=3, n
     valid = (z_cam>0) & (u>=-1) & (u<width+1) & (v>=-1) & (v<height+1)
     return np.stack([u[valid], v[valid]], axis=1)  # shape (M,2)
 
+def shift_ctrl_points(ctrl_points: np.ndarray,
+                      shift_uv: np.ndarray,
+                      camera_pose,
+                      camera_parameters: tuple) -> np.ndarray:
+    """
+    Apply a uniform 2D image-plane shift (in pixels) to a batch of 3D points
+    via one camera’s pose & intrinsics.
+    """
+    fx, fy, cx, cy = camera_parameters
+
+    # extract rotation & translation from PoseStamped
+    q = camera_pose.pose.orientation
+    t = np.array([camera_pose.pose.position.x,
+                  camera_pose.pose.position.y,
+                  camera_pose.pose.position.z])
+    R_cam2world = Rotation.from_quat([q.x, q.y, q.z, q.w]).as_matrix().T
+
+    # world → cam
+    pts_cam = (Rotation.from_quat([q.x, q.y, q.z, q.w]).as_matrix() @
+               (ctrl_points - t).T).T
+
+    # per‐point depth
+    zs = pts_cam[:, 2]
+    # ΔX = Δu * Z / fx,  ΔY = Δv * Z / fy
+    du, dv = shift_uv.ravel()
+    dx = du * zs / fx
+    dy = dv * zs / fy
+
+    # shift in cam frame
+    pts_cam_shifted = pts_cam + np.stack([dx, dy, np.zeros_like(zs)], axis=1)
+
+    # cam → world
+    pts_world_shifted = (R_cam2world @ pts_cam_shifted.T).T + t
+    return pts_world_shifted
+
+
+def score_function_bspline_point_ray_translation(
+    x: np.ndarray,
+    init_ctrl_pts: np.ndarray,
+    camera_pose,
+    camera_parameters: tuple,
+    degree: int,
+    skeleton_mask: np.ndarray,
+    num_samples,
+    ) -> torch.Tensor:
+    """
+    Shift all control points by the same 2D pixel offset (x = [Δu,Δv]),
+    project & score via score_function_bspline_point_ray.
+
+    Args:
+      x               (2,) pixel shift [Δu, Δv]
+      init_ctrl_pts   flat (3*N,) array of original world ctrl‐pts
+      camera_pose     single PoseStamped defining image‐plane
+      camera_parameters  (fx,fy,cx,cy)
+      degree          spline degree
+      skeleton_mask   H×W bool mask
+      num_samples     desired samples along spline (will be cast to int)
+
+    Returns:
+      the same torch scalar your original scorer returns.
+    """
+        # 1) ensure num_samples is an int
+    try:
+        num_samples = int(num_samples)
+    except Exception:
+        raise TypeError(f"num_samples must be convertible to int, got {num_samples!r}")
+    if num_samples < 1:
+        raise ValueError(f"num_samples must be ≥1, got {num_samples}")
+
+    # 2) check skeleton type
+    if not isinstance(skeleton_mask, np.ndarray):
+        skeleton_mask = np.asarray(skeleton_mask)
+
+    # 1) force num_samples → integer
+    num_samples = int(num_samples)
+    if num_samples < 1:
+        raise ValueError(f"num_samples must be ≥1, got {num_samples!r}")
+
+    # 2) reshape, shift
+    ctrl_pts = init_ctrl_pts.reshape(-1, 3)
+    shift_uv = x.reshape(2,)
+    shifted_pts = shift_ctrl_points(ctrl_pts,
+                                    shift_uv,
+                                    camera_pose,
+                                    camera_parameters)
+
+    # 3) flatten back
+    x_shifted_flat = shifted_pts.ravel()
+
+    # 4) call your existing point‐ray scorer
+    #    note: we wrap skeleton_mask into a one‐element list
+    return score_function_bspline_point_ray(
+        x_shifted_flat,
+        [camera_pose],
+        camera_parameters,
+        degree,
+        [skeleton_mask],
+        num_samples
+    )
 
 
 def interactive_bspline_editor(ctrl_points: np.ndarray,
@@ -1888,7 +2019,8 @@ def interactive_bspline_editor(ctrl_points: np.ndarray,
         # score_neg = score_function_bspline_point_ray(final_flat, mask, camera_pose, camera_parameters, degree, init_ctrl_points.flatten())
 
         skeletons, interps = precompute_skeletons_and_interps([mask])  
-        score = score_function_bspline_point_ray(final_flat, camera_pose, camera_parameters, degree, skeletons, 100)
+        # score = score_function_bspline_point_ray(final_flat, [camera_pose], camera_parameters, degree, skeletons, 100)
+        score = score_function_bspline_chamfer(final_flat, [camera_pose], camera_parameters, degree, skeletons, decay=0.9)
 
         cv2.putText(disp, f"Score: {score:.4f}", (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
@@ -1901,3 +2033,382 @@ def interactive_bspline_editor(ctrl_points: np.ndarray,
 
     cv2.destroyWindow(window_name)
     return final_ctrl_pts
+
+
+
+
+def score_function_bspline_reg_multiple_pre(x, camera_poses, camera_parameters, degree, init_x, reg_weight: float, decay: float, curvature_weight: float, skeletons: list, interps: list, num_samples: int):
+    """
+    Loss = decayed mean ASSD over multiple frames
+           + reg_weight * mean control‐point drift
+           + curvature_weight * mean squared turn‐angle of control‐points.
+
+    All per‐mask work (skeleton/DT/interp) is precomputed.
+
+    Args:
+        x:                 flat array (3*n_ctrl) of current ctrl‐pts.
+        camera_poses:      list of PoseStamped, per frame.
+        camera_parameters: (fx, fy, cx, cy) intrinsics.
+        degree:            spline degree.
+        init_x:            flat array same shape as x, original ctrl‐pts.
+        reg_weight:        weight for drift penalty.
+        decay:             exponential decay ∈(0,1] for older frames.
+        curvature_weight:  weight for sharp‐turns penalty.
+        skeletons:         list of H×W bool skeletons.
+        interps:           list of RegularGridInterpolator for each frame.
+        num_samples:       how many points to sample along the spline.
+
+    Returns:
+        loss: float to MINIMIZE (never NaN).
+    """
+    # 1) reshape & drift penalty
+    ctrl_pts = x.reshape(-1, 3)
+    n_ctrl = ctrl_pts.shape[0]
+    drift = np.linalg.norm(x - init_x) / n_ctrl
+
+    # 2) curvature penalty
+    if n_ctrl >= 3:
+        diffs = ctrl_pts[1:] - ctrl_pts[:-1]
+        v1, v2 = diffs[:-1], diffs[1:]
+        dot = np.einsum('ij,ij->i', v1, v2)
+        n1 = np.linalg.norm(v1, axis=1)
+        n2 = np.linalg.norm(v2, axis=1)
+        cos_t = np.clip(dot/(n1*n2 + 1e-8), -1, 1)
+        angles = np.arccos(cos_t)
+        curvature_penalty = np.mean(angles**2)
+    else:
+        curvature_penalty = 0.0
+
+    # 3) frame weights
+    n_frames = len(skeletons)
+    weights = np.array([decay**(n_frames - 1 - i) for i in range(n_frames)], dtype=float)
+    wsum = weights.sum()
+
+    # 4) accumulate decayed ASSD
+    assd_sum = 0.0
+    fx, fy, cx, cy = camera_parameters
+    for i, cam_pose in enumerate(camera_poses):
+        # — instead of project_bspline_pts, do the same transform + intrinsics we tested before —
+        # 1) sample spline in world coords
+        # rebuild knot vector (same as project_bspline)
+        n_ctrl = ctrl_pts.shape[0]
+        k = degree
+        m = n_ctrl - k - 1
+        if m > 0:
+            interior = np.linspace(0,1,m+2)[1:-1]
+        else:
+            interior = np.array([])
+        knots = np.concatenate([np.zeros(k+1), interior, np.ones(k+1)])
+        spline = BSpline(knots, ctrl_pts, k, axis=0)
+        ts = np.linspace(knots[k], knots[-k-1], num_samples)
+        pts_world = spline(ts)  # (num_samples, 3)
+
+        # 2) transform into camera frame (using your existing helper)
+        pts_cam = transform_points_from_world(pts_world, cam_pose)  # (num_samples,3)
+
+        # 3) apply intrinsics
+        fx, fy, cx, cy = camera_parameters
+        x_c = pts_cam[:,0];  y_c = pts_cam[:,1];  z_c = pts_cam[:,2]
+        valid = (z_c > 0)
+        u = (fx * x_c[valid] / z_c[valid] + cx)
+        v = (fy * y_c[valid] / z_c[valid] + cy)
+        pts2d = np.stack([u, v], axis=1)
+
+        # guard against empty projection
+        if pts2d.size == 0:
+            # no points visible → huge penalty
+            assd_i = np.max(interps[i].values)  # max distance
+        else:
+            # sample the precomputed interpolator
+            sample_pts = np.stack([pts2d[:,1], pts2d[:,0]], axis=1)
+            dists = interps[i](sample_pts)
+            # guard NaNs
+            assd_i = np.nanmean(dists) if np.isfinite(dists).any() else np.max(interps[i].values)
+
+        assd_sum += weights[i] * assd_i
+
+    mean_assd = assd_sum / wsum
+
+    # 5) final loss
+    loss = mean_assd + reg_weight * drift + curvature_weight * curvature_penalty
+    # print(f"loss: {loss:.3f}")
+    return float(loss)
+
+
+def estimate_scale_shift(depth1, mask2, camera_pose1, camera_pose2, camera_parameters, show=False):
+    """
+    Estimates the optimal scale and shift values of data1 to fit data2.
+    
+    Parameters
+    ----------
+    data1 : tuple
+        A tuple containing the first dataset, including the mask and depth map.
+    data2 : tuple
+        A tuple containing the second dataset, including the mask.
+    transform1 : PoseStamped
+        The pose from the first camera in world coordinates.
+    transform2 : PoseStamped
+        The pose from the second camera world coordinates.
+    show : bool, optional
+        If True, display visualizations of the masks and point clouds.
+    
+    Returns
+    -------
+    best_alpha : float
+        The estimated optimal scale factor.
+    best_beta : float
+        The estimated optimal shift value.
+    best_pointcloud_world : np.ndarray
+        The transformed point cloud in world coordinates after applying the scale and shift.
+    """
+    print('Estimating scale and shift...')
+
+    if not isinstance(camera_pose1, PoseStamped):
+        raise TypeError("camera_pose1 must be a geometry_msgs.msg.PoseStamped")
+    if not isinstance(camera_pose2, PoseStamped):
+        raise TypeError("camera_pose2 must be a geometry_msgs.msg.PoseStamped")
+
+    bounds = [(0.05, 0.4), (-0.3, 0.3)] # [(alpha_min, alpha_max), (beta_min,  beta_max)]
+
+    start = time.perf_counter()
+    result = opt.minimize(
+        fun=score_function,   # returns –score
+        x0=[0.3, -0.15],
+        args=(depth1, camera_pose1, mask2, camera_pose2, camera_parameters),
+        method='L-BFGS-B', # 'Powell',                  # a quasi-Newton gradient‐based method
+        bounds=bounds,                     # same ±0.5 bounds per coord
+        options={
+            'maxiter': 1e3,
+            'ftol': 1e-5,
+            'eps': 0.0005,
+            'disp': True
+    }
+    )
+    end = time.perf_counter()
+    if show:
+        print(f"Scale & Sfhift optimization took {end - start:.2f} seconds")
+
+    alpha_opt, beta_opt = result.x
+    y_opt = score_function([alpha_opt, beta_opt], depth1, camera_pose1, mask2, camera_pose2, camera_parameters)
+
+    depth_opt = scale_depth_map(depth1, scale=alpha_opt, shift=beta_opt)
+    pc_cam1_opt = convert_depth_map_to_pointcloud(depth_opt, camera_parameters)
+    pc_cam0_opt = transform_pointcloud_to_world(pc_cam1_opt, camera_pose1)
+    _, projection_pc_mask_cam2_opt = project_pointcloud_from_world(pc_cam0_opt, camera_pose2, camera_parameters)
+
+    fixed_projection_pc_depth_cam2_opt = fill_mask_holes(projection_pc_mask_cam2_opt)
+
+    score = score_mask_chamfer(fixed_projection_pc_depth_cam2_opt, mask2)
+
+    # Show mask and pointcloud
+    if show:
+        print(f'Optimal alpha: {alpha_opt:.2f}, beta: {beta_opt:.2f}, Score: {y_opt}')
+        show_masks([projection_pc_mask_cam2_opt], title='Optimal Projection')
+        show_masks([fixed_projection_pc_depth_cam2_opt], title='Projection holes fixed')
+        show_masks_union(projection_pc_mask_cam2_opt, fixed_projection_pc_depth_cam2_opt, title="Optimal Projection orig & holes fixed Projection")
+        show_masks_union(fixed_projection_pc_depth_cam2_opt, mask2, title='Optimal Projection with holes fixed vs Mask to fit')
+
+    return alpha_opt, beta_opt, pc_cam0_opt, score
+
+def score_function(x, depth1, camera_pose1, mask2, camera_pose2, camera_parameters):
+    if rospy.is_shutdown(): exit()
+    alpha, beta = x
+    # Scale and shift
+    depth_new = scale_depth_map(depth1, scale=alpha, shift=beta)
+    # Get scaled/shifted pointcloud
+    new_pc1 = convert_depth_map_to_pointcloud(depth_new, camera_parameters)
+    # Transform scaled pointcloud into world coordinates
+    new_pc0 = transform_pointcloud_to_world(new_pc1, camera_pose1)
+    # Get projection of scaled pointcloud into camera 2
+    projection_new_pc2_depth, projection_new_pc2_mask = project_pointcloud_from_world(new_pc0, camera_pose2, camera_parameters)
+    # Fill holes
+    # fixed_projection_new_pc2_mask = fill_mask_holes(projection_new_pc2_mask)
+    # Count the number of inliers between mask 2 and projection of scaled pointcloud
+    # score = score_mask_chamfer(fixed_projection_new_pc2_mask, mask2)
+    score = score_mask_chamfer(projection_new_pc2_mask, mask2)
+    # print(f'num_inliers: {num_inliers}')
+    return score
+
+def score_mask_chamfer(P: np.ndarray, M: np.ndarray, thresh: float = 0.5) -> float:
+    """
+    Compute the symmetric Chamfer distance between two binary masks, 
+    robust to one mask being empty (e.g., projection outside the image).
+
+    Parameters
+    ----------
+    P : np.ndarray
+        Projected mask (arbitrary numeric or boolean array).
+    M : np.ndarray
+        Reference mask (same shape as P).
+    thresh : float
+        Threshold for binarization; values > thresh are considered foreground.
+
+    Returns
+    -------
+    float
+        Robust Chamfer distance (lower is better).
+    """
+    # ---- binarize masks ---------------------------------------------------
+    P_bin = P > thresh if P.dtype != np.bool_ else P
+    M_bin = M > thresh if M.dtype != np.bool_ else M
+
+    # ---- distance transforms ----------------------------------------------
+    dt_M = cv2.distanceTransform((~M_bin).astype(np.uint8), cv2.DIST_L2, 3)
+    dt_P = cv2.distanceTransform((~P_bin).astype(np.uint8), cv2.DIST_L2, 3)
+
+    # ---- one-way distances -----------------------------------------------
+    dist_p_to_m = dt_M[P_bin].mean() if P_bin.any() else None
+    dist_m_to_p = dt_P[M_bin].mean() if M_bin.any() else None
+
+    # ---- robust symmetric combination ------------------------------------
+    distances = []
+    if dist_p_to_m is not None:
+        distances.append(dist_p_to_m)
+    if dist_m_to_p is not None:
+        distances.append(dist_m_to_p)
+
+    # If both masks are empty, define distance as 0; otherwise average available
+    if not distances:
+        return 0.0
+    return float(np.mean(distances))
+
+def score_function_bspline_chamfer(x: np.ndarray, camera_poses: PoseStamped, camera_parameters: tuple, degree: int, skeletons: np.ndarray, decay: float = 0.9) -> torch.Tensor:
+    if rospy.is_shutdown(): exit()
+
+    ctrl_pts = x.reshape(-1, 3)
+    n_frames = len(skeletons)
+    loss = 0
+
+    for i, (camera_pose, skeleton) in enumerate(zip(camera_poses, skeletons)):
+        projected_spline = project_bspline(ctrl_pts, camera_pose, camera_parameters, degree=degree)
+        loss_i = score_mask_chamfer(projected_spline, skeleton)
+
+        weight = decay ** (n_frames - 1 - i)
+        loss += weight * loss_i
+
+    mean_loss = loss / n_frames
+
+    return mean_loss
+
+def interactive_scale_shift(depth1: np.ndarray,
+                            mask2: np.ndarray,
+                            pose1: PoseStamped,
+                            pose2: PoseStamped,
+                            camera_parameters,
+                            scale_limits: tuple[float, float] = (0.005, 0.4),
+                            shift_limits: tuple[float, float] = (-1.0, 1.0)
+                            ) -> tuple[float, float, int]:
+    """
+    Open an OpenCV window with two trackbars (“scale” and “shift”) that lets you
+    interactively adjust the scaling and offset of `depth1`, regenerate the point
+    cloud from camera1, project it into camera2, compare against `mask2`, and
+    display the count of inliers as well as the current scale and shift.
+
+    Parameters
+    ----------
+    depth1 : np.ndarray
+        Original depth map from camera1 (H×W).
+    mask2 : np.ndarray
+        Binary mask from camera2 (H×W).
+    pose1 : TransformStamped
+        camera1→world transform.
+    pose2 : TransformStamped
+        camera2→world transform.
+    scale_limits : tuple(float, float)
+        (min_scale, max_scale) for the scale slider.
+    shift_limits : tuple(float, float)
+        (min_shift, max_shift) for the shift slider.
+
+    Returns
+    -------
+    (scale, shift, inliers) : Tuple[float, float, int]
+        The final slider values and number of inliers when the window is closed.
+    """
+    H, W = depth1.shape
+    window = "Scale/Shift Tuner"
+    cv2.namedWindow(window, cv2.WINDOW_NORMAL)
+
+    # unpack limits and compute slider resolution
+    smin, smax = scale_limits
+    scale_res = 0.001
+    s_steps = max(1, int(round((smax - smin) / scale_res)))
+    scale_res = (smax - smin) / s_steps
+
+    tmin, tmax = shift_limits
+    t_steps = 200
+    shift_res = (tmax - tmin) / t_steps
+
+    result = {'scale': None, 'shift': None, 'score': None}
+
+    def update(_=0):
+        v_s = cv2.getTrackbarPos("scale", window)
+        v_t = cv2.getTrackbarPos("shift", window)
+
+        scale = smin + v_s * scale_res
+        shift = tmin + v_t * shift_res
+        # 1) scale & shift depth1
+        d1 = scale_depth_map(depth1, scale, shift)
+        # 2) to world pointcloud
+        pc1 = convert_depth_map_to_pointcloud(d1, camera_parameters)
+        pc1_world = transform_pointcloud_to_world(pc1, pose1)
+        # 3) project into cam2
+        _, reproj_mask = project_pointcloud_from_world(pc1_world, pose2, camera_parameters)
+        # 4) overlay masks
+        m2 = (mask2.astype(bool)).astype(np.uint8) * 255
+        rm = (reproj_mask.astype(bool)).astype(np.uint8) * 255
+        overlay = np.zeros((H, W, 3), dtype=np.uint8)
+        overlay[m2 > 0]               = (0,   0, 255)
+        overlay[rm > 0]               = (0, 255,   0)
+        overlay[(m2 > 0) & (rm > 0)]  = (0, 255, 255)
+        # 5) count score
+        score = score_mask_chamfer(reproj_mask, mask2)
+
+        # 6) annotate scale, shift, score
+        cv2.putText(overlay, f"Scale: {scale:.3f}", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
+        cv2.putText(overlay, f"Shift: {shift:.3f}", (10, 60),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
+        cv2.putText(overlay, f"Inliers: {score}", (10, 90),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
+
+        result['scale'], result['shift'], result['score'] = scale, shift, score
+        cv2.imshow(window, overlay)
+
+    # create trackbars
+    cv2.createTrackbar("scale", window, int(s_steps//2), s_steps, update)
+    cv2.createTrackbar("shift", window, int(t_steps//2), t_steps, update)
+
+    update()  # initial draw
+
+    # loop until Esc or window closed
+    while True:
+        key = cv2.waitKey(50) & 0xFF
+        if key == 27 or cv2.getWindowProperty(window, cv2.WND_PROP_VISIBLE) < 1:
+            break
+
+    cv2.destroyWindow(window)
+    return result['scale'], result['shift'], result['score']
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
