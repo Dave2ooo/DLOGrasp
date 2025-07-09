@@ -1178,61 +1178,61 @@ def extract_centerline_from_mask_individual(depth_image: np.ndarray, mask: np.nd
 
     return segments
 
-def fit_bspline_scipy(centerline_pts: np.ndarray, degree: int = 3, smooth: float = None, nest: int = None) -> np.ndarray:
-    """
-    Fit a B-spline to a 3D centerline using SciPy's smoothing spline.
-
-    Args:
-        centerline_pts: (N×3) array of ordered 3D points along the centerline.
-        degree: Spline degree (k). Must be <= 5.
-        smooth: Smoothing factor (s). If None, defaults to s=0 (interpolating spline).
-        nest: Maximum number of knots. Higher values allow more control points.
-              If None, SciPy chooses based on data size.
-
-    Returns:
-        ctrl_pts: (M×3) array of the spline's control points.
-    """
-    # Prepare data for splprep: a list of coordinate arrays
-    coords = [centerline_pts[:, i] for i in range(3)]
-    
-    # Compute the B-spline representation
-    tck, u = splprep(coords, k=degree, s=smooth, nest=nest)
-    
-    # Extract control points: tck[1] is a list of arrays for each dimension
-    ctrl_pts = np.vstack(tck[1]).T
-    
-    return ctrl_pts
-
-# def fit_bspline_scipy(centerline_pts: np.ndarray,
-#                       degree: int = 3,
-#                       smooth: float = None,
-#                       nest: int = None) -> np.ndarray:
+# def fit_bspline_scipy(centerline_pts: np.ndarray, degree: int = 3, smooth: float = None, nest: int = None) -> np.ndarray:
 #     """
-#     Fit a B-spline to a 3D centerline using SciPy's modern make_splprep.
+#     Fit a B-spline to a 3D centerline using SciPy's smoothing spline.
 
 #     Args:
 #         centerline_pts: (N×3) array of ordered 3D points along the centerline.
 #         degree: Spline degree (k). Must be <= 5.
 #         smooth: Smoothing factor (s). If None, defaults to s=0 (interpolating spline).
-#         nest: Maximum number of knots. If None, SciPy chooses based on data size.
+#         nest: Maximum number of knots. Higher values allow more control points.
+#               If None, SciPy chooses based on data size.
 
 #     Returns:
 #         ctrl_pts: (M×3) array of the spline's control points.
 #     """
-#     # Split out each coordinate into a separate 1D array
-#     coords = [centerline_pts[:, i] for i in range(centerline_pts.shape[1])]
-
-#     # make_splprep returns (BSpline instance, parameter values u)
-#     s = 0.0 if smooth is None else smooth
-#     spline: np.ndarray  # BSpline
-#     u: np.ndarray
-#     spline, u = make_splprep(coords, k=degree, s=s, nest=nest)  # :contentReference[oaicite:0]{index=0}
-
-#     # The BSpline.c attribute holds the coefficient array;
-#     # for vector-valued data this is an (n_coeff × ndim) array.
-#     ctrl_pts = np.asarray(spline.c)
-
+#     # Prepare data for splprep: a list of coordinate arrays
+#     coords = [centerline_pts[:, i] for i in range(3)]
+    
+#     # Compute the B-spline representation
+#     tck, u = splprep(coords, k=degree, s=smooth, nest=nest)
+    
+#     # Extract control points: tck[1] is a list of arrays for each dimension
+#     ctrl_pts = np.vstack(tck[1]).T
+    
 #     return ctrl_pts
+
+def fit_bspline_scipy(centerline_pts: np.ndarray,
+                      degree: int = 3,
+                      smooth: float = None,
+                      nest: int = None) -> np.ndarray:
+    """
+    Fit a B-spline to a 3D centerline using SciPy's modern make_splprep.
+
+    Args:
+        centerline_pts: (N×3) array of ordered 3D points along the centerline.
+        degree: Spline degree (k). Must be <= 5.
+        smooth: Smoothing factor (s). If None, defaults to s=0 (interpolating spline).
+        nest: Maximum number of knots. If None, SciPy chooses based on data size.
+
+    Returns:
+        ctrl_pts: (M×3) array of the spline's control points.
+    """
+    # Split out each coordinate into a separate 1D array
+    coords = [centerline_pts[:, i] for i in range(centerline_pts.shape[1])]
+
+    # make_splprep returns (BSpline instance, parameter values u)
+    s = 0.0 if smooth is None else smooth
+    spline: np.ndarray  # BSpline
+    u: np.ndarray
+    spline, u = make_splprep(coords, k=degree, s=s, nest=nest)  # :contentReference[oaicite:0]{index=0}
+
+    # The BSpline.c attribute holds the coefficient array;
+    # for vector-valued data this is an (n_coeff × ndim) array.
+    ctrl_pts = np.asarray(spline.c)
+
+    return ctrl_pts
 
 def convert_bspline_to_pointcloud(ctrl_points: np.ndarray, samples: int = 150, degree: int = 3) -> o3d.geometry.PointCloud:
     """
@@ -1430,7 +1430,7 @@ def get_highest_point_and_angle_spline(ctrl_points: np.ndarray, degree: int = 3,
 
     Returns:
         highest_pt:   (x, y, z) numpy array of the highest point on the spline.
-        angle:        tangent angle in radians in [-pi/2, pi/2].
+        angle:        tangent angle in radians in [-pi/2, pi/2] in world coordinates.
     """
     pts = np.asarray(ctrl_points, dtype=float)
     N, dim = pts.shape
@@ -1462,7 +1462,7 @@ def get_highest_point_and_angle_spline(ctrl_points: np.ndarray, degree: int = 3,
     dx, dy = d_samples[idx_max, 0], d_samples[idx_max, 1]
 
     # angle of tangent in XY-plane
-    angle = np.arctan(dx/dy)
+    angle = np.arctan(dy/dx)
     angle += np.pi/2
     # normalize to [-pi/2, pi/2]
     while angle > np.pi/2:
@@ -1470,7 +1470,7 @@ def get_highest_point_and_angle_spline(ctrl_points: np.ndarray, degree: int = 3,
     while angle < -np.pi/2:
         angle += np.pi
 
-    return highest_pt, angle
+    return highest_pt, -angle
 
 def get_desired_pose(position, base_footprint, frame: str = "map") -> PoseStamped:
     """
@@ -1748,51 +1748,6 @@ def score_bspline_translation(shift_xy: np.ndarray, mask, camera_pose: PoseStamp
     # 6) return mean distance (ASSD)
     return float(dists.mean())
 
-def apply_translation_to_ctrl_points(ctrl_points: np.ndarray, shift_xy: np.ndarray, camera_pose: PoseStamped) -> np.ndarray:
-    """
-    Applies a 2D translation (dx, dy) in camera image plane to all B-spline control points.
-
-    Args:
-        ctrl_points: (N×3) array of original control points in world coordinates.
-        shift_xy:    length-2 array [dx, dy] representing translation in camera-frame meters.
-        camera_pose: PoseStamped of camera in world.
-
-    Returns:
-        shifted_ctrl_points: (N×3) array of translated control points in world coordinates.
-    """
-    if not isinstance(camera_pose, PoseStamped):
-        raise TypeError("camera_pose must be a geometry_msgs.msg.PoseStamped")
-
-
-    # Extract translation and quaternion from camera_pose
-    tx, ty, tz = (camera_pose.pose.position.x,
-                  camera_pose.pose.position.y,
-                  camera_pose.pose.position.z)
-    qx = camera_pose.pose.orientation.x
-    qy = camera_pose.pose.orientation.y
-    qz = camera_pose.pose.orientation.z
-    qw = camera_pose.pose.orientation.w
-
-    # Build rotation matrix from quaternion (camera->world)
-    xx, yy, zz = qx*qx, qy*qy, qz*qz
-    xy, xz, yz = qx*qy, qx*qz, qy*qz
-    wx, wy, wz = qw*qx, qw*qy, qw*qz
-    R = np.array([
-        [1-2*(yy+zz),   2*(xy-wz),   2*(xz+wy)],
-        [2*(xy+wz),     1-2*(xx+zz), 2*(yz-wx)],
-        [2*(xz-wy),     2*(yz+wx),   1-2*(xx+yy)]
-    ])
-
-    # Create camera-frame shift vector and convert to world frame
-    dx, dy = shift_xy
-    shift_cam = np.array([dx, dy, 0.0], dtype=float)
-    shift_world = R.dot(shift_cam)
-
-    # Apply shift to each control point
-    shifted_ctrl_points = np.asarray(ctrl_points, dtype=float) + shift_world[np.newaxis, :]
-
-    return shifted_ctrl_points
-
 def project_bspline_pts(ctrl_points, camera_pose, camera_parameters, degree=3, num_samples=200,  width=640, height=480):
     """
     Same as project_bspline but returns sampled 2D pixel coords (floats) along the spline,
@@ -1853,40 +1808,74 @@ def project_bspline_pts(ctrl_points, camera_pose, camera_parameters, degree=3, n
     valid = (z_cam>0) & (u>=-1) & (u<width+1) & (v>=-1) & (v<height+1)
     return np.stack([u[valid], v[valid]], axis=1)  # shape (M,2)
 
-def shift_ctrl_points(ctrl_points: np.ndarray,
-                      shift_uv: np.ndarray,
-                      camera_pose,
-                      camera_parameters: tuple) -> np.ndarray:
-    """
-    Apply a uniform 2D image-plane shift (in pixels) to a batch of 3D points
-    via one camera’s pose & intrinsics.
-    """
-    fx, fy, cx, cy = camera_parameters
+# def shift_ctrl_points(ctrl_points: np.ndarray, shift_uv: np.ndarray,camera_pose, camera_parameters: tuple) -> np.ndarray:
+#     """
+#     Apply a uniform 2D image-plane shift (in pixels) to a batch of 3D points
+#     via one camera’s pose & intrinsics.
+#     """
+#     fx, fy, cx, cy = camera_parameters
 
-    # extract rotation & translation from PoseStamped
+#     # extract rotation & translation from PoseStamped
+#     q = camera_pose.pose.orientation
+#     t = np.array([camera_pose.pose.position.x,
+#                   camera_pose.pose.position.y,
+#                   camera_pose.pose.position.z])
+#     R_cam2world = Rotation.from_quat([q.x, q.y, q.z, q.w]).as_matrix().T
+
+#     # world → cam
+#     pts_cam = (Rotation.from_quat([q.x, q.y, q.z, q.w]).as_matrix() @
+#                (ctrl_points - t).T).T
+
+#     # per‐point depth
+#     zs = pts_cam[:, 2]
+#     # ΔX = Δu * Z / fx,  ΔY = Δv * Z / fy
+#     du, dv = shift_uv.ravel()
+#     dx = du * zs / fx
+#     dy = dv * zs / fy
+
+#     # shift in cam frame
+#     pts_cam_shifted = pts_cam + np.stack([dx, dy, np.zeros_like(zs)], axis=1)
+
+#     # cam → world
+#     pts_world_shifted = (R_cam2world @ pts_cam_shifted.T).T + t
+#     return pts_world_shifted
+
+def shift_ctrl_points(ctrl_points: np.ndarray,
+                      shift_xy: np.ndarray,
+                      camera_pose) -> np.ndarray:
+    """
+    Apply a uniform 2D shift (in meters) in the camera’s local X/Y plane
+    to a batch of 3D points, using one camera’s pose.
+    
+    Args:
+        ctrl_points: (N×3) array of world‐frame points.
+        shift_xy:  length‐2 array [ΔX, ΔY] in meters (camera‐frame X/Y).
+        camera_pose: a PoseStamped with .pose.orientation (quat) and .pose.position.
+    
+    Returns:
+        (N×3) array of world‐frame points after applying the shift.
+    """
+    # --- unpack pose ---
     q = camera_pose.pose.orientation
     t = np.array([camera_pose.pose.position.x,
                   camera_pose.pose.position.y,
                   camera_pose.pose.position.z])
+    # world ← camera rotation
     R_cam2world = Rotation.from_quat([q.x, q.y, q.z, q.w]).as_matrix().T
 
-    # world → cam
-    pts_cam = (Rotation.from_quat([q.x, q.y, q.z, q.w]).as_matrix() @
-               (ctrl_points - t).T).T
+    # --- transform world→camera ---
+    R_world2cam = R_cam2world.T
+    pts_cam = (R_world2cam @ (ctrl_points - t).T).T
 
-    # per‐point depth
-    zs = pts_cam[:, 2]
-    # ΔX = Δu * Z / fx,  ΔY = Δv * Z / fy
-    du, dv = shift_uv.ravel()
-    dx = du * zs / fx
-    dy = dv * zs / fy
+    # --- apply constant shift in camera frame (meters) ---
+    dx_m, dy_m = shift_xy.ravel()
+    shift_vec = np.array([dx_m, dy_m, 0.0])
+    pts_cam_shifted = pts_cam + shift_vec
 
-    # shift in cam frame
-    pts_cam_shifted = pts_cam + np.stack([dx, dy, np.zeros_like(zs)], axis=1)
-
-    # cam → world
+    # --- transform back camera→world ---
     pts_world_shifted = (R_cam2world @ pts_cam_shifted.T).T + t
     return pts_world_shifted
+
 
 
 def score_function_bspline_point_ray_translation(
@@ -1933,9 +1922,9 @@ def score_function_bspline_point_ray_translation(
 
     # 2) reshape, shift
     ctrl_pts = init_ctrl_pts.reshape(-1, 3)
-    shift_uv = x.reshape(2,)
+    shift = x.reshape(2,)
     shifted_pts = shift_ctrl_points(ctrl_pts,
-                                    shift_uv,
+                                    shift,
                                     camera_pose,
                                     camera_parameters)
 
@@ -2175,11 +2164,11 @@ def estimate_scale_shift(depth1, mask2, camera_pose1, camera_pose2, camera_param
         fun=score_function,   # returns –score
         x0=[0.3, -0.15],
         args=(depth1, camera_pose1, mask2, camera_pose2, camera_parameters),
-        method='L-BFGS-B', # 'Powell',                  # a quasi-Newton gradient‐based method
+        method='Powell', #'L-BFGS-B',                 # a quasi-Newton gradient‐based method
         bounds=bounds,                     # same ±0.5 bounds per coord
         options={
             'maxiter': 1e3,
-            'ftol': 1e-5,
+            'ftol': 1e-8,
             'eps': 0.0005,
             'disp': True
     }
@@ -2387,15 +2376,371 @@ def interactive_scale_shift(depth1: np.ndarray,
             break
 
     cv2.destroyWindow(window)
+    print(result)
     return result['scale'], result['shift'], result['score']
 
 
+def interactive_translate_bspline(ctrl_points: np.ndarray,
+                                    mask: np.ndarray,
+                                    camera_pose: TransformStamped,
+                                    camera_parameters,
+                                    degree: int,
+                                    num_samples: int = 200,
+                                    shift_range: float = 0.1):
+    """
+    Open a window with two trackbars (shift_x, shift_y) to manually translate
+    the 3D B-spline in the camera’s image plane and see:
+        - the real skeleton (red)
+        - the projected spline (green)
+        - the current mean distance loss (white text)
+
+    Parameters
+    ----------
+    ctrl_points : (N,3) array
+        World-frame control points of your B-spline.
+    mask : (H,W) binary mask
+        The reference silhouette mask.
+    camera_pose : TransformStamped
+        Camera → world transform.
+    camera_parameters : (fx, fy, cx, cy)
+    degree : int
+        Spline degree.
+    num_samples : int
+        How many spline samples to project.
+    shift_range : float
+        Maximum absolute translation in meters along X and Y in the camera frame.
+    """
+
+    H, W = mask.shape
+    window = "Translate Spline"
+    cv2.namedWindow(window, cv2.WINDOW_NORMAL)
+
+    # precompute skeleton + distance transform
+    skel = skeletonize(mask > 0)
+    dt = distance_transform_edt(~skel)
+
+    # build knot vector
+    n_ctrl = ctrl_points.shape[0]
+    k = degree
+    m = n_ctrl - k - 1
+    if m > 0:
+        interior = np.linspace(0,1,m+2)[1:-1]
+    else:
+        interior = np.array([])
+    knots = np.concatenate([np.zeros(k+1), interior, np.ones(k+1)])
+
+    # sliders: 0…200 → -shift_range…+shift_range
+    cv2.createTrackbar("shift_x", window, 100, 200, lambda v: None)
+    cv2.createTrackbar("shift_y", window, 100, 200, lambda v: None)
+
+    def update(_=0):
+        # read sliders
+        vx = cv2.getTrackbarPos("shift_x", window)
+        vy = cv2.getTrackbarPos("shift_y", window)
+        dx = (vx/200.0)*2*shift_range - shift_range
+        dy = (vy/200.0)*2*shift_range - shift_range
+
+        # translate ctrl_points in camera frame
+        # build R from camera_pose quaternion (camera→world)
+        q = camera_pose.pose.orientation
+        tx, ty, tz = (camera_pose.pose.position.x,
+                        camera_pose.pose.position.y,
+                        camera_pose.pose.position.z)
+        qx, qy, qz, qw = q.x, q.y, q.z, q.w
+        xx, yy, zz = qx*qx, qy*qy, qz*qz
+        xy, xz, yz = qx*qy, qx*qz, qy*qz
+        wx, wy, wz = qw*qx, qw*qy, qw*qz
+        R = np.array([
+            [1-2*(yy+zz),   2*(xy - wz),   2*(xz + wy)],
+            [2*(xy + wz),   1-2*(xx+zz),   2*(yz - wx)],
+            [2*(xz - wy),   2*(yz + wx),   1-2*(xx+yy)]
+        ])  # world ← camera
+
+        shift_cam = np.array([dx, dy, 0.0])
+        shift_world = R.dot(shift_cam)
+        pts_shifted = ctrl_points + shift_world
+
+        # sample spline in world
+        spline = BSpline(knots, pts_shifted, k, axis=0)
+        ts = np.linspace(knots[k], knots[-k-1], num_samples)
+        pts_world = spline(ts)
+
+        # project to camera
+        T = quaternion_matrix([qx, qy, qz, qw])
+        T[:3,3] = [tx, ty, tz]
+        Twc = np.linalg.inv(T)
+        pts_h = np.hstack([pts_world, np.ones((pts_world.shape[0],1))])
+        cam_pts = (Twc @ pts_h.T).T
+        x_c, y_c, z_c = cam_pts[:,0], cam_pts[:,1], cam_pts[:,2]
+        valid = z_c>0
+        u = (camera_parameters[0]*x_c/ z_c + camera_parameters[2])[valid]
+        v = (camera_parameters[1]*y_c/ z_c + camera_parameters[3])[valid]
+
+        # compute mean distance loss
+        u_i = np.clip(np.round(u).astype(int), 0, W-1)
+        v_i = np.clip(np.round(v).astype(int), 0, H-1)
+        loss = float(np.mean(dt[v_i, u_i]))
+
+        # build overlay: skeleton=red, spline=green
+        overlay = np.zeros((H, W, 3), dtype=np.uint8)
+        overlay[skel>0] = (0,0,255)
+        overlay[v_i, u_i] = (0,255,0)
+
+        # annotate
+        cv2.putText(overlay, f"dx={dx:.3f} dy={dy:.3f}", (10,30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
+        cv2.putText(overlay, f"loss={loss:.2f}", (10,60),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
+
+        cv2.imshow(window, overlay)
+
+    # initial
+    update()
+    # loop until Esc
+    while True:
+        if cv2.waitKey(50) & 0xFF in (27,):
+            break
+        update()
+    cv2.destroyWindow(window)
 
 
 
 
 
+#region differentiable chamfer
 
+import torch
+import torch.nn.functional as F
+from typing import List, Tuple
+
+
+def build_knot_vector(n_ctrl: int, degree: int, device=None) -> torch.Tensor:
+    """
+    Build an open-uniform knot vector for a B-spline.
+
+    Args:
+        n_ctrl (int): Number of control points.
+        degree (int): Spline degree (k).
+        device: Torch device for the returned tensor.
+
+    Returns:
+        torch.Tensor: Knot vector of length n_ctrl + degree + 1.
+    """
+    k = degree
+    if n_ctrl <= k:
+        raise ValueError("Number of control points must exceed spline degree")
+    num_inner = n_ctrl - k - 1
+    if num_inner > 0:
+        inner = torch.linspace(1/(num_inner+1), num_inner/(num_inner+1), num_inner, device=device)
+        t = torch.cat([torch.zeros(k+1, device=device), inner, torch.ones(k+1, device=device)])
+    else:
+        t = torch.cat([torch.zeros(k+1, device=device), torch.ones(k+1, device=device)])
+    return t
+
+
+def bspline_basis(t: torch.Tensor, degree: int, u: torch.Tensor) -> torch.Tensor:
+    """
+    Compute B-spline basis functions N_{i,degree}(u) for each control point.
+
+    Args:
+        t (torch.Tensor): Knot vector of shape (n_ctrl + degree + 1,).
+        degree (int): Spline degree.
+        u (torch.Tensor): Parameter values in [0,1], shape (S,).
+
+    Returns:
+        torch.Tensor: Basis matrix of shape (n_ctrl, S).
+    """
+    n_ctrl = t.numel() - degree - 1
+    # Zeroth-degree basis
+    N = ((u.unsqueeze(0) >= t[:-1].unsqueeze(1)) & (u.unsqueeze(0) < t[1:].unsqueeze(1))).float()
+    N[-1, u == 1.0] = 1.0
+
+    # Recursive Cox–de Boor
+    for k in range(1, degree+1):
+        left_num  = u.unsqueeze(0) - t[:-k-1].unsqueeze(1)
+        left_den  = t[k:-1] - t[:-k-1]
+        left = (left_num / left_den.clamp(min=1e-6)) * N[:-1]
+
+        right_num = t[k+1:].unsqueeze(1) - u.unsqueeze(0)
+        right_den = t[k+1:] - t[1:-k]
+        right = (right_num / right_den.clamp(min=1e-6)) * N[1:]
+
+        N = left + right
+
+    return N[:n_ctrl]
+
+
+def pose_msg_to_matrix(pose_msg) -> torch.Tensor:
+    """
+    Convert a ROS PoseStamped message into a 4×4 world->camera pose matrix.
+
+    Args:
+        pose_msg: ROS PoseStamped with .pose.position (x,y,z) and
+                  .pose.orientation (x,y,z,w).
+
+    Returns:
+        torch.Tensor: 4×4 transform matrix (dtype=torch.float32).
+    """
+    # Extract translation
+    tx = pose_msg.pose.position.x
+    ty = pose_msg.pose.position.y
+    tz = pose_msg.pose.position.z
+    # Extract quaternion (camera orientation in world frame)
+    qx = pose_msg.pose.orientation.x
+    qy = pose_msg.pose.orientation.y
+    qz = pose_msg.pose.orientation.z
+    qw = pose_msg.pose.orientation.w
+
+    # Build rotation matrix (camera->world)
+    xx = qx * qx
+    yy = qy * qy
+    zz = qz * qz
+    xy = qx * qy
+    xz = qx * qz
+    yz = qy * qz
+    wx = qw * qx
+    wy = qw * qy
+    wz = qw * qz
+    R = torch.tensor([
+        [1 - 2*(yy + zz),     2*(xy - wz),       2*(xz + wy)],
+        [    2*(xy + wz),   1 - 2*(xx + zz),     2*(yz - wx)],
+        [    2*(xz - wy),       2*(yz + wx),   1 - 2*(xx + yy)]
+    ], dtype=torch.float32)
+
+    # Homogeneous transform: world->camera is R^T and -R^T * t
+    R_cw = R.t()
+    t_cw = -R_cw @ torch.tensor([tx, ty, tz], dtype=torch.float32)
+
+    pose_mat = torch.eye(4, dtype=torch.float32)
+    pose_mat[:3, :3] = R_cw
+    pose_mat[:3, 3] = t_cw
+    return pose_mat
+
+
+def project_bspline_uv(
+    ctrl_pts: torch.Tensor,
+    pose_mat: torch.Tensor,
+    camera_parameters: Tuple[float, float, float, float],
+    degree: int,
+    num_samples: int = 1024
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Differentiable projection of a 3D B-spline onto the image plane.
+
+    Args:
+        ctrl_pts (torch.Tensor): Control points, shape (n_ctrl, 3), requires_grad=True.
+        pose_mat (torch.Tensor): 4×4 world→camera transform matrix.
+        camera_parameters (tuple): Intrinsics (fx, fy, cx, cy).
+        degree (int): Spline degree (k).
+        num_samples (int): Number of points to sample along the spline.
+
+    Returns:
+        u_img (torch.Tensor): x-coordinates in pixel space, shape (num_samples,).
+        v_img (torch.Tensor): y-coordinates in pixel space, shape (num_samples,).
+    """
+    device = ctrl_pts.device
+    fx, fy, cx, cy = camera_parameters
+    n_ctrl = ctrl_pts.size(0)
+
+    # Sample parameter values
+    u = torch.linspace(0, 1, num_samples, device=device)
+
+    # Compute basis functions and spline points in world coords
+    t = build_knot_vector(n_ctrl, degree, device=device)
+    B = bspline_basis(t, degree, u)             # (n_ctrl, num_samples)
+    pts_w = B.T @ ctrl_pts                     # (num_samples, 3)
+
+    # Homogeneous coordinates
+    pts_h = torch.cat([pts_w, torch.ones((num_samples, 1), device=device)], dim=1)
+
+    # Transform into camera frame
+    pts_cam = (pose_mat @ pts_h.T).T          # (num_samples, 4)
+    x_c, y_c, z_c = pts_cam[:, 0], pts_cam[:, 1], pts_cam[:, 2]
+
+    # Perspective projection (float pixels)
+    u_img = fx * (x_c / z_c) + cx
+    v_img = fy * (y_c / z_c) + cy
+
+    return u_img, v_img
+
+
+def score_mask_chamfer_diff(
+    u_img: torch.Tensor,
+    v_img: torch.Tensor,
+    ref_dt: torch.Tensor
+) -> torch.Tensor:
+    """
+    Compute the one-way Chamfer distance from a sampled curve to a mask.
+
+    Args:
+        u_img (torch.Tensor): x-coords of sampled curve, shape (S,).
+        v_img (torch.Tensor): y-coords of sampled curve, shape (S,).
+        ref_dt (torch.Tensor): Precomputed distance-transform of mask, shape (H, W). Const.
+
+    Returns:
+        torch.Tensor: Mean distance (scalar, differentiable).
+    """
+    H, W = ref_dt.shape
+    # Prepare for grid_sample: normalize to [-1,1]
+    # Note grid_sample expects coords as (y,x)
+    grid = torch.stack([
+        2 * (v_img / (H - 1)) - 1,
+        2 * (u_img / (W - 1)) - 1
+    ], dim=-1).unsqueeze(0).unsqueeze(2)  # (1, S, 1, 2)
+
+    dt = ref_dt.unsqueeze(0).unsqueeze(0)   # (1,1,H,W)
+    sampled = F.grid_sample(dt, grid, mode='bilinear', padding_mode='border', align_corners=True)
+
+    return sampled.view(-1).mean()
+
+
+def score_function_bspline_chamfer_diff(
+    x: torch.Tensor,
+    camera_poses: List,
+    camera_parameters: Tuple[float, float, float, float],
+    ref_dts: List[torch.Tensor],
+    degree: int,
+    decay: float = 0.9,
+    num_samples: int = 1024
+) -> torch.Tensor:
+    """
+    Differentiable multi-view Chamfer loss for a 3D B-spline.
+
+    Args:
+        x (torch.Tensor): Flattened control points, shape (n_ctrl * 3,), requires_grad=True.
+        camera_poses (List): List of ROS PoseStamped messages for each frame.
+        camera_parameters (tuple): Intrinsics (fx, fy, cx, cy).
+        ref_dts (List[torch.Tensor]): Precomputed distance transforms (H, W) for each mask.
+        degree (int): B-spline degree.
+        decay (float): Exponential decay weight per frame.
+        num_samples (int): Samples along curve per frame.
+
+    Returns:
+        torch.Tensor: Scalar Chamfer loss, differentiable.
+    """
+    # Reshape and initialize
+    ctrl_pts = x.view(-1, 3)
+    n_frames = len(camera_poses)
+    total_loss = 0.0
+
+    for i, (pose_msg, ref_dt) in enumerate(zip(camera_poses, ref_dts)):
+        # Convert PoseStamped to 4×4 pose_mat
+        pose_mat = pose_msg_to_matrix(pose_msg)
+
+        u_img, v_img = project_bspline_uv(
+            ctrl_pts, pose_mat, camera_parameters, degree, num_samples
+        )
+        loss_i = score_mask_chamfer_diff(u_img, v_img, ref_dt)
+
+        weight = decay ** (n_frames - 1 - i)
+        total_loss += weight * loss_i
+
+    return total_loss / n_frames
+
+
+
+
+#endregion
 
 
 

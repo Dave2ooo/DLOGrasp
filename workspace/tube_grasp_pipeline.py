@@ -109,27 +109,24 @@ def tube_grasp_pipeline(debug: bool = False):
 
     # Estimate scale and shift
     print(f"Score: {score_function([1, 0], depth1=depths[-2], camera_pose1=camera_poses[-2], mask2=masks[-1], camera_pose2=camera_poses[-1], camera_parameters=camera_parameters)}")
-    best_alpha, best_beta, best_pc_world, score = estimate_scale_shift(depth1=depths[-2], mask2=masks[-1], camera_pose1=camera_poses[-2], camera_pose2=camera_poses[-1], camera_parameters=camera_parameters, show=False)
+    best_alpha, best_beta, best_pc_world, score = estimate_scale_shift(depth1=depths[-2], mask2=masks[-1], camera_pose1=camera_poses[-2], camera_pose2=camera_poses[-1], camera_parameters=camera_parameters, show=True)
     pointcloud_publisher.publish(best_pc_world)
-    print("here1")
+    interactive_scale_shift(depth1=depths[-2], mask2=masks[-1], pose1=camera_poses[-2], pose2=camera_poses[-1], camera_parameters=camera_parameters)
+
     #endregion -------------------- Depth Enything --------------------
     
     # save_masks([data[-1][1], data[-2][1]], save_image_folder, "Masks")
 
     #region -------------------- Spline --------------------
     best_depth = scale_depth_map(depths[-1], best_alpha, best_beta)
-    print("here12")
     centerline_pts_cam2_array = extract_centerline_from_mask_individual(best_depth, masks[-1], camera_parameters, show=True)
-    print("here13")
     centerline_pts_cam2 = max(centerline_pts_cam2_array, key=lambda s: s.shape[0]) # Extract the longest path
-    print("here2")
     centerline_pts_world = transform_points_to_world(centerline_pts_cam2, camera_poses[-1])
-    print("here3")
     show_pointclouds([centerline_pts_world])
     degree = 3
     # Fit B-spline
     # ctrl_points.append(fit_bspline_scipy(centerline_pts_world, degree=degree, smooth=1e-3, nest=20))
-    ctrl_points.append(fit_bspline_scipy(centerline_pts_world, degree=degree, smooth=1e-4, nest=20)[3:-3,:]) # Remove first and last three control points
+    ctrl_points.append(fit_bspline_scipy(centerline_pts_world, degree=degree, smooth=1e-4, nest=20)[1:-1,:]) # Remove first and last three control points
     print(f"Number of controlpoints: {ctrl_points[-1].shape}")
     print(f"ctrl_points: {ctrl_points[0]}")
 
@@ -194,19 +191,12 @@ def tube_grasp_pipeline(debug: bool = False):
         # 1) Precompute once:
         skeletons, interps = precompute_skeletons_and_interps(masks)        # 2) Call optimizer with our new score:
 
-        # translation_score = score_function_bspline_point_ray_translation(
-        #         np.array([0, 0]),
-        #         ctrl_points[-1],
-        #         camera_poses[-1],
-        #         camera_parameters,
-        #         degree,
-        #         skeletons[-1],
-        #         20
-        #     )
+        # interactive_translate_bspline(ctrl_points[-1], masks[-1], camera_poses[-1], camera_parameters, degree, num_samples=200, shift_range=0.1)
+
         # print(f"Translation Score: {translation_score}")
 
         start = time.perf_counter()
-        bounds = [(-0.1, 0.1), (-0.1, 0.1)] # [(x_min, x_max), (y_min,  y_max)]
+        bounds = [(-1, 1), (-1, 1)] # [(x_min, x_max), (y_min,  y_max)]
         result_translation = opt.minimize(
         #     fun=score_function_bspline_point_ray_translation,   # returns –score
         #     x0=[0, 0],
@@ -227,6 +217,17 @@ def tube_grasp_pipeline(debug: bool = False):
         #         'disp': True
         #     }
         # )
+            # fun=score_bspline_translation,   # returns –score
+            # x0=[0, 0],
+            # args=(masks[-1], camera_poses[-1], camera_parameters, degree, ctrl_points[-1]),
+            # method='L-BFGS-B', # 'Powell',                  # a quasi-Newton gradient‐based method
+            # bounds=bounds,                     # same ±0.5 bounds per coord
+            # options={
+            #     'maxiter': 1e6,
+            #     'ftol': 1e-8,
+            #     'eps': 0.0005,
+            #     'disp': True
+            # }
             fun=score_bspline_translation,   # returns –score
             x0=[0, 0],
             args=(masks[-1], camera_poses[-1], camera_parameters, degree, ctrl_points[-1]),
@@ -234,13 +235,14 @@ def tube_grasp_pipeline(debug: bool = False):
             bounds=bounds,                     # same ±0.5 bounds per coord
             options={
                 'maxiter': 1e6,
-                'ftol': 1e-5,
+                'ftol': 1e-8,
                 'eps': 0.0005,
                 'disp': True
             }
         )
         end = time.perf_counter()
         print(f"B-spline translation took {end - start:.2f} seconds")
+        print(f"Translation Score: {result_translation.fun} @ {result_translation.x}")
         ctrl_points_translated = shift_ctrl_points(ctrl_points[-1], result_translation.x, camera_poses[-1], camera_parameters)
 
         # ctrl_points_translated = shift_control_points(ctrl_points[-1], data[-1][1], camera_poses[-1], camera_parameters, degree)
@@ -266,7 +268,21 @@ def tube_grasp_pipeline(debug: bool = False):
             #     10,
             #     0.9,
             # ),
-            fun=score_function_bspline_reg_multiple_pre,
+            # fun=score_function_bspline_reg_multiple_pre,
+            # x0=init_x_coarse,
+            # args=(
+            #     camera_poses,
+            #     camera_parameters,
+            #     degree,
+            #     init_x_coarse,
+            #     0,
+            #     1,
+            #     1,
+            #     skeletons,
+            #     interps,
+            #     10
+            # ),
+            fun=score_function_bspline_chamfer_diff,
             x0=init_x_coarse,
             args=(
                 camera_poses,
@@ -275,7 +291,7 @@ def tube_grasp_pipeline(debug: bool = False):
                 init_x_coarse,
                 0,
                 1,
-                0,
+                1,
                 skeletons,
                 interps,
                 10
@@ -306,7 +322,21 @@ def tube_grasp_pipeline(debug: bool = False):
             #     50,
             #     0.9,
             # ),
-            fun=score_function_bspline_reg_multiple_pre,
+            # fun=score_function_bspline_reg_multiple_pre,
+            # x0=init_x_fine,
+            # args=(
+            #     camera_poses,
+            #     camera_parameters,
+            #     degree,
+            #     init_x_fine,
+            #     0,
+            #     1,
+            #     1,
+            #     skeletons,
+            #     interps,
+            #     50
+            # ),
+            fun=score_function_bspline_chamfer_diff,
             x0=init_x_fine,
             args=(
                 camera_poses,
@@ -315,7 +345,7 @@ def tube_grasp_pipeline(debug: bool = False):
                 init_x_fine,
                 0,
                 1,
-                0,
+                1,
                 skeletons,
                 interps,
                 50
@@ -328,8 +358,9 @@ def tube_grasp_pipeline(debug: bool = False):
         print(f"Fine optimization took {end - start:.2f} seconds")
         print(f"result: {result_fine}")
         ctrl_points_fine = result_fine.x.reshape(-1, 3)
-        projected_spline_cam2_fine = project_bspline(ctrl_points_fine, camera_poses[-1], camera_parameters, degree=degree)
-        show_masks([masks[-1], projected_spline_cam2_fine], "Projected B-Spline Cam2 Fine")
+        for index, (mask, camera_pose) in enumerate(zip(masks, camera_poses)):
+            projected_spline_cam2_fine = project_bspline(ctrl_points_fine, camera_pose, camera_parameters, degree=degree)
+            show_masks([mask, projected_spline_cam2_fine], f"Projected B-Spline Cam {index} Fine")
 
         ctrl_points.append(ctrl_points_fine)
         #endregion
