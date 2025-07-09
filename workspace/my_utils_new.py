@@ -1178,61 +1178,61 @@ def extract_centerline_from_mask_individual(depth_image: np.ndarray, mask: np.nd
 
     return segments
 
-# def fit_bspline_scipy(centerline_pts: np.ndarray, degree: int = 3, smooth: float = None, nest: int = None) -> np.ndarray:
-#     """
-#     Fit a B-spline to a 3D centerline using SciPy's smoothing spline.
-
-#     Args:
-#         centerline_pts: (N×3) array of ordered 3D points along the centerline.
-#         degree: Spline degree (k). Must be <= 5.
-#         smooth: Smoothing factor (s). If None, defaults to s=0 (interpolating spline).
-#         nest: Maximum number of knots. Higher values allow more control points.
-#               If None, SciPy chooses based on data size.
-
-#     Returns:
-#         ctrl_pts: (M×3) array of the spline's control points.
-#     """
-#     # Prepare data for splprep: a list of coordinate arrays
-#     coords = [centerline_pts[:, i] for i in range(3)]
-    
-#     # Compute the B-spline representation
-#     tck, u = splprep(coords, k=degree, s=smooth, nest=nest)
-    
-#     # Extract control points: tck[1] is a list of arrays for each dimension
-#     ctrl_pts = np.vstack(tck[1]).T
-    
-#     return ctrl_pts
-
-def fit_bspline_scipy(centerline_pts: np.ndarray,
-                      degree: int = 3,
-                      smooth: float = None,
-                      nest: int = None) -> np.ndarray:
+def fit_bspline_scipy(centerline_pts: np.ndarray, degree: int = 3, smooth: float = None, nest: int = None) -> np.ndarray:
     """
-    Fit a B-spline to a 3D centerline using SciPy's modern make_splprep.
+    Fit a B-spline to a 3D centerline using SciPy's smoothing spline.
 
     Args:
         centerline_pts: (N×3) array of ordered 3D points along the centerline.
         degree: Spline degree (k). Must be <= 5.
         smooth: Smoothing factor (s). If None, defaults to s=0 (interpolating spline).
-        nest: Maximum number of knots. If None, SciPy chooses based on data size.
+        nest: Maximum number of knots. Higher values allow more control points.
+              If None, SciPy chooses based on data size.
 
     Returns:
         ctrl_pts: (M×3) array of the spline's control points.
     """
-    # Split out each coordinate into a separate 1D array
-    coords = [centerline_pts[:, i] for i in range(centerline_pts.shape[1])]
-
-    # make_splprep returns (BSpline instance, parameter values u)
-    s = 0.0 if smooth is None else smooth
-    spline: np.ndarray  # BSpline
-    u: np.ndarray
-    spline, u = make_splprep(coords, k=degree, s=s, nest=nest)  # :contentReference[oaicite:0]{index=0}
-
-    # The BSpline.c attribute holds the coefficient array;
-    # for vector-valued data this is an (n_coeff × ndim) array.
-    ctrl_pts = np.asarray(spline.c)
-
+    # Prepare data for splprep: a list of coordinate arrays
+    coords = [centerline_pts[:, i] for i in range(3)]
+    
+    # Compute the B-spline representation
+    tck, u = splprep(coords, k=degree, s=smooth, nest=nest)
+    
+    # Extract control points: tck[1] is a list of arrays for each dimension
+    ctrl_pts = np.vstack(tck[1]).T
+    
     return ctrl_pts
+
+# def fit_bspline_scipy(centerline_pts: np.ndarray,
+#                       degree: int = 3,
+#                       smooth: float = None,
+#                       nest: int = None) -> np.ndarray:
+#     """
+#     Fit a B-spline to a 3D centerline using SciPy's modern make_splprep.
+
+#     Args:
+#         centerline_pts: (N×3) array of ordered 3D points along the centerline.
+#         degree: Spline degree (k). Must be <= 5.
+#         smooth: Smoothing factor (s). If None, defaults to s=0 (interpolating spline).
+#         nest: Maximum number of knots. If None, SciPy chooses based on data size.
+
+#     Returns:
+#         ctrl_pts: (M×3) array of the spline's control points.
+#     """
+#     # Split out each coordinate into a separate 1D array
+#     coords = [centerline_pts[:, i] for i in range(centerline_pts.shape[1])]
+
+#     # make_splprep returns (BSpline instance, parameter values u)
+#     s = 0.0 if smooth is None else smooth
+#     spline: np.ndarray  # BSpline
+#     u: np.ndarray
+#     spline, u = make_splprep(coords, k=degree, s=s, nest=nest)  # :contentReference[oaicite:0]{index=0}
+
+#     # The BSpline.c attribute holds the coefficient array;
+#     # for vector-valued data this is an (n_coeff × ndim) array.
+#     ctrl_pts = np.asarray(spline.c)
+
+#     return ctrl_pts
 
 def convert_bspline_to_pointcloud(ctrl_points: np.ndarray, samples: int = 150, degree: int = 3) -> o3d.geometry.PointCloud:
     """

@@ -76,7 +76,7 @@ def tube_grasp_pipeline(debug: bool = False):
     camera_poses.append(ros_handler.get_current_pose(hand_camera_frame, map_frame)) # Get current camera pose
     palm_poses.append(ros_handler.get_current_pose(hand_palm_frame, map_frame)) # Get current hand palm pose
     # Process image
-    masks.append(image_processing.get_mask(image=images[-1], prompt=SAM_prompt, show=False))
+    masks.append(image_processing.get_mask(image=images[-1], prompt=SAM_prompt, show=True))
     depths_unmasked.append(image_processing.get_depth_unmasked(image=images[-1], show=False))
     depths.append(image_processing.get_depth_masked(image=images[-1], mask=masks[-1], show=False))
 
@@ -85,8 +85,8 @@ def tube_grasp_pipeline(debug: bool = False):
     # save_masks(data[-1][1], save_image_folder, "Mask")
 
 
-    # usr_input = input("Mask Correct? [y]/n: ")
-    # if usr_input == "n": exit()
+    usr_input = input("Mask Correct? [y]/n: ")
+    if usr_input == "n": exit()
     # Move arm a predetermined length
     next_pose = create_pose(z=0.1, pitch=-0.4, reference_frame=hand_palm_frame)
     pose_publisher.publish(next_pose)
@@ -109,7 +109,7 @@ def tube_grasp_pipeline(debug: bool = False):
 
     # Estimate scale and shift
     print(f"Score: {score_function([1, 0], depth1=depths[-2], camera_pose1=camera_poses[-2], mask2=masks[-1], camera_pose2=camera_poses[-1], camera_parameters=camera_parameters)}")
-    best_alpha, best_beta, best_pc_world, score = estimate_scale_shift(depth1=depths[-2], mask2=masks[-1], camera_pose1=camera_poses[-2], camera_pose2=camera_poses[-1], camera_parameters=camera_parameters, show=True)
+    best_alpha, best_beta, best_pc_world, score = estimate_scale_shift(depth1=depths[-2], mask2=masks[-1], camera_pose1=camera_poses[-2], camera_pose2=camera_poses[-1], camera_parameters=camera_parameters, show=False)
     pointcloud_publisher.publish(best_pc_world)
     print("here1")
     #endregion -------------------- Depth Enything --------------------
@@ -273,7 +273,7 @@ def tube_grasp_pipeline(debug: bool = False):
                 camera_parameters,
                 degree,
                 init_x_coarse,
-                1,
+                0,
                 1,
                 0,
                 skeletons,
@@ -313,7 +313,7 @@ def tube_grasp_pipeline(debug: bool = False):
                 camera_parameters,
                 degree,
                 init_x_fine,
-                10,
+                0,
                 1,
                 0,
                 skeletons,

@@ -6,6 +6,7 @@ import numpy as np
 from numpy.typing import NDArray
 import supervision as sv
 from PIL import Image
+import rospy
 
 grounded_sam_directory = '/root/grounded_sam2'
 # sys.path.insert(1, grounded_sam_directory)
