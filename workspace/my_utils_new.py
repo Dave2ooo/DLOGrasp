@@ -1232,123 +1232,269 @@ def fit_bspline_scipy(centerline_pts: np.ndarray,
     # for vector-valued data this is an (n_coeff × ndim) array.
     ctrl_pts = np.asarray(spline.c)
 
-    return ctrl_pts
+    # return ctrl_pts
+    return spline
 
-def convert_bspline_to_pointcloud(ctrl_points: np.ndarray, samples: int = 150, degree: int = 3) -> o3d.geometry.PointCloud:
+# def convert_bspline_to_pointcloud(ctrl_points: np.ndarray, samples: int = 150, degree: int = 3) -> o3d.geometry.PointCloud:
+#     """
+#     Converts a B-spline defined by control points into an Open3D PointCloud
+#     by sampling points along the curve.
+
+#     Args:
+#         ctrl_points: (N_control × 3) array of control points.
+#         samples:     Number of points to sample along the spline (integer ≥ 2).
+#         degree:      Spline degree (k). Must satisfy N_control > degree.
+
+#     Returns:
+#         pcd: Open3D.geometry.PointCloud containing `samples` points sampled
+#              along the B-spline.
+#     """
+#     pts = np.asarray(ctrl_points, dtype=float)
+#     n_ctrl = pts.shape[0]
+#     k = degree
+#     if n_ctrl <= k:
+#         raise ValueError("Number of control points must exceed spline degree")
+
+#     # Open-uniform knot vector: (k+1) zeros, inner knots, (k+1) ones
+#     n_inner = n_ctrl - k - 1
+#     if n_inner > 0:
+#         inner = np.linspace(0, 1, n_inner + 2)[1:-1]
+#         knots = np.concatenate((np.zeros(k+1), inner, np.ones(k+1)))
+#     else:
+#         knots = np.concatenate((np.zeros(k+1), np.ones(k+1)))
+
+#     # Build the spline and sample
+#     spline = BSpline(knots, pts, k, axis=0)
+#     u = np.linspace(0, 1, samples)
+#     samples_3d = spline(u)  # shape: (samples, 3)
+
+#     # Create Open3D PointCloud
+#     pcd = o3d.geometry.PointCloud()
+#     pcd.points = o3d.utility.Vector3dVector(samples_3d)
+
+#     return pcd
+
+def convert_bspline_to_pointcloud(spline: BSpline, samples: int = 200) -> o3d.geometry.PointCloud:
     """
-    Converts a B-spline defined by control points into an Open3D PointCloud
-    by sampling points along the curve.
+    Converts a SciPy BSpline into an Open3D PointCloud by sampling points along the curve.
 
     Args:
-        ctrl_points: (N_control × 3) array of control points.
-        samples:     Number of points to sample along the spline (integer ≥ 2).
-        degree:      Spline degree (k). Must satisfy N_control > degree.
+        spline:   A SciPy.interpolate.BSpline instance whose coefficients describe
+                  a 3D curve (e.g., built via splprep + BSpline).
+        samples:  Number of points to sample along the spline (integer ≥ 2).
 
     Returns:
-        pcd: Open3D.geometry.PointCloud containing `samples` points sampled
-             along the B-spline.
+        pcd:      Open3D.geometry.PointCloud containing `samples` XYZ points.
     """
-    pts = np.asarray(ctrl_points, dtype=float)
-    n_ctrl = pts.shape[0]
-    k = degree
-    if n_ctrl <= k:
-        raise ValueError("Number of control points must exceed spline degree")
+    # Extract the true domain of the spline:
+    k = spline.k
+    t = spline.t
+    u_start, u_end = t[k], t[-k-1]
 
-    # Open-uniform knot vector: (k+1) zeros, inner knots, (k+1) ones
-    n_inner = n_ctrl - k - 1
-    if n_inner > 0:
-        inner = np.linspace(0, 1, n_inner + 2)[1:-1]
-        knots = np.concatenate((np.zeros(k+1), inner, np.ones(k+1)))
-    else:
-        knots = np.concatenate((np.zeros(k+1), np.ones(k+1)))
+    # Uniform parameter values over [u_start, u_end]
+    u = np.linspace(u_start, u_end, samples)
 
-    # Build the spline and sample
-    spline = BSpline(knots, pts, k, axis=0)
-    u = np.linspace(0, 1, samples)
-    samples_3d = spline(u)  # shape: (samples, 3)
+    # Evaluate — this yields an array of shape (samples, 3) if your spline.c
+    # was shaped appropriately (axis=0 for the spatial dimension).
+    pts = spline(u)
 
-    # Create Open3D PointCloud
+    # Some BSpline constructions return (3, samples), so transpose if needed:
+    if pts.ndim == 2 and pts.shape[0] == 3 and pts.shape[1] == samples:
+        pts = pts.T
+
+    # Build the Open3D point cloud
     pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(samples_3d)
+    pcd.points = o3d.utility.Vector3dVector(pts)
 
     return pcd
 
-def visualize_spline_with_pc(pointcloud, control_pts, degree, num_samples=200, title="Spline with PointCloud"):
-    n_ctrl = len(control_pts)
-    # Build a clamped, uniform knot vector of length n_ctrl + degree + 1
-    # interior knot count = n_ctrl - degree - 1
-    if n_ctrl <= degree:
-        raise ValueError("Need more control points than the degree")
-    m = n_ctrl - degree - 1
-    if m > 0:
-        interior = np.linspace(0, 1, m+2)[1:-1]
-    else:
-        interior = np.array([])
-    # clamp start/end
-    t = np.concatenate([
-        np.zeros(degree+1),
-        interior,
-        np.ones(degree+1)
-    ])
-    # create BSpline
-    spline = BSpline(t, control_pts, degree)
+# def visualize_spline_with_pc(pointcloud, control_pts, degree, num_samples=200, title="Spline with PointCloud"):
+#     n_ctrl = len(control_pts)
+#     # Build a clamped, uniform knot vector of length n_ctrl + degree + 1
+#     # interior knot count = n_ctrl - degree - 1
+#     if n_ctrl <= degree:
+#         raise ValueError("Need more control points than the degree")
+#     m = n_ctrl - degree - 1
+#     if m > 0:
+#         interior = np.linspace(0, 1, m+2)[1:-1]
+#     else:
+#         interior = np.array([])
+#     # clamp start/end
+#     t = np.concatenate([
+#         np.zeros(degree+1),
+#         interior,
+#         np.ones(degree+1)
+#     ])
+#     # create BSpline
+#     spline = BSpline(t, control_pts, degree)
 
-    # sample
-    ts = np.linspace(t[degree], t[-degree-1], num_samples)
-    curve_pts = spline(ts)
+#     # sample
+#     ts = np.linspace(t[degree], t[-degree-1], num_samples)
+#     curve_pts = spline(ts)
 
-    # build LineSet
-    import open3d as o3d
-    lines = [[i, i+1] for i in range(len(curve_pts)-1)]
+#     # build LineSet
+#     import open3d as o3d
+#     lines = [[i, i+1] for i in range(len(curve_pts)-1)]
+#     ls = o3d.geometry.LineSet(
+#         points=o3d.utility.Vector3dVector(curve_pts),
+#         lines=o3d.utility.Vector2iVector(lines)
+#     )
+#     ls.colors = o3d.utility.Vector3dVector([[1,0,0] for _ in lines])
+
+#     o3d.visualization.draw_geometries([pointcloud, ls])
+
+def visualize_spline_with_pc(pointcloud: o3d.geometry.PointCloud, spline: BSpline, num_samples: int = 200, title: str = "Spline with PointCloud"):
+    """
+    Visualize a 3D BSpline alongside an existing Open3D PointCloud.
+
+    Args:
+        pointcloud:   An Open3D PointCloud to display.
+        spline:       A SciPy.interpolate.BSpline of degree k with 3D coeffs.
+        num_samples:  How many points to sample along the spline.
+        title:        (Unused) window title placeholder.
+    """
+    # Extract degree and knot vector
+    k = spline.k
+    t = spline.t
+
+    # Determine valid parameter interval [t[k], t[-k-1]]
+    u_start, u_end = t[k], t[-k-1]
+    us = np.linspace(u_start, u_end, num_samples)
+
+    # Evaluate spline: shape (samples, 3) or (3, samples)
+    pts = spline(us)
+    if pts.ndim == 2 and pts.shape[0] == 3 and pts.shape[1] == num_samples:
+        pts = pts.T
+
+    # Build LineSet for the curve
+    lines = [[i, i+1] for i in range(len(pts)-1)]
     ls = o3d.geometry.LineSet(
-        points=o3d.utility.Vector3dVector(curve_pts),
+        points=o3d.utility.Vector3dVector(pts),
         lines=o3d.utility.Vector2iVector(lines)
     )
-    ls.colors = o3d.utility.Vector3dVector([[1,0,0] for _ in lines])
+    ls.colors = o3d.utility.Vector3dVector([[1.0, 0.0, 0.0]] * len(lines))
 
+    # Display both
     o3d.visualization.draw_geometries([pointcloud, ls])
 
-def project_bspline(ctrl_points: np.ndarray, camera_pose, camera_parameters: tuple, width: int = 640, height: int = 480, degree: int = 3) -> np.ndarray:
+
+# def project_bspline(ctrl_points: np.ndarray, camera_pose, camera_parameters: tuple, width: int = 640, height: int = 480, degree: int = 3) -> np.ndarray:
+#     """
+#     Projects a 3D B-spline (defined by control points) into the camera image plane,
+#     rendering a continuous curve into a binary mask.
+
+#     Args:
+#         ctrl_points: (N_control x 3) array of B-spline control points.
+#         camera_pose: PoseStamped with .pose.position (x,y,z)
+#                      and .pose.orientation (x,y,z,w) defining camera pose in world.
+#         camera_parameters: (fx, fy, cx, cy) intrinsic parameters.
+#         width:  Output image width in pixels.
+#         height: Output image height in pixels.
+#         degree: Spline degree (k). Must satisfy N_control > degree.
+
+#     Returns:
+#         mask: (height x width) uint8 mask with the projected spline drawn in 255 on 0.
+#     """
+#     # Unpack intrinsics
+#     fx, fy, cx, cy = camera_parameters
+
+#     # Build open-uniform knot vector
+#     n_ctrl = ctrl_points.shape[0]
+#     k = degree
+#     if n_ctrl <= k:
+#         raise ValueError("Number of control points must exceed spline degree")
+#     num_inner = n_ctrl - k - 1
+#     if num_inner > 0:
+#         inner = np.linspace(1/(num_inner+1), num_inner/(num_inner+1), num_inner)
+#         t = np.concatenate(([0]*(k+1), inner, [1]*(k+1)))
+#     else:
+#         t = np.concatenate(([0]*(k+1), [1]*(k+1)))
+
+#     # Create vector-valued spline
+#     spline = BSpline(t, ctrl_points, k, axis=0)
+
+#     # Sample points along spline
+#     num_samples = max(width, height)
+#     u = np.linspace(0, 1, num_samples)
+#     pts_world = spline(u)  # (num_samples x 3)
+
+#     # Parse camera pose (world -> camera)
+#     tx = camera_pose.pose.position.x
+#     ty = camera_pose.pose.position.y
+#     tz = camera_pose.pose.position.z
+#     qx = camera_pose.pose.orientation.x
+#     qy = camera_pose.pose.orientation.y
+#     qz = camera_pose.pose.orientation.z
+#     qw = camera_pose.pose.orientation.w
+
+#     # Build rotation matrix from quaternion (camera -> world)
+#     xx, yy, zz = qx*qx, qy*qy, qz*qz
+#     xy, xz, yz = qx*qy, qx*qz, qy*qz
+#     wx, wy, wz = qw*qx, qw*qy, qw*qz
+#     R = np.array([
+#         [1-2*(yy+zz),   2*(xy - wz),   2*(xz + wy)],
+#         [  2*(xy + wz), 1-2*(xx+zz),   2*(yz - wx)],
+#         [  2*(xz - wy),   2*(yz + wx), 1-2*(xx+yy)]
+#     ])
+
+#     # Transform points into camera frame: p_cam = R^T * (p_world - t)
+#     diff = pts_world - np.array([tx, ty, tz])
+#     pts_cam = diff.dot(R)
+
+#     # Perspective projection
+#     x_cam, y_cam, z_cam = pts_cam[:,0], pts_cam[:,1], pts_cam[:,2]
+#     valid = z_cam > 0
+#     u_proj = (fx * x_cam[valid] / z_cam[valid] + cx)
+#     v_proj = (fy * y_cam[valid] / z_cam[valid] + cy)
+
+#     # Integer pixel coords
+#     u_pix = np.round(u_proj).astype(int)
+#     v_pix = np.round(v_proj).astype(int)
+
+#     # Create mask and draw lines between consecutive samples
+#     mask = np.zeros((height, width), dtype=np.uint8)
+#     # Filter pixels inside image bounds
+#     pts2d = list(zip(u_pix, v_pix))
+#     pts2d = [(u, v) for u, v in pts2d if 0 <= u < width and 0 <= v < height]
+#     for (u0, v0), (u1, v1) in zip(pts2d, pts2d[1:]):
+#         rr, cc = skline(v0, u0, v1, u1)
+#         valid_line = (rr >= 0) & (rr < height) & (cc >= 0) & (cc < width)
+#         mask[rr[valid_line], cc[valid_line]] = 255
+
+#     return mask
+
+def project_bspline(spline: BSpline, camera_pose, camera_parameters: tuple, width: int = 640, height: int = 480, num_samples: int = None) -> np.ndarray:
     """
-    Projects a 3D B-spline (defined by control points) into the camera image plane,
+    Projects a 3D BSpline into the camera image plane,
     rendering a continuous curve into a binary mask.
 
     Args:
-        ctrl_points: (N_control x 3) array of B-spline control points.
-        camera_pose: PoseStamped with .pose.position (x,y,z)
-                     and .pose.orientation (x,y,z,w) defining camera pose in world.
+        spline:            A SciPy.interpolate.BSpline instance whose
+                           coefficients describe a 3D curve.
+        camera_pose:       A PoseStamped with .pose.position (x,y,z)
+                           and .pose.orientation (x,y,z,w) defining
+                           camera pose in world.
         camera_parameters: (fx, fy, cx, cy) intrinsic parameters.
-        width:  Output image width in pixels.
-        height: Output image height in pixels.
-        degree: Spline degree (k). Must satisfy N_control > degree.
+        width:             Image width in pixels.
+        height:            Image height in pixels.
+        num_samples:       Number of points to sample; if None, uses max(width, height).
 
     Returns:
-        mask: (height x width) uint8 mask with the projected spline drawn in 255 on 0.
+        mask: (height × width) uint8 mask with the projected spline drawn in 255 on 0.
     """
-    # Unpack intrinsics
     fx, fy, cx, cy = camera_parameters
 
-    # Build open-uniform knot vector
-    n_ctrl = ctrl_points.shape[0]
-    k = degree
-    if n_ctrl <= k:
-        raise ValueError("Number of control points must exceed spline degree")
-    num_inner = n_ctrl - k - 1
-    if num_inner > 0:
-        inner = np.linspace(1/(num_inner+1), num_inner/(num_inner+1), num_inner)
-        t = np.concatenate(([0]*(k+1), inner, [1]*(k+1)))
-    else:
-        t = np.concatenate(([0]*(k+1), [1]*(k+1)))
+    # 1) Sample along the spline’s natural domain
+    k = spline.k
+    t = spline.t
+    u0, u1 = t[k], t[-k-1]
+    N = num_samples or max(width, height)
+    u = np.linspace(u0, u1, N)
+    pts = spline(u)  # could be (N,3) or (3,N)
+    if pts.ndim == 2 and pts.shape[0] == 3:
+        pts = pts.T  # -> (N,3)
 
-    # Create vector-valued spline
-    spline = BSpline(t, ctrl_points, k, axis=0)
-
-    # Sample points along spline
-    num_samples = max(width, height)
-    u = np.linspace(0, 1, num_samples)
-    pts_world = spline(u)  # (num_samples x 3)
-
-    # Parse camera pose (world -> camera)
+    # 2) Parse camera pose
     tx = camera_pose.pose.position.x
     ty = camera_pose.pose.position.y
     tz = camera_pose.pose.position.z
@@ -1357,7 +1503,7 @@ def project_bspline(ctrl_points: np.ndarray, camera_pose, camera_parameters: tup
     qz = camera_pose.pose.orientation.z
     qw = camera_pose.pose.orientation.w
 
-    # Build rotation matrix from quaternion (camera -> world)
+    # 3) Build rotation matrix R (camera → world)
     xx, yy, zz = qx*qx, qy*qy, qz*qz
     xy, xz, yz = qx*qy, qx*qz, qy*qz
     wx, wy, wz = qw*qx, qw*qy, qw*qz
@@ -1367,29 +1513,28 @@ def project_bspline(ctrl_points: np.ndarray, camera_pose, camera_parameters: tup
         [  2*(xz - wy),   2*(yz + wx), 1-2*(xx+yy)]
     ])
 
-    # Transform points into camera frame: p_cam = R^T * (p_world - t)
-    diff = pts_world - np.array([tx, ty, tz])
-    pts_cam = diff.dot(R)
+    # 4) Transform world pts into camera frame
+    diff = pts - np.array([tx, ty, tz])
+    pts_cam = diff.dot(R)  # since we want R^T*(p - t), and R here is camera→world
 
-    # Perspective projection
-    x_cam, y_cam, z_cam = pts_cam[:,0], pts_cam[:,1], pts_cam[:,2]
-    valid = z_cam > 0
-    u_proj = (fx * x_cam[valid] / z_cam[valid] + cx)
-    v_proj = (fy * y_cam[valid] / z_cam[valid] + cy)
-
-    # Integer pixel coords
+    # 5) Project with pinhole model
+    x, y, z = pts_cam[:,0], pts_cam[:,1], pts_cam[:,2]
+    valid = z > 0
+    u_proj = fx * x[valid] / z[valid] + cx
+    v_proj = fy * y[valid] / z[valid] + cy
     u_pix = np.round(u_proj).astype(int)
     v_pix = np.round(v_proj).astype(int)
 
-    # Create mask and draw lines between consecutive samples
+    # 6) Draw into mask
     mask = np.zeros((height, width), dtype=np.uint8)
-    # Filter pixels inside image bounds
-    pts2d = list(zip(u_pix, v_pix))
-    pts2d = [(u, v) for u, v in pts2d if 0 <= u < width and 0 <= v < height]
+    pts2d = [
+        (u, v) for u, v in zip(u_pix, v_pix)
+        if 0 <= u < width and 0 <= v < height
+    ]
     for (u0, v0), (u1, v1) in zip(pts2d, pts2d[1:]):
         rr, cc = skline(v0, u0, v1, u1)
-        valid_line = (rr >= 0) & (rr < height) & (cc >= 0) & (cc < width)
-        mask[rr[valid_line], cc[valid_line]] = 255
+        inside = (rr >= 0) & (rr < height) & (cc >= 0) & (cc < width)
+        mask[rr[inside], cc[inside]] = 255
 
     return mask
 
@@ -1417,60 +1562,112 @@ def skeletonize_mask(mask: np.ndarray) -> np.ndarray:
     return (skel.astype(np.uint8) * 255)
 
 
-def get_highest_point_and_angle_spline(ctrl_points: np.ndarray, degree: int = 3, num_samples: int = 1000):
+# def get_highest_point_and_angle_spline(ctrl_points: np.ndarray, degree: int = 3, num_samples: int = 1000):
+#     """
+#     Samples the B-spline densely, finds the 3D point of maximum z,
+#     and computes the tangent angle at that point (projection onto XY-plane),
+#     normalized to the range [-pi/2, pi/2].
+
+#     Args:
+#         ctrl_points:  (N×3) array of control points.
+#         degree:       spline degree (default 3).
+#         num_samples:  number of samples along the spline for search.
+
+#     Returns:
+#         highest_pt:   (x, y, z) numpy array of the highest point on the spline.
+#         angle:        tangent angle in radians in [-pi/2, pi/2] in world coordinates.
+#     """
+#     pts = np.asarray(ctrl_points, dtype=float)
+#     N, dim = pts.shape
+#     if dim != 3:
+#         raise ValueError("ctrl_points must be an (N,3) array")
+#     if N <= degree:
+#         raise ValueError("Need at least degree+1 control points")
+
+#     # build open-uniform knot vector
+#     k = degree
+#     n_inner = N - k - 1
+#     if n_inner > 0:
+#         inner = np.linspace(0, 1, n_inner+2)[1:-1]
+#         knots = np.concatenate((np.zeros(k+1), inner, np.ones(k+1)))
+#     else:
+#         knots = np.concatenate((np.zeros(k+1), np.ones(k+1)))
+
+#     spline = BSpline(knots, pts, k, axis=0)
+#     u = np.linspace(0, 1, num_samples)
+#     samples = spline(u)  # (num_samples, 3)
+
+#     # find index of max z
+#     idx_max = np.argmax(samples[:, 2])
+#     highest_pt = samples[idx_max]
+
+#     # compute derivative spline and evaluate at same u
+#     dspline = spline.derivative()
+#     d_samples = dspline(u)  # (num_samples, 3)
+#     dx, dy = d_samples[idx_max, 0], d_samples[idx_max, 1]
+
+#     # angle of tangent in XY-plane
+#     angle = np.arctan(dy/dx)
+#     angle += np.pi/2
+#     # normalize to [-pi/2, pi/2]
+#     while angle > np.pi/2:
+#         angle -= np.pi
+#     while angle < -np.pi/2:
+#         angle += np.pi
+
+#     return highest_pt, -angle
+
+def get_highest_point_and_angle_spline(spline: BSpline,
+                                       num_samples: int = 1000):
     """
-    Samples the B-spline densely, finds the 3D point of maximum z,
+    Samples the given 3D BSpline densely, finds the 3D point of maximum z,
     and computes the tangent angle at that point (projection onto XY-plane),
-    normalized to the range [-pi/2, pi/2].
-
-    Args:
-        ctrl_points:  (N×3) array of control points.
-        degree:       spline degree (default 3).
-        num_samples:  number of samples along the spline for search.
-
-    Returns:
-        highest_pt:   (x, y, z) numpy array of the highest point on the spline.
-        angle:        tangent angle in radians in [-pi/2, pi/2] in world coordinates.
+    via arctan2(dy,dx). Raises if something unexpected shows up.
     """
-    pts = np.asarray(ctrl_points, dtype=float)
-    N, dim = pts.shape
-    if dim != 3:
-        raise ValueError("ctrl_points must be an (N,3) array")
-    if N <= degree:
-        raise ValueError("Need at least degree+1 control points")
+    # --- 1) domain of definition
+    k = spline.k
+    t = spline.t
+    u_start = t[k]
+    u_end   = t[-(k+1)]
+    assert u_end > u_start, f"Invalid param range: [{u_start}, {u_end}]"
 
-    # build open-uniform knot vector
-    k = degree
-    n_inner = N - k - 1
-    if n_inner > 0:
-        inner = np.linspace(0, 1, n_inner+2)[1:-1]
-        knots = np.concatenate((np.zeros(k+1), inner, np.ones(k+1)))
-    else:
-        knots = np.concatenate((np.zeros(k+1), np.ones(k+1)))
+    # --- 2) sample
+    u = np.linspace(u_start, u_end, num_samples)
+    pts = spline(u)
+    pts = np.atleast_2d(pts)
+    # now expect shape (num_samples, D)
+    if pts.shape[0] != num_samples:
+        if pts.shape[1] == num_samples:
+            pts = pts.T
+        else:
+            raise ValueError(f"BSpline(u) gave shape {pts.shape}, "
+                             "couldn't reorient to (N, D).")
+    N, D = pts.shape
+    if D < 3:
+        raise ValueError(f"Spline output has dimension {D}<3; need 3D points.")
 
-    spline = BSpline(knots, pts, k, axis=0)
-    u = np.linspace(0, 1, num_samples)
-    samples = spline(u)  # (num_samples, 3)
+    # --- 3) find highest‐z sample
+    idx_max = np.argmax(pts[:, 2])
+    highest_pt = pts[idx_max]  # (x,y,z)
 
-    # find index of max z
-    idx_max = np.argmax(samples[:, 2])
-    highest_pt = samples[idx_max]
+    # --- 4) derivative & tangent
+    dspline = spline.derivative(nu=1)
+    d_pts = dspline(u)
+    d_pts = np.atleast_2d(d_pts)
+    if d_pts.shape[0] != num_samples:
+        if d_pts.shape[1] == num_samples:
+            d_pts = d_pts.T
+        else:
+            raise ValueError(f"Derivative gave shape {d_pts.shape}.")
+    dx, dy = d_pts[idx_max, 0], d_pts[idx_max, 1]
 
-    # compute derivative spline and evaluate at same u
-    dspline = spline.derivative()
-    d_samples = dspline(u)  # (num_samples, 3)
-    dx, dy = d_samples[idx_max, 0], d_samples[idx_max, 1]
+    # --- 5) angle via atan2
+    angle = np.arctan2(dy, dx)
+    # if you really need to clamp to [-pi/2, pi/2], you can do:
+    # angle = np.clip(angle, -np.pi/2, np.pi/2)
 
-    # angle of tangent in XY-plane
-    angle = np.arctan(dy/dx)
-    angle += np.pi/2
-    # normalize to [-pi/2, pi/2]
-    while angle > np.pi/2:
-        angle -= np.pi
-    while angle < -np.pi/2:
-        angle += np.pi
+    return highest_pt, angle
 
-    return highest_pt, -angle
 
 def get_desired_pose(position, base_footprint, frame: str = "map") -> PoseStamped:
     """
@@ -2507,237 +2704,191 @@ def interactive_translate_bspline(ctrl_points: np.ndarray,
 
 
 
-#region differentiable chamfer
+#region differentiable chamfer - working but only one view
+# import numpy as np
+# import torch
+# import torch.nn as nn
+# import torch.nn.functional as F
+# from scipy.interpolate import BSpline
 
-import torch
-import torch.nn.functional as F
-from typing import List, Tuple
-
-
-def build_knot_vector(n_ctrl: int, degree: int, device=None) -> torch.Tensor:
-    """
-    Build an open-uniform knot vector for a B-spline.
-
-    Args:
-        n_ctrl (int): Number of control points.
-        degree (int): Spline degree (k).
-        device: Torch device for the returned tensor.
-
-    Returns:
-        torch.Tensor: Knot vector of length n_ctrl + degree + 1.
-    """
-    k = degree
-    if n_ctrl <= k:
-        raise ValueError("Number of control points must exceed spline degree")
-    num_inner = n_ctrl - k - 1
-    if num_inner > 0:
-        inner = torch.linspace(1/(num_inner+1), num_inner/(num_inner+1), num_inner, device=device)
-        t = torch.cat([torch.zeros(k+1, device=device), inner, torch.ones(k+1, device=device)])
-    else:
-        t = torch.cat([torch.zeros(k+1, device=device), torch.ones(k+1, device=device)])
-    return t
-
-
-def bspline_basis(t: torch.Tensor, degree: int, u: torch.Tensor) -> torch.Tensor:
-    """
-    Compute B-spline basis functions N_{i,degree}(u) for each control point.
-
-    Args:
-        t (torch.Tensor): Knot vector of shape (n_ctrl + degree + 1,).
-        degree (int): Spline degree.
-        u (torch.Tensor): Parameter values in [0,1], shape (S,).
-
-    Returns:
-        torch.Tensor: Basis matrix of shape (n_ctrl, S).
-    """
-    n_ctrl = t.numel() - degree - 1
-    # Zeroth-degree basis
-    N = ((u.unsqueeze(0) >= t[:-1].unsqueeze(1)) & (u.unsqueeze(0) < t[1:].unsqueeze(1))).float()
-    N[-1, u == 1.0] = 1.0
-
-    # Recursive Cox–de Boor
-    for k in range(1, degree+1):
-        left_num  = u.unsqueeze(0) - t[:-k-1].unsqueeze(1)
-        left_den  = t[k:-1] - t[:-k-1]
-        left = (left_num / left_den.clamp(min=1e-6)) * N[:-1]
-
-        right_num = t[k+1:].unsqueeze(1) - u.unsqueeze(0)
-        right_den = t[k+1:] - t[1:-k]
-        right = (right_num / right_den.clamp(min=1e-6)) * N[1:]
-
-        N = left + right
-
-    return N[:n_ctrl]
+# try:
+#     import cv2
+#     def mask_to_dist_map(mask: np.ndarray) -> torch.Tensor:
+#         """
+#         mask: H×W binary array (0 outside, non-zero inside).
+#         returns: H×W float32 tensor where each pixel is the
+#                  Euclidean distance to the nearest 'inside' pixel.
+#         """
+#         mask_bin = (mask > 0).astype(np.uint8)
+#         mask_inv = 1 - mask_bin
+#         mask_inv_8u = (mask_inv * 255).astype(np.uint8)
+#         dist = cv2.distanceTransform(mask_inv_8u, cv2.DIST_L2, 5)
+#         return torch.from_numpy(dist).float()
+# except ImportError:
+#     from scipy.ndimage import distance_transform_edt
+#     def mask_to_dist_map(mask: np.ndarray) -> torch.Tensor:
+#         """
+#         Fallback using SciPy if OpenCV is unavailable.
+#         """
+#         inv = (mask == 0).astype(np.uint8)
+#         dist = distance_transform_edt(inv)
+#         return torch.from_numpy(dist.astype(np.float32))
 
 
-def pose_msg_to_matrix(pose_msg) -> torch.Tensor:
-    """
-    Convert a ROS PoseStamped message into a 4×4 world->camera pose matrix.
+# def bspline_basis(u: torch.Tensor,
+#                   knots: torch.Tensor,
+#                   degree: int) -> torch.Tensor:
+#     """
+#     Cox–de Boor recursion in pure Torch.
+#     u:        (M,) parameter samples
+#     knots:    (K,) non-decreasing knot vector
+#     degree:   spline degree p
+#     returns:  (M, N_ctrl) basis matrix, where
+#               N_ctrl = K - p - 1
+#     """
+#     M = u.shape[0]
+#     p = degree
+#     K = knots.shape[0]
+#     N_ctrl = K - p - 1
+#     device = u.device
+#     dtype = u.dtype
 
-    Args:
-        pose_msg: ROS PoseStamped with .pose.position (x,y,z) and
-                  .pose.orientation (x,y,z,w).
+#     # zero-degree basis
+#     N = torch.zeros((M, N_ctrl), dtype=dtype, device=device)
+#     for i in range(N_ctrl):
+#         left = knots[i]
+#         right = knots[i+1]
+#         N[:, i] = ((u >= left) & (u < right)).to(dtype)
+#     # ensure last sample at u=knots[-1] gets basis[-1]=1
+#     mask_end = (u == knots[-1])
+#     if mask_end.any():
+#         N[mask_end, -1] = 1.0
 
-    Returns:
-        torch.Tensor: 4×4 transform matrix (dtype=torch.float32).
-    """
-    # Extract translation
-    tx = pose_msg.pose.position.x
-    ty = pose_msg.pose.position.y
-    tz = pose_msg.pose.position.z
-    # Extract quaternion (camera orientation in world frame)
-    qx = pose_msg.pose.orientation.x
-    qy = pose_msg.pose.orientation.y
-    qz = pose_msg.pose.orientation.z
-    qw = pose_msg.pose.orientation.w
+#     # recursion up to degree p
+#     for r in range(1, p+1):
+#         N_prev = N.clone()
+#         for i in range(N_ctrl):
+#             denom1 = float(knots[i+r]   - knots[i])
+#             denom2 = float(knots[i+r+1] - knots[i+1])
 
-    # Build rotation matrix (camera->world)
-    xx = qx * qx
-    yy = qy * qy
-    zz = qz * qz
-    xy = qx * qy
-    xz = qx * qz
-    yz = qy * qz
-    wx = qw * qx
-    wy = qw * qy
-    wz = qw * qz
-    R = torch.tensor([
-        [1 - 2*(yy + zz),     2*(xy - wz),       2*(xz + wy)],
-        [    2*(xy + wz),   1 - 2*(xx + zz),     2*(yz - wx)],
-        [    2*(xz - wy),       2*(yz + wx),   1 - 2*(xx + yy)]
-    ], dtype=torch.float32)
+#             if denom1 > 0:
+#                 term1 = (u - knots[i]) / denom1 * N_prev[:, i]
+#             else:
+#                 term1 = torch.zeros(M, device=device, dtype=dtype)
 
-    # Homogeneous transform: world->camera is R^T and -R^T * t
-    R_cw = R.t()
-    t_cw = -R_cw @ torch.tensor([tx, ty, tz], dtype=torch.float32)
+#             if denom2 > 0 and (i+1) < N_prev.shape[1]:
+#                 term2 = (knots[i+r+1] - u) / denom2 * N_prev[:, i+1]
+#             else:
+#                 term2 = torch.zeros(M, device=device, dtype=dtype)
 
-    pose_mat = torch.eye(4, dtype=torch.float32)
-    pose_mat[:3, :3] = R_cw
-    pose_mat[:3, 3] = t_cw
-    return pose_mat
+#             N[:, i] = term1 + term2
 
-
-def project_bspline_uv(
-    ctrl_pts: torch.Tensor,
-    pose_mat: torch.Tensor,
-    camera_parameters: Tuple[float, float, float, float],
-    degree: int,
-    num_samples: int = 1024
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Differentiable projection of a 3D B-spline onto the image plane.
-
-    Args:
-        ctrl_pts (torch.Tensor): Control points, shape (n_ctrl, 3), requires_grad=True.
-        pose_mat (torch.Tensor): 4×4 world→camera transform matrix.
-        camera_parameters (tuple): Intrinsics (fx, fy, cx, cy).
-        degree (int): Spline degree (k).
-        num_samples (int): Number of points to sample along the spline.
-
-    Returns:
-        u_img (torch.Tensor): x-coordinates in pixel space, shape (num_samples,).
-        v_img (torch.Tensor): y-coordinates in pixel space, shape (num_samples,).
-    """
-    device = ctrl_pts.device
-    fx, fy, cx, cy = camera_parameters
-    n_ctrl = ctrl_pts.size(0)
-
-    # Sample parameter values
-    u = torch.linspace(0, 1, num_samples, device=device)
-
-    # Compute basis functions and spline points in world coords
-    t = build_knot_vector(n_ctrl, degree, device=device)
-    B = bspline_basis(t, degree, u)             # (n_ctrl, num_samples)
-    pts_w = B.T @ ctrl_pts                     # (num_samples, 3)
-
-    # Homogeneous coordinates
-    pts_h = torch.cat([pts_w, torch.ones((num_samples, 1), device=device)], dim=1)
-
-    # Transform into camera frame
-    pts_cam = (pose_mat @ pts_h.T).T          # (num_samples, 4)
-    x_c, y_c, z_c = pts_cam[:, 0], pts_cam[:, 1], pts_cam[:, 2]
-
-    # Perspective projection (float pixels)
-    u_img = fx * (x_c / z_c) + cx
-    v_img = fy * (y_c / z_c) + cy
-
-    return u_img, v_img
+#     return N
 
 
-def score_mask_chamfer_diff(
-    u_img: torch.Tensor,
-    v_img: torch.Tensor,
-    ref_dt: torch.Tensor
-) -> torch.Tensor:
-    """
-    Compute the one-way Chamfer distance from a sampled curve to a mask.
-
-    Args:
-        u_img (torch.Tensor): x-coords of sampled curve, shape (S,).
-        v_img (torch.Tensor): y-coords of sampled curve, shape (S,).
-        ref_dt (torch.Tensor): Precomputed distance-transform of mask, shape (H, W). Const.
-
-    Returns:
-        torch.Tensor: Mean distance (scalar, differentiable).
-    """
-    H, W = ref_dt.shape
-    # Prepare for grid_sample: normalize to [-1,1]
-    # Note grid_sample expects coords as (y,x)
-    grid = torch.stack([
-        2 * (v_img / (H - 1)) - 1,
-        2 * (u_img / (W - 1)) - 1
-    ], dim=-1).unsqueeze(0).unsqueeze(2)  # (1, S, 1, 2)
-
-    dt = ref_dt.unsqueeze(0).unsqueeze(0)   # (1,1,H,W)
-    sampled = F.grid_sample(dt, grid, mode='bilinear', padding_mode='border', align_corners=True)
-
-    return sampled.view(-1).mean()
+# def evaluate_bspline_torch(ctrl_pts: torch.Tensor,
+#                            knots: torch.Tensor,
+#                            degree: int,
+#                            u: torch.Tensor) -> torch.Tensor:
+#     """
+#     ctrl_pts: (N_ctrl, 3)
+#     knots:    (K,)
+#     degree:   p
+#     u:        (M,)
+#     returns:  (M, 3) points along the B-spline
+#     """
+#     B = bspline_basis(u, knots, degree)      # (M, N_ctrl)
+#     return B @ ctrl_pts                     # (M,3)
 
 
-def score_function_bspline_chamfer_diff(
-    x: torch.Tensor,
-    camera_poses: List,
-    camera_parameters: Tuple[float, float, float, float],
-    ref_dts: List[torch.Tensor],
-    degree: int,
-    decay: float = 0.9,
-    num_samples: int = 1024
-) -> torch.Tensor:
-    """
-    Differentiable multi-view Chamfer loss for a 3D B-spline.
-
-    Args:
-        x (torch.Tensor): Flattened control points, shape (n_ctrl * 3,), requires_grad=True.
-        camera_poses (List): List of ROS PoseStamped messages for each frame.
-        camera_parameters (tuple): Intrinsics (fx, fy, cx, cy).
-        ref_dts (List[torch.Tensor]): Precomputed distance transforms (H, W) for each mask.
-        degree (int): B-spline degree.
-        decay (float): Exponential decay weight per frame.
-        num_samples (int): Samples along curve per frame.
-
-    Returns:
-        torch.Tensor: Scalar Chamfer loss, differentiable.
-    """
-    # Reshape and initialize
-    ctrl_pts = x.view(-1, 3)
-    n_frames = len(camera_poses)
-    total_loss = 0.0
-
-    for i, (pose_msg, ref_dt) in enumerate(zip(camera_poses, ref_dts)):
-        # Convert PoseStamped to 4×4 pose_mat
-        pose_mat = pose_msg_to_matrix(pose_msg)
-
-        u_img, v_img = project_bspline_uv(
-            ctrl_pts, pose_mat, camera_parameters, degree, num_samples
-        )
-        loss_i = score_mask_chamfer_diff(u_img, v_img, ref_dt)
-
-        weight = decay ** (n_frames - 1 - i)
-        total_loss += weight * loss_i
-
-    return total_loss / n_frames
+# def pose_stamped_to_matrix(pose_stamped) -> np.ndarray:
+#     """
+#     Convert a ROS geometry_msgs/PoseStamped into a 4×4 NumPy array.
+#     Requires `tf.transformations` from ROS.
+#     """
+#     import tf.transformations as tfs
+#     q = pose_stamped.pose.orientation
+#     t = pose_stamped.pose.position
+#     R4 = tfs.quaternion_matrix([q.x, q.y, q.z, q.w])  # 4×4
+#     R4[0:3, 3] = [t.x, t.y, t.z]
+#     return R4
 
 
+# class BSplineFitter(nn.Module):
+#     def __init__(self,
+#                  spline: BSpline,
+#                  camera_parameters: tuple,
+#                  camera_pose: torch.Tensor,
+#                  mask_dist_map: torch.Tensor,
+#                  num_samples: int = 200):
+#         """
+#         spline:         SciPy BSpline object with .t (knots),
+#                         .c (coefficients, shape [N_ctrl,3]), .k (degree)
+#         camera_parameters: (fx, fy, cx, cy)
+#         camera_pose:    4×4 torch.Tensor mapping map→camera
+#         mask_dist_map:  H×W tensor (float32) distance transform of mask
+#         """
+#         super().__init__()
+#         # extract from SciPy object
+#         ctrl_pts_np = np.asarray(spline.c, dtype=np.float32)
+#         knots_np    = np.asarray(spline.t, dtype=np.float32)
+#         degree      = int(spline.k)
+
+#         # learnable control points
+#         self.ctrl_pts = nn.Parameter(torch.from_numpy(ctrl_pts_np))
+#         # fixed buffers
+#         self.register_buffer('knots', torch.from_numpy(knots_np))
+#         self.degree = degree
+
+#         fx, fy, cx, cy = camera_parameters
+#         self.register_buffer('intrinsics',
+#                              torch.tensor([fx, fy, cx, cy], dtype=torch.float32))
+#         # camera_pose: 4×4 torch.Tensor
+#         self.register_buffer('camera_pose', camera_pose.float())
+
+#         # mask_dist_map: H×W tensor of distances
+#         self.register_buffer('mask_dist_map', mask_dist_map)
+#         self.num_samples = num_samples
+
+#     def forward(self) -> torch.Tensor:
+#         # sample parameters in [k[p], k[-p-1]]
+#         p = self.degree
+#         u_min = self.knots[p]
+#         u_max = self.knots[-p-1]
+#         u = torch.linspace(u_min, u_max,
+#                            steps=self.num_samples,
+#                            device=self.ctrl_pts.device)
+
+#         # 1) evaluate in map frame
+#         pts_3d = evaluate_bspline_torch(self.ctrl_pts,
+#                                         self.knots,
+#                                         p,
+#                                         u)                # (S,3)
+
+#         # 2) to camera frame & project
+#         ones = torch.ones(self.num_samples, 1,
+#                           device=pts_3d.device)
+#         hom = torch.cat([pts_3d, ones], dim=1)   # (S,4)
+#         cam = (self.camera_pose @ hom.t()).t()   # (S,4)
+#         cam = cam[:, :3]                         # (S,3)
+
+#         x = cam[:, 0] / cam[:, 2]
+#         y = cam[:, 1] / cam[:, 2]
+#         fx, fy, cx, cy = self.intrinsics
+#         u_px = fx * x + cx
+#         v_px = fy * y + cy
+
+#         # 3) sample distance map
+#         H, W = self.mask_dist_map.shape
+#         grid = torch.stack([
+#             (u_px / (W - 1)) * 2 - 1,
+#             (v_px / (H - 1)) * 2 - 1
+#         ], dim=1).view(1, 1, -1, 2)  # (1,1,S,2)
+
+#         dist = F.grid_sample(self.mask_dist_map.unsqueeze(0).unsqueeze(0),
+#                              grid,
+#                              align_corners=True)
+#         return dist.abs().mean()
 
 
 #endregion
@@ -2751,7 +2902,972 @@ def score_function_bspline_chamfer_diff(
 
 
 
+# # region differentiable chamfer - multiple views
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from scipy.interpolate import BSpline
 
+# -----------------------------------------------------------------------------
+# 1) Distance‐transform helper
+# -----------------------------------------------------------------------------
+try:
+    import cv2
+    def mask_to_dist_map(mask: np.ndarray) -> torch.Tensor:
+        mask_bin   = (mask > 0).astype(np.uint8)
+        mask_inv   = 1 - mask_bin
+        mask_inv8  = (mask_inv * 255).astype(np.uint8)
+        dist       = cv2.distanceTransform(mask_inv8, cv2.DIST_L2, 5)
+        return torch.from_numpy(dist).float()
+except ImportError:
+    from scipy.ndimage import distance_transform_edt
+    def mask_to_dist_map(mask: np.ndarray) -> torch.Tensor:
+        inv  = (mask == 0).astype(np.uint8)
+        dist = distance_transform_edt(inv)
+        return torch.from_numpy(dist.astype(np.float32))
+
+
+# -----------------------------------------------------------------------------
+# 2) Pure‐Torch B-spline evaluator (Cox–de Boor)
+# -----------------------------------------------------------------------------
+def bspline_basis(u: torch.Tensor,
+                  knots: torch.Tensor,
+                  degree: int) -> torch.Tensor:
+    M = u.shape[0]
+    p = degree
+    K = knots.shape[0]
+    N_ctrl = K - p - 1
+
+    N = torch.zeros((M, N_ctrl), device=u.device, dtype=u.dtype)
+    # zero-degree
+    for i in range(N_ctrl):
+        N[:, i] = ((u >= knots[i]) & (u < knots[i+1])).to(u.dtype)
+    end_mask = (u == knots[-1])
+    if end_mask.any():
+        N[end_mask, -1] = 1.0
+
+    # recursion
+    for r in range(1, p+1):
+        N_prev = N.clone()
+        for i in range(N_ctrl):
+            denom1 = float(knots[i+r]   - knots[i])
+            denom2 = float(knots[i+r+1] - knots[i+1])
+
+            if denom1 > 0:
+                t1 = (u - knots[i]) / denom1 * N_prev[:, i]
+            else:
+                t1 = torch.zeros(M, device=u.device, dtype=u.dtype)
+
+            if denom2 > 0 and i+1 < N_prev.shape[1]:
+                t2 = (knots[i+r+1] - u) / denom2 * N_prev[:, i+1]
+            else:
+                t2 = torch.zeros(M, device=u.device, dtype=u.dtype)
+
+            N[:, i] = t1 + t2
+    return N
+
+def evaluate_bspline_torch(ctrl_pts: torch.Tensor,
+                           knots: torch.Tensor,
+                           degree: int,
+                           u: torch.Tensor) -> torch.Tensor:
+    B = bspline_basis(u, knots, degree)   # (M, N_ctrl)
+    return B @ ctrl_pts                   # (M,3)
+
+
+# -----------------------------------------------------------------------------
+# 3) ROS PoseStamped → 4×4 matrix
+# -----------------------------------------------------------------------------
+def pose_stamped_to_matrix(pose_stamped) -> np.ndarray:
+    import tf.transformations as tfs
+    q = pose_stamped.pose.orientation
+    t = pose_stamped.pose.position
+    M = tfs.quaternion_matrix([q.x, q.y, q.z, q.w])
+    M[0:3, 3] = [t.x, t.y, t.z]
+    return M
+
+
+# -----------------------------------------------------------------------------
+# 4) Multi‐View B-Spline Fitter
+# -----------------------------------------------------------------------------
+# class BSplineFitterMV(nn.Module):
+#     def __init__(self,
+#                  spline: BSpline,
+#                  camera_parameters: tuple,
+#                  masks: list[np.ndarray],
+#                  camera_poses: list,
+#                  decay: float = 0.95,
+#                  num_samples: int = 200):
+#         super().__init__()
+
+#         # --- extract spline data ---
+#         ctrl_np  = np.asarray(spline.c, dtype=np.float32)   # (N_ctrl,3)
+#         knots_np = np.asarray(spline.t, dtype=np.float32)   # (N_ctrl+deg+1,)
+#         degree   = int(spline.k)
+
+#         # --- register the *initial* control points as a buffer ---
+#         # this is what `self.init_ctrl` refers to in your regularizer
+#         self.register_buffer('init_ctrl',
+#                              torch.from_numpy(ctrl_np).clone())
+
+#         # --- now create the learnable parameter ---
+#         self.ctrl_pts = nn.Parameter(torch.from_numpy(ctrl_np))
+#         # regularization weight (tune this)
+#         self.reg_weight = 1e-4
+#         self.register_buffer('knots', torch.from_numpy(knots_np))
+#         self.degree = degree
+#         self.num_samples = num_samples
+
+#         # intrinsics
+#         fx, fy, cx, cy = camera_parameters
+#         self.register_buffer('intrinsics',
+#                              torch.tensor([fx, fy, cx, cy], dtype=torch.float32))
+
+#         # build distance maps & poses, compute weights
+#         dist_maps = []
+#         pose_mats  = []
+#         V = len(masks)
+#         weights = []
+#         for i, (m, ps) in enumerate(zip(masks, camera_poses)):
+#             dist = mask_to_dist_map(m)  # (H,W) float tensor
+#             dist_maps.append(dist)
+#             M = pose_stamped_to_matrix(ps)  # np (4×4)
+#             pose_mats.append(torch.from_numpy(M).float())
+#             # higher‐indexed get weight=decay^(V-1-i)
+#             w = decay ** (V - 1 - i)
+#             weights.append(w)
+
+#         # stack into buffers
+#         self.register_buffer('mask_dist_maps', torch.stack(dist_maps))   # (V,H,W)
+#         self.register_buffer('camera_poses',    torch.stack(pose_mats)) # (V,4,4)
+#         self.register_buffer('view_weights',    torch.tensor(weights, dtype=torch.float32))  # (V,)
+
+#     def forward(self) -> torch.Tensor:
+#         # sample u
+#         p = self.degree
+#         u_min = self.knots[p]
+#         u_max = self.knots[-p-1]
+#         u = torch.linspace(u_min, u_max, steps=self.num_samples,
+#                            device=self.ctrl_pts.device)
+
+#         # evaluate spline in map frame
+#         pts3d = evaluate_bspline_torch(self.ctrl_pts,
+#                                        self.knots,
+#                                        p, u)  # (S,3)
+
+#         total_loss = 0.0
+#         fx, fy, cx, cy = self.intrinsics
+#         V, H, W = self.mask_dist_maps.shape
+
+#         # for each view
+#         for v in range(V):
+#             # project points
+#             ones = torch.ones(self.num_samples, 1, device=pts3d.device)
+#             hom  = torch.cat([pts3d, ones], dim=1)         # (S,4)
+#             cam  = (self.camera_poses[v] @ hom.t()).t()    # (S,4)
+#             cam3 = cam[:, :3]
+#             x = cam3[:,0] / cam3[:,2]
+#             y = cam3[:,1] / cam3[:,2]
+#             u_px = fx * x + cx
+#             v_px = fy * y + cy
+
+#             # sample distance
+#             grid = torch.stack([
+#                 (u_px/(W-1))*2 -1,
+#                 (v_px/(H-1))*2 -1
+#             ], dim=1).view(1,1,-1,2)  # (1,1,S,2)
+
+#             dist = F.grid_sample(
+#                 self.mask_dist_maps[v].unsqueeze(0).unsqueeze(0),
+#                 grid, align_corners=True
+#             )  # (1,1,1,S)
+#             reg = (self.ctrl_pts - self.init_ctrl).pow(2).mean()
+#             total_loss = total_loss + self.reg_weight * reg
+
+#         return total_loss
+
+# def optimize_bspline_mv(
+#     spline: BSpline,
+#     camera_parameters: tuple,
+#     masks: list[np.ndarray],
+#     camera_poses: list,
+#     decay: float = 0.95,
+#     num_samples: int = 200,
+#     device: torch.device = None,
+#     adam_lr: float = 1e-2,
+#     lbfgs_lr: float = 1.0,
+#     adam_iters: int = 2000,
+#     lbfgs_iters: int = 100,
+#     weight_decay: float = 1e-4,
+#     show: bool = False
+# ) -> BSpline:
+#     """
+#     Optimize a 3D B-spline to fit multiple silhouette masks via chamfer loss.
+
+#     Args:
+#         spline:            Initial SciPy BSpline (t, c, k), c shape=(N_ctrl,3).
+#         camera_parameters: (fx, fy, cx, cy).
+#         masks:             List of H×W binary numpy masks.
+#         camera_poses:      List of ROS PoseStamped (map→cam).
+#         decay:             Exponential weight base (later views get higher weight).
+#         num_samples:       Samples along the spline per view.
+#         device:            torch.device; if None, auto-select CUDA/CPU.
+#         adam_lr:           Learning rate for Adam.
+#         lbfgs_lr:          Learning rate for L-BFGS.
+#         adam_iters:        Iterations for Adam.
+#         lbfgs_iters:       Iterations for L-BFGS.
+#         weight_decay:      Weight decay for Adam.
+
+#     Returns:
+#         best_spline: SciPy BSpline object with optimized control points.
+#     """
+#     # 1) device setup
+#     if device is None:
+#         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+#     # 2) build and move model
+#     model = BSplineFitterMV(
+#         spline=spline,
+#         camera_parameters=camera_parameters,
+#         masks=masks,
+#         camera_poses=camera_poses,
+#         decay=decay,
+#         num_samples=num_samples
+#     ).to(device)
+
+#     # —— DEBUG: snapshot before optimization —— 
+#     init_ctrl = model.ctrl_pts.detach().cpu().clone()
+#     init_loss = model().item()
+#     print(f"[DEBUG] init loss = {init_loss:.6f}")
+
+#     # 3) Adam phase
+#     opt1 = torch.optim.Adam(model.parameters(),
+#                              lr=adam_lr,
+#                              weight_decay=weight_decay)
+#     for _ in range(adam_iters):
+#         opt1.zero_grad()
+#         loss = model()
+#         loss.backward()
+#         opt1.step()
+
+#     # 4) L-BFGS phase
+#     opt2 = torch.optim.LBFGS(
+#         model.parameters(),
+#         lr=lbfgs_lr,
+#         max_iter=lbfgs_iters,
+#         line_search_fn="strong_wolfe"
+#     )
+#     def _closure():
+#         opt2.zero_grad()
+#         l = model()
+#         l.backward()
+#         return l
+#     opt2.step(_closure)
+
+#     # —— DEBUG: snapshot after optimization —— 
+#     final_loss = model().item()
+#     final_ctrl = model.ctrl_pts.detach().cpu()
+#     delta = (final_ctrl - init_ctrl).abs().max().item()
+#     print(f"[DEBUG] final loss = {final_loss:.6f}, max ctrl-pt Δ = {delta:.6e}")
+
+#     # 5) extract optimized spline
+#     optimized_ctrl = model.ctrl_pts.detach().cpu().numpy()
+#     knots_np        = model.knots.cpu().numpy()
+#     degree          = int(model.degree)
+#     best_spline     = BSpline(t=knots_np, c=optimized_ctrl, k=degree)
+
+#     if show:
+#         for i, (mask, camera_pose) in enumerate(zip(masks, camera_poses)):
+#             projected_spline = project_bspline(best_spline, camera_pose, camera_parameters)
+#             show_masks([mask, projected_spline], f"Projected B-Spline Cam {i}")
+
+#     return best_spline
+    
+# class BSplineFitterMVSkeleton(nn.Module):
+#     def __init__(self,
+#                  spline: BSpline,
+#                  camera_parameters: tuple,
+#                  masks: list[np.ndarray],        # these should already be skeletons
+#                  camera_poses: list,
+#                  decay: float = 0.95,
+#                  num_samples: int = 200,
+#                  reg_weight: float = 1e-0):
+#         super().__init__()
+#         # --- spline data ---
+#         ctrl_np  = np.asarray(spline.c, dtype=np.float32)
+#         knots_np = np.asarray(spline.t, dtype=np.float32)
+#         degree   = int(spline.k)
+
+#         # initial ctrl (for regularization)
+#         self.register_buffer('init_ctrl',
+#                              torch.from_numpy(ctrl_np).clone())
+#         self.ctrl_pts    = nn.Parameter(torch.from_numpy(ctrl_np))
+#         self.register_buffer('knots',       torch.from_numpy(knots_np))
+#         self.degree       = degree
+#         self.num_samples = num_samples
+#         self.reg_weight  = reg_weight
+
+#         # intrinsics
+#         fx, fy, cx, cy = camera_parameters
+#         self.register_buffer('intrinsics',
+#                              torch.tensor([fx, fy, cx, cy], dtype=torch.float32))
+
+#         # build distance‐maps (of skeletons) and poses and weights
+#         dist_maps = []
+#         pose_mats = []
+#         weights   = []
+#         V = len(masks)
+#         for i,(m,ps) in enumerate(zip(masks, camera_poses)):
+#             # m is a 2D bool or 0/1 array of skeleton pixels
+#             dm = mask_to_dist_map(m.astype(np.uint8))
+#             dist_maps.append(dm)
+#             M  = pose_stamped_to_matrix(ps)
+#             pose_mats.append(torch.from_numpy(M).float())
+#             # weight: mask[0]→decay**(V-1), mask[V-1]→1
+#             weights.append(decay**(V-1-i))
+
+#         self.register_buffer('mask_dist_maps', torch.stack(dist_maps))   # (V,H,W)
+#         self.register_buffer('camera_poses',    torch.stack(pose_mats)) # (V,4,4)
+#         self.register_buffer('view_weights',    torch.tensor(weights, dtype=torch.float32))  # (V,)
+
+#     def forward(self) -> torch.Tensor:
+#         # 1) sample parameter
+#         p = self.degree
+#         u_min = self.knots[p]
+#         u_max = self.knots[-p-1]
+#         u = torch.linspace(u_min, u_max, self.num_samples, device=self.ctrl_pts.device)
+
+#         # 2) evaluate 3D spline in map frame
+#         pts3d = evaluate_bspline_torch(self.ctrl_pts, self.knots, p, u)  # (S,3)
+
+#         fx, fy, cx, cy = self.intrinsics
+#         V, H, W = self.mask_dist_maps.shape
+#         loss = 0.0
+
+#         # 3) one‐way Chamfer per view
+#         for v in range(V):
+#             # project
+#             ones = torch.ones(self.num_samples, 1, device=pts3d.device)
+#             hom  = torch.cat([pts3d, ones], dim=1)     # (S,4)
+#             cam4 = (self.camera_poses[v] @ hom.t()).t() # (S,4)
+#             cam3 = cam4[:, :3]                         # (S,3)
+#             x = cam3[:,0]/cam3[:,2]
+#             y = cam3[:,1]/cam3[:,2]
+#             u_px = fx*x + cx
+#             v_px = fy*y + cy
+
+#             # sample the dist map
+#             grid = torch.stack([
+#                 (u_px / (W-1))*2 - 1,
+#                 (v_px / (H-1))*2 - 1
+#             ], dim=1).view(1,1,-1,2)  # (1,1,S,2)
+
+#         # --- Manual out‐of‐bounds penalty ---
+#         # Normalize to [-1,1]
+#         norm_u = (u_px / (W - 1)) * 2 - 1
+#         norm_v = (v_px / (H - 1)) * 2 - 1
+
+#         # Which sample locations are valid?
+#         inside = (norm_u >= -1) & (norm_u <= 1) & (norm_v >= -1) & (norm_v <= 1)
+
+#         # Build the grid for grid_sample
+#         grid = torch.stack([norm_u, norm_v], dim=1)      # (S,2)
+#         grid = grid.view(1, 1, -1, 2)                    # (1,1,S,2)
+
+#         # Sample distances (out-of-bounds will give 0)
+#         dist_all = F.grid_sample(
+#             self.mask_dist_maps[v].unsqueeze(0).unsqueeze(0),
+#             grid,
+#             mode='bilinear',
+#             padding_mode='zeros',
+#             align_corners=True
+#         ).view(-1)                                       # (S,)
+
+#         # Any OOB sample gets a large penalty:
+#         # here we choose the image diagonal as max possible distance
+#         max_penalty = torch.sqrt(torch.tensor(H*H + W*W, device=dist_all.device))
+#         dist_clamped = torch.where(inside, dist_all, max_penalty)
+
+#         # one‐way Chamfer for this view
+#         loss_v = dist_clamped.mean()
+ 
+#         loss = loss + self.view_weights[v] * loss_v
+
+#         return loss
+
+# def optimize_bspline_mv_skeleton(
+#     spline: BSpline,
+#     camera_parameters: tuple,
+#     masks: list[np.ndarray],
+#     camera_poses: list,
+#     decay: float = 0.95,
+#     num_samples: int = 200,
+#     device: torch.device = None,
+#     adam_lr: float = 1e-2,
+#     lbfgs_lr: float = 1.0,
+#     adam_iters: int = 2000,
+#     lbfgs_iters: int = 100,
+#     weight_decay: float = 1e-4,
+#     show: bool = False
+# ) -> BSpline:
+#     """
+#     Like optimize_bspline_mv, but first extracts the 1-px skeleton of each mask
+#     and fits the spline to that skeleton (via a distance-transform on the skeleton).
+#     """
+#     # 0) choose device
+#     if device is None:
+#         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+#     # 1) skeletonize each mask: this turns your filled silhouette into a 1-px thick curve
+#     skel_masks = [skeletonize((m > 0)) for m in masks]
+
+#     # 2) build & move the multi-view fitter (it will compute DTs of those skeletons)
+#     model = BSplineFitterMVSkeleton(
+#         spline=spline,
+#         camera_parameters=camera_parameters,
+#         masks=skel_masks,        # ← pass in the skeletons here
+#         camera_poses=camera_poses,
+#         decay=decay,
+#         num_samples=num_samples
+#     ).to(device)
+
+#     # 3) Adam phase
+#     opt1 = torch.optim.Adam(model.parameters(),
+#                              lr=adam_lr,
+#                              weight_decay=weight_decay)
+#     for _ in range(adam_iters):
+#         opt1.zero_grad()
+#         loss = model()
+#         loss.backward()
+#         opt1.step()
+
+#     # 4) L-BFGS phase
+#     opt2 = torch.optim.LBFGS(
+#         model.parameters(),
+#         lr=lbfgs_lr,
+#         max_iter=lbfgs_iters,
+#         line_search_fn="strong_wolfe"
+#     )
+#     def _closure():
+#         opt2.zero_grad()
+#         l = model()
+#         l.backward()
+#         return l
+#     opt2.step(_closure)
+
+#     # 5) rebuild & return the optimized SciPy BSpline
+#     optimized_ctrl = model.ctrl_pts.detach().cpu().numpy()
+#     knots_np        = model.knots.cpu().numpy()
+#     degree          = int(model.degree)
+
+#     best_spline = BSpline(t=knots_np, c=optimized_ctrl, k=degree)
+
+#     if show:
+#         for i, (mask, camera_pose) in enumerate(zip(masks, camera_poses)):
+#             projected_spline = project_bspline(best_spline, camera_pose, camera_parameters)
+#             show_masks([mask, projected_spline], f"Projected B-Spline Cam {i}")
+
+#     return best_spline
+
+# class BSplineFitterMVSymmetric(nn.Module):
+#     def __init__(self,
+#                  spline: BSpline,
+#                  camera_parameters: tuple,
+#                  masks: list[np.ndarray],       # raw binary masks
+#                  camera_poses: list,            # ROS PoseStamped
+#                  decay: float = 0.95,
+#                  num_samples: int = 200,
+#                  reg_weight: float = 1e-4):
+#         """
+#         Fits a 3D B-spline by minimizing the symmetric Chamfer distance
+#         (projected curve ↔ skeleton) across multiple views.
+#         """
+#         super().__init__()
+#         # --- extract and register spline data ---
+#         ctrl_np  = np.asarray(spline.c, dtype=np.float32)   # (N_ctrl,3)
+#         knots_np = np.asarray(spline.t, dtype=np.float32)   # (N_ctrl+deg+1,)
+#         degree   = int(spline.k)
+
+#         self.register_buffer('init_ctrl',
+#                              torch.from_numpy(ctrl_np).clone())
+#         self.ctrl_pts    = nn.Parameter(torch.from_numpy(ctrl_np))
+#         self.register_buffer('knots',       torch.from_numpy(knots_np))
+#         self.degree       = degree
+#         self.num_samples = num_samples
+#         self.reg_weight  = reg_weight
+
+#         # intrinsics
+#         fx, fy, cx, cy = camera_parameters
+#         self.register_buffer('intrinsics',
+#                              torch.tensor([fx, fy, cx, cy],
+#                                           dtype=torch.float32))
+
+#         # prepare per-view data
+#         self.mask_points  = []       # list of tensors (M_v × 2) of skeleton (u,v) coords
+#         pose_mats         = []
+#         weights           = []
+#         V = len(masks)
+
+#         for i, (mask, ps) in enumerate(zip(masks, camera_poses)):
+#             # 1) skeletonize mask → 1-px curve
+#             skel = skeletonize(mask > 0)
+#             # 2) collect its pixel coords (row, col) → (u=col, v=row)
+#             coords = np.argwhere(skel)[:, [1, 0]].astype(np.float32)
+#             self.mask_points.append(torch.from_numpy(coords))
+
+#             # 3) camera pose
+#             M = pose_stamped_to_matrix(ps)
+#             pose_mats.append(torch.from_numpy(M).float())
+
+#             # 4) exponential weight
+#             weights.append(decay ** (V - 1 - i))
+
+#         # register the rest
+#         self.register_buffer('camera_poses', torch.stack(pose_mats))        # (V,4,4)
+#         self.register_buffer('view_weights',
+#                              torch.tensor(weights, dtype=torch.float32))    # (V,)
+
+#     def forward(self) -> torch.Tensor:
+#         # sample parameter u
+#         p = self.degree
+#         u = torch.linspace(self.knots[p],
+#                            self.knots[-p-1],
+#                            steps=self.num_samples,
+#                            device=self.ctrl_pts.device)
+
+#         # evaluate spline (map frame)
+#         pts3d = evaluate_bspline_torch(self.ctrl_pts, self.knots, p, u)  # (S,3)
+
+#         fx, fy, cx, cy = self.intrinsics
+#         V              = len(self.mask_points)
+#         loss           = 0.0
+
+#         # project & compute symmetric Chamfer per view
+#         for v in range(V):
+#             # project points into view v
+#             ones = torch.ones(self.num_samples, 1, device=pts3d.device)
+#             hom  = torch.cat([pts3d, ones], dim=1).t()           # (4,S)
+#             cam  = (self.camera_poses[v] @ hom).t()[:, :3]       # (S,3)
+
+#             x = cam[:,0] / cam[:,2]
+#             y = cam[:,1] / cam[:,2]
+#             u_px = fx * x + cx
+#             v_px = fy * y + cy
+#             curve_uv = torch.stack([u_px, v_px], dim=1)         # (S,2)
+
+#             # get skeleton pixel coords, move to same device
+#             mask_uv = self.mask_points[v].to(curve_uv.device)  # (M,2)
+
+#             # pairwise distances: (S,M)
+#             dists = torch.cdist(curve_uv, mask_uv, p=2)
+
+#             # curve→mask
+#             c2m = dists.min(dim=1).values.mean()
+#             # mask→curve
+#             m2c = dists.min(dim=0).values.mean()
+
+#             chamfer = c2m + m2c
+#             loss = loss + self.view_weights[v] * chamfer
+
+#         # + 3D regularizer
+#         reg = (self.ctrl_pts - self.init_ctrl).pow(2).mean()
+#         loss = loss + self.reg_weight * reg
+#         return loss
+
+# def optimize_bspline_mv_symmetric(
+#     spline: BSpline,
+#     camera_parameters: tuple,
+#     masks: list[np.ndarray],
+#     camera_poses: list,
+#     decay: float = 0.95,
+#     num_samples: int = 200,
+#     device: torch.device = None,
+#     adam_lr: float = 1e-2,
+#     lbfgs_lr: float = 1.0,
+#     adam_iters: int = 2000,
+#     lbfgs_iters: int = 100,
+#     weight_decay: float = 1e-4,
+#     show: bool = False
+# ) -> BSpline:
+#     """
+#     Optimize using symmetric Chamfer to the 1-px skeleton of each mask.
+#     """
+#     if device is None:
+#         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+#     model = BSplineFitterMVSymmetric(
+#         spline, camera_parameters,
+#         masks, camera_poses,
+#         decay, num_samples,
+#         reg_weight=weight_decay
+#     ).to(device)
+
+#     # Phase 1: Adam
+#     opt1 = torch.optim.Adam(model.parameters(),
+#                              lr=adam_lr,
+#                              weight_decay=0.0)
+#     for _ in range(adam_iters):
+#         opt1.zero_grad()
+#         l = model()
+#         l.backward()
+#         opt1.step()
+
+#     # Phase 2: L-BFGS
+#     opt2 = torch.optim.LBFGS(
+#         model.parameters(),
+#         lr=lbfgs_lr,
+#         max_iter=lbfgs_iters,
+#         line_search_fn="strong_wolfe"
+#     )
+#     def _closure():
+#         opt2.zero_grad()
+#         l = model()
+#         l.backward()
+#         return l
+#     opt2.step(_closure)
+
+#     # extract optimized spline
+#     ctrl = model.ctrl_pts.detach().cpu().numpy()
+#     knots= model.knots.cpu().numpy()
+#     k    = int(model.degree)
+    
+#     best_spline = BSpline(t=knots, c=ctrl, k=k)
+
+#     if show:
+#         for i, (mask, camera_pose) in enumerate(zip(masks, camera_poses)):
+#             projected_spline = project_bspline(best_spline, camera_pose, camera_parameters)
+#             show_masks([mask, projected_spline], f"Projected B-Spline Cam {i}")
+
+#     return best_spline
+
+#endregion
+
+
+
+
+
+
+
+#region B-spline fitting - distance - now working
+
+import numpy as np
+import torch
+import torch.nn as nn
+from scipy.interpolate import BSpline
+from skimage.morphology import skeletonize
+
+
+# -------------------------------------------------------------------------
+# 1) Multi-view fitter that uses direct point-to-skeleton distances
+# -------------------------------------------------------------------------
+class BSplineFitterMVDirect(nn.Module):
+    def __init__(self,
+                 spline: BSpline,
+                 camera_parameters: tuple,
+                 masks: list[np.ndarray],        # raw filled masks
+                 camera_poses: list,             # list of ROS PoseStamped
+                 decay: float = 0.01,
+                 num_samples: int = 200,
+                 reg_weight: float = 1e-4,
+                 max_skel_pts: int | None = None):
+        """
+        Minimises mean distance from projected spline points to nearest
+        skeleton pixel in each view.  One-way only (curve → skeleton).
+        """
+        super().__init__()
+        # -- spline data --
+        ctrl_np  = np.asarray(spline.c, dtype=np.float32)
+        knots_np = np.asarray(spline.t, dtype=np.float32)
+        degree   = int(spline.k)
+
+        self.register_buffer('init_ctrl', torch.from_numpy(ctrl_np).clone())
+        self.ctrl_pts = nn.Parameter(torch.from_numpy(ctrl_np))
+        self.register_buffer('knots', torch.from_numpy(knots_np))
+        self.degree      = degree
+        self.num_samples = num_samples
+        self.reg_weight  = reg_weight
+
+        # -- intrinsics --
+        fx, fy, cx, cy = camera_parameters
+        self.register_buffer('intrinsics',
+                             torch.tensor([fx, fy, cx, cy], dtype=torch.float32))
+
+        # -- per-view skeleton point clouds & poses & weights --
+        skel_pts = []
+        pose_mats = []
+        weights   = []
+        V = len(masks)
+
+        for i, (mask, ps) in enumerate(zip(masks, camera_poses)):
+            skel = skeletonize(mask > 0)               # 1-px skeleton
+            coords = np.argwhere(skel)                 # (row, col)
+            if coords.size == 0:
+                raise ValueError(f"View {i}: skeleton empty")
+            # convert to (u, v) order
+            coords = coords[:, [1, 0]].astype(np.float32)
+
+            if max_skel_pts is not None and coords.shape[0] > max_skel_pts:
+                idx = np.random.choice(coords.shape[0],
+                                       size=max_skel_pts,
+                                       replace=False)
+                coords = coords[idx]
+
+            skel_pts.append(torch.from_numpy(coords))  # (M_i,2)
+
+            M = pose_stamped_to_matrix(ps)
+            pose_mats.append(torch.from_numpy(M).float())
+
+            weights.append(decay ** (V - 1 - i))       # low→high
+
+        self.register_buffer('skel_pts', nn.utils.rnn.pad_sequence(
+            skel_pts, batch_first=True, padding_value=np.nan))      # (V, M_max, 2)
+        self.skel_sizes = [p.shape[0] for p in skel_pts]            # list of M_i
+        self.register_buffer('camera_poses', torch.stack(pose_mats))# (V,4,4)
+        self.register_buffer('view_weights',
+                             torch.tensor(weights, dtype=torch.float32))  # (V,)
+
+    # ---------------------------------------------------------------------
+    # forward
+    # ---------------------------------------------------------------------
+    def forward(self) -> torch.Tensor:
+        p = self.degree
+        u = torch.linspace(self.knots[p], self.knots[-p-1],
+                           self.num_samples, device=self.ctrl_pts.device)
+
+        pts3d = evaluate_bspline_torch(self.ctrl_pts, self.knots, p, u)     # (S,3)
+
+        fx, fy, cx, cy = self.intrinsics
+        total = 0.0
+
+        for v in range(len(self.skel_sizes)):
+            # -- project spline points into view v --
+            ones = torch.ones(self.num_samples, 1, device=pts3d.device)
+            hom  = torch.cat([pts3d, ones], dim=1).t()          # (4,S)
+            cam  = (self.camera_poses[v] @ hom).t()[:, :3]      # (S,3)
+            u_px = fx * (cam[:,0] / cam[:,2]) + cx
+            v_px = fy * (cam[:,1] / cam[:,2]) + cy
+            curve_uv = torch.stack([u_px, v_px], dim=1)         # (S,2)
+
+            # -- fetch skeleton pixel coords for this view --
+            Mv = self.skel_sizes[v]
+            skel_uv = self.skel_pts[v, :Mv, :].to(curve_uv.device)  # (Mv,2)
+
+            # -- pairwise distances (S × Mv) --
+            dists = torch.cdist(curve_uv, skel_uv, p=2)
+
+            # -- nearest skeleton pixel for each curve sample --
+            loss_v = dists.min(dim=1).values.mean()
+
+            total = total + self.view_weights[v] * loss_v
+
+        # + 3-D regulariser
+        reg = (self.ctrl_pts - self.init_ctrl).pow(2).mean()
+        return total + self.reg_weight * reg
+
+
+# -------------------------------------------------------------------------
+# 2) Top-level convenience wrapper
+# -------------------------------------------------------------------------
+def optimize_bspline_distance(
+    spline: BSpline,
+    camera_parameters: tuple,
+    masks: list[np.ndarray],
+    camera_poses: list,
+    decay: float = 0.01,
+    num_samples: int = 200,
+    device: torch.device | None = None,
+    adam_iters: int = 2000,
+    lbfgs_iters: int = 100,
+    adam_lr: float = 1e-2,
+    lbfgs_lr: float = 1.0,
+    weight_decay: float = 1e-2,
+    show: bool = False
+) -> BSpline:
+    """
+    Optimise a 3-D B-spline so its projection is close to the
+    mask skeleton in multiple views (one-way Chamfer, no distance field).
+    """
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    model = BSplineFitterMVDirect(
+        spline,
+        camera_parameters,
+        masks,
+        camera_poses,
+        decay=decay,
+        num_samples=num_samples,
+        reg_weight=weight_decay
+    ).to(device)
+
+    # ----- Adam warm-up -----
+    opt1 = torch.optim.Adam(model.parameters(), lr=adam_lr)
+    for _ in range(adam_iters):
+        opt1.zero_grad()
+        loss = model()
+        loss.backward()
+        opt1.step()
+
+    # ----- L-BFGS fine-tune -----
+    opt2 = torch.optim.LBFGS(
+        model.parameters(),
+        lr=lbfgs_lr,
+        max_iter=lbfgs_iters,
+        line_search_fn='strong_wolfe'
+    )
+    def closure():
+        opt2.zero_grad()
+        l = model()
+        l.backward()
+        return l
+    opt2.step(closure)
+
+    # ----- Extract optimised spline -----
+    new_ctrl = model.ctrl_pts.detach().cpu().numpy()
+    knots_np = model.knots.cpu().numpy()
+    k        = int(model.degree)
+    best     = BSpline(t=knots_np, c=new_ctrl, k=k)
+
+    # ----- Optional visual check -----
+    if show and 'project_bspline' in globals():
+        for i, (mask, pose) in enumerate(zip(masks, camera_poses)):
+            proj = project_bspline(best, pose, camera_parameters)
+            show_masks([mask, proj], f"spline view {i}")
+
+    return best
+
+#endregion
+
+
+
+
+
+#region B-spline fitting - separated
+# ------------------------------------------------------------------
+# Pure-Torch single-view loss   (ctrl_pts is a tensor on device)
+# ------------------------------------------------------------------
+def _single_view_loss_torch(ctrl_pts: torch.Tensor,
+                            knots_t: torch.Tensor,
+                            degree: int,
+                            mask: np.ndarray,
+                            camera_pose,
+                            camera_parameters: tuple,
+                            samples: int,
+                            device) -> torch.Tensor:
+    # skeleton pixel coords (u,v)
+    skel = skeletonize(mask > 0)
+    coords = np.argwhere(skel)[:, [1, 0]].astype(np.float32)
+    skel_uv = torch.tensor(coords, dtype=torch.float32, device=device)  # (M,2)
+
+    # sample spline (map frame)
+    u_min, u_max = knots_t[degree], knots_t[-degree-1]
+    u_vals = torch.linspace(u_min, u_max, samples, device=device)
+    pts3d  = evaluate_bspline_torch(ctrl_pts, knots_t, degree, u_vals)  # (S,3)
+
+    # project to pixels
+    fx, fy, cx, cy = camera_parameters
+    pose = torch.tensor(pose_stamped_to_matrix(camera_pose),
+                        dtype=torch.float32, device=device)
+    hom = torch.cat([pts3d, torch.ones(samples,1,device=device)], dim=1).t()
+    cam = (pose @ hom).t()[:, :3]
+    u_px = fx * (cam[:,0]/cam[:,2]) + cx
+    v_px = fy * (cam[:,1]/cam[:,2]) + cy
+    curve_uv = torch.stack([u_px, v_px], dim=1)                          # (S,2)
+
+    # mean nearest-neighbour distance
+    return torch.cdist(curve_uv, skel_uv, p=2).min(dim=1).values.mean()
+
+
+# ------------------------------------------------------------------
+# Pure-Torch multi-view score
+# ------------------------------------------------------------------
+def _score_function_torch(ctrl_pts,
+                          knots_t,
+                          degree,
+                          masks,
+                          camera_poses,
+                          camera_parameters,
+                          samples,
+                          decay,
+                          device):
+    V = len(masks)
+    total = 0.0
+    for v, (mask, pose) in enumerate(zip(masks, camera_poses)):
+        w = decay ** (V - 1 - v)
+        lv = _single_view_loss_torch(ctrl_pts, knots_t, degree,
+                                     mask, pose, camera_parameters,
+                                     samples, device)
+        total = total + w * lv
+    return total
+
+
+# ------------------------------------------------------------------
+# Optimiser wrapper (no SciPy inside the loop)
+# ------------------------------------------------------------------
+def optimize_bspline_distance(
+        spline: BSpline,
+        camera_parameters: tuple,
+        masks: list[np.ndarray],
+        camera_poses: list,
+        decay: float = 0.95,
+        num_samples: int = 200,
+        adam_iters: int = 2000,
+        lbfgs_iters: int = 100,
+        adam_lr: float = 1e-2,
+        lbfgs_lr: float = 1.0,
+        device: torch.device | None = None,
+        show=False) -> BSpline:
+
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # learnable control points (tensor on device)
+    ctrl_var = nn.Parameter(torch.tensor(spline.c,
+                                         dtype=torch.float32,
+                                         device=device))
+    knots_t  = torch.tensor(spline.t, dtype=torch.float32, device=device)
+    degree   = spline.k
+
+    # ---------- Adam ----------
+    opt1 = torch.optim.Adam([ctrl_var], lr=adam_lr)
+    for _ in range(adam_iters):
+        opt1.zero_grad()
+        loss = _score_function_torch(ctrl_var, knots_t, degree,
+                                     masks, camera_poses,
+                                     camera_parameters,
+                                     num_samples, decay, device)
+        loss.backward()
+        opt1.step()
+
+    # ---------- L-BFGS ----------
+    opt2 = torch.optim.LBFGS([ctrl_var], lr=lbfgs_lr,
+                             max_iter=lbfgs_iters,
+                             line_search_fn='strong_wolfe')
+    def closure():
+        opt2.zero_grad()
+        l = _score_function_torch(ctrl_var, knots_t, degree,
+                                  masks, camera_poses,
+                                  camera_parameters,
+                                  num_samples, decay, device)
+        l.backward()
+        return l
+    opt2.step(closure)
+
+    # ---------- build final SciPy spline ----------
+    best = BSpline(t=knots_t.cpu().numpy(),
+                   c=ctrl_var.detach().cpu().numpy(),
+                   k=degree)
+
+    # optional visual debug
+    if show and 'project_bspline' in globals():
+        for i, (mask, pose) in enumerate(zip(masks, camera_poses)):
+            proj = project_bspline(best, pose, camera_parameters)
+            show_masks([mask, proj], f"spline view {i}")
+
+    return best
+
+
+#endregion
 
 
 
