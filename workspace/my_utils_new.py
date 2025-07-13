@@ -8,7 +8,7 @@ import copy
 
 from geometry_msgs.msg import TransformStamped, Pose, PoseStamped
 from nav_msgs.msg import Path
-from tf.transformations import quaternion_from_euler, quaternion_slerp, quaternion_matrix, quaternion_from_matrix, quaternion_multiply
+from tf.transformations import quaternion_from_euler, quaternion_slerp, quaternion_matrix, quaternion_from_matrix, quaternion_multiply, translation_matrix, quaternion_matrix
 from std_msgs.msg import Header
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs import point_cloud2
@@ -37,6 +37,9 @@ import scipy.optimize as opt
 import torch
 
 from scipy.spatial.transform import Rotation
+
+from scipy.optimize import least_squares
+from scipy.ndimage import map_coordinates
 
 # TransformStamped -> PoseStamped 
 # t = camera_pose.pose.position
@@ -1375,7 +1378,10 @@ def visualize_spline_with_pc(pointcloud: o3d.geometry.PointCloud, spline: BSplin
     ls.colors = o3d.utility.Vector3dVector([[1.0, 0.0, 0.0]] * len(lines))
 
     # Display both
-    o3d.visualization.draw_geometries([pointcloud, ls])
+    if pointcloud is None:
+        o3d.visualization.draw_geometries([ls])
+    else:
+        o3d.visualization.draw_geometries([pointcloud, ls])
 
 
 # def project_bspline(ctrl_points: np.ndarray, camera_pose, camera_parameters: tuple, width: int = 640, height: int = 480, degree: int = 3) -> np.ndarray:
@@ -3865,6 +3871,454 @@ def optimize_bspline_distance(
             show_masks([mask, proj], f"spline view {i}")
 
     return best
+
+
+#endregion
+
+
+
+
+
+
+#region Optimise B-spline ChatGPT 4.1
+# import numpy as np
+# from scipy.interpolate import BSpline
+# from scipy.optimize import least_squares
+# from scipy.ndimage import distance_transform_edt
+
+# def pose_stamped_to_matrix(pose_stamped):
+#     """Convert geometry_msgs/PoseStamped to a 4x4 numpy transform matrix."""
+#     # pose_stamped.pose.position.{x,y,z}
+#     # pose_stamped.pose.orientation.{x,y,z,w}
+#     p = pose_stamped.pose.position
+#     q = pose_stamped.pose.orientation
+#     trans = translation_matrix([p.x, p.y, p.z])
+#     rot = quaternion_matrix([q.x, q.y, q.z, q.w])
+#     return np.dot(trans, rot)
+
+# def project_points(points_3d, pose_stamped, camera_parameters):
+#     """Project Nx3 world points into 2D image using given camera pose and intrinsics."""
+#     T_cam_world = np.linalg.inv(pose_stamped_to_matrix(pose_stamped))  # world->cam
+#     pts_h = np.concatenate([points_3d, np.ones((points_3d.shape[0], 1))], axis=1).T
+#     pts_cam = (T_cam_world @ pts_h).T[:, :3]
+#     fx, fy, cx, cy = camera_parameters
+#     # Only keep points in front of camera
+#     Z = pts_cam[:, 2]
+#     valid = Z > 1e-3  # at least 1mm in front
+#     u = fx * pts_cam[valid, 0] / Z[valid] + cx
+#     v = fy * pts_cam[valid, 1] / Z[valid] + cy
+#     img_pts = np.stack([u, v], axis=1)
+#     return img_pts, valid
+
+# def curvature_term(bspline, num_samples=200):
+#     """Compute total squared curvature as regularizer."""
+#     u = np.linspace(0, 1, num_samples)
+#     d2 = bspline(u, 2)  # 2nd derivative (curvature proxy)
+#     return np.sum(np.linalg.norm(d2, axis=1)**2) / num_samples
+
+# def optimize_bspline_distance(
+#         spline,
+#         camera_parameters,
+#         masks,
+#         camera_poses,
+#         decay=0.95,
+#         num_samples=200,
+#         stay_close_weight=1e-3,
+#         smoothness_weight=1e-4,
+#         max_nfev=50,
+#         verbose=True,
+#         visualize_callbacks=None
+#     ):
+#     """
+#     Optimize control points of a 3D BSpline so that its projections fit best to all skeletonized masks.
+#     """
+#     # Prepare decay weights
+#     N = len(masks)
+#     weights = np.array([decay**(N-1-i) for i in range(N)])
+#     weights /= np.sum(weights)
+
+#     # Compute distance transforms for all masks
+#     dist_transforms = [distance_transform_edt(~mask.astype(bool)) for mask in masks]
+#     print(f"dist transform: {dist_transforms[0]}")
+
+#     # Flatten control points for optimizer
+#     ctrlpts0 = spline.c.copy().reshape(-1)
+#     k = spline.k
+#     t = spline.t.copy()
+#     degree = spline.k
+#     dim = spline.c.shape[1]
+#     num_ctrl = spline.c.shape[0]
+
+#     def make_bspline(ctrlpts_flat):
+#         ctrlpts = ctrlpts_flat.reshape(num_ctrl, dim)
+#         return BSpline(t, ctrlpts, degree)
+
+#     # Objective function
+#     def objective(ctrlpts_flat):
+#         bspl = make_bspline(ctrlpts_flat)
+#         u = np.linspace(0, 1, num_samples)
+#         pts3d = bspl(u)
+#         residuals = []
+#         for i, (pose, mask, dt, w) in enumerate(zip(camera_poses, masks, dist_transforms, weights)):
+#             img_pts, valid = project_points(pts3d, pose, camera_parameters)
+#             print(f"Image points: {img_pts}")
+#             print(f"First 5 3D points: {pts3d[:5]}")
+#             print(f"First 5 projected: {img_pts[:5]}")
+#             print(f"Valid (Z>0): {np.sum(valid)}/{len(valid)}")
+#             # Filter points outside image bounds
+#             h, w_img = mask.shape
+#             inside = (img_pts[:, 0] >= 0) & (img_pts[:, 0] < w_img) & \
+#                      (img_pts[:, 1] >= 0) & (img_pts[:, 1] < h)
+#             print(f"Projected points inside image: {np.sum(inside)}")
+#             img_pts_in = img_pts[inside]
+#             # Sample distance transform at projected locations
+#             dist_vals = np.full(img_pts.shape[0], 32.0)  # Large penalty for invalid
+#             coords = img_pts_in.T
+#             dist_vals[inside] = dt[coords[1].astype(int), coords[0].astype(int)]
+#             print("DT values:", dist_vals)
+#             print("Mean sampled DT value:", np.mean(dist_vals))
+#             # Each distance counts as a residual, weighted
+#             residuals.extend(w * dist_vals)
+#         # Stay-close term (Tikhonov)
+#         residuals.extend(stay_close_weight * (ctrlpts_flat - ctrlpts0))
+#         # Curvature regularization (single value)
+#         curv = smoothness_weight * curvature_term(make_bspline(ctrlpts_flat), num_samples)
+#         residuals.append(curv)
+#         return np.array(residuals)
+
+#     # --- Visualization callback
+#     if visualize_callbacks is None:
+#         visualize_callbacks = []
+#     def visualize(iteration, ctrlpts_flat):
+#         if not verbose:
+#             return
+#         bspl = make_bspline(ctrlpts_flat)
+#         u = np.linspace(0, 1, num_samples)
+#         pts3d = bspl(u)
+#         print(f"Iteration {iteration}")
+#         if hasattr(visualize_callbacks, '__iter__'):
+#             for cb in visualize_callbacks:
+#                 cb(bspl, pts3d)
+#         else:
+#             # fallback: no-op
+#             pass
+
+#     # --- Optimize
+#     callback = (lambda xk: visualize("mid", xk)) if verbose else None
+#     # Show initial
+#     # visualize("initial", ctrlpts0)
+#     res = least_squares(
+#         objective,
+#         ctrlpts0,
+#         method="trf",
+#         max_nfev=max_nfev,
+#         verbose=2 if verbose else 0,
+#         # callback=callback
+#     )
+#     # Show final
+#     # visualize("final", res.x)
+#     # Return optimized spline
+#     return make_bspline(res.x)
+
+
+#endregion
+
+
+
+
+#region Optimize B-spline custom
+
+def show_distance_transform(dt, title="Distance Transform", colormap=cv2.COLORMAP_JET) -> None:
+    """
+    Display a single distance-transform map in a resizable window.
+    Blocks until any key is pressed.
+
+    Parameters
+    ----------
+    dt : np.ndarray
+        2D float array (H×W) containing your precomputed distance transform.
+    title : str
+        Name of the OpenCV window.
+    colormap : int
+        OpenCV colormap constant (e.g. cv2.COLORMAP_JET).
+    """
+    if not isinstance(dt, np.ndarray) or dt.ndim != 2:
+        raise ValueError("dt must be a 2D numpy array")
+
+    # Normalize float map to 0–255 uint8
+    dt_uint8 = cv2.normalize(dt, None, 0, 255, cv2.NORM_MINMAX)
+    dt_uint8 = dt_uint8.astype(np.uint8)
+
+    # Apply false-color map
+    colored = cv2.applyColorMap(dt_uint8, colormap)
+
+    # Show
+    cv2.namedWindow(title, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(title, 700, 550)
+    cv2.imshow(title, colored)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+
+def sample_bspline(spl: BSpline, n_samples: int):
+    """
+    Sample a 3-dimensional BSpline so that you get an (n_samples, 3) array back.
+
+    Parameters
+    ----------
+    spl : BSpline
+        A BSpline whose coefficient dimension is 3.
+    n_samples : int
+        Number of points to sample.
+
+    Returns
+    -------
+    u : (n_samples,) float array
+        Parameter values uniformly spaced on [t[k], t[-k-1]].
+    pts : (n_samples, 3) float array
+        Spline evaluated at each u, shape guaranteed to be (n_samples,3).
+    """
+    # domain
+    t, c, k = spl.t, spl.c, spl.k
+    u_min, u_max = t[k], t[-k-1]
+    u = np.linspace(u_min, u_max, n_samples)
+
+    # evaluate; for a 3D spline spl(u) returns shape (n_samples, 3)
+    pts = spl(u)
+
+    # sometimes spl(u) returns shape (3, n_samples), so transpose if needed
+    if pts.ndim == 2 and pts.shape[0] == 3 and pts.shape[1] == n_samples:
+        pts = pts.T
+
+    # final sanity check
+    if pts.shape != (n_samples, 3):
+        raise ValueError(f"Expected output shape ({n_samples},3), got {pts.shape}")
+
+    return pts
+
+def project_3d_points(points, camera_pose, camera_parameters):
+    """
+    Project 3D world points into pixel coordinates, given camera pose & intrinsics.
+
+    Parameters
+    ----------
+    points : (n,3) array-like of float
+        3D points in the world frame.
+    camera_pose : geometry_msgs.msg.PoseStamped
+        Pose of the camera in the world frame.
+    camera_parameters : tuple of 4 floats
+        (fx, fy, cx, cy) intrinsic parameters.
+
+    Returns
+    -------
+    projected : (n,2) ndarray of float
+        Pixel coordinates (u, v) for each 3D point.
+    """
+    # Unpack intrinsics
+    fx, fy, cx, cy = camera_parameters
+
+    # Convert input to ndarray
+    pts_w = np.asarray(points, dtype=float)  # shape (n,3)
+
+    # Extract translation
+    t = camera_pose.pose.position
+    cam_t = np.array([t.x, t.y, t.z], dtype=float)
+
+    # Extract quaternion
+    q = camera_pose.pose.orientation
+    x, y, z, w = q.x, q.y, q.z, q.w
+
+    # Build rotation matrix R_cam→world from q,
+    # then invert to get R_world→cam = R_cam→world.T
+    R = np.array([
+        [1 - 2*(y*y + z*z),     2*(x*y - z*w),     2*(x*z + y*w)],
+        [    2*(x*y + z*w), 1 - 2*(x*x + z*z),     2*(y*z - x*w)],
+        [    2*(x*z - y*w),     2*(y*z + x*w), 1 - 2*(x*x + y*y)]
+    ], dtype=float)
+    R_wc = R.T  # world → camera
+
+    # Transform points into the camera frame
+    # p_cam = R_wc @ (p_world - cam_t)
+    pts_cam = (R_wc @ (pts_w - cam_t).T).T  # still shape (n,3)
+
+    # Perspective projection (no rounding!)
+    X = pts_cam[:, 0]
+    Y = pts_cam[:, 1]
+    Z = pts_cam[:, 2]
+    if np.any(Z <= 0):
+        # points behind the camera will give nonsense—warn if you like
+        pass
+
+    u = fx * (X / Z) + cx
+    v = fy * (Y / Z) + cy
+
+    return np.stack([u, v], axis=1)
+
+def show_2d_points_with_mask(projected_points, mask, 
+                                    title="Projected Points on Mask",
+                                    point_color=(0, 0, 255),  # red in BGR
+                                    point_radius=0,
+                                    point_thickness=-1):      # filled circle
+    """
+    Overlay projected 2D points on a mask and display with OpenCV.
+
+    Parameters
+    ----------
+    projected_points : (n,2) array-like of float
+        Pixel coordinates (u, v) to draw.
+    mask : 2D ndarray
+        Binary or grayscale mask image. Values will be shown in gray.
+    title : str
+        Window title.
+    point_color : tuple of 3 ints
+        BGR color for the points.
+    point_radius : int
+        Radius of each circle in pixels.
+    point_thickness : int
+        Thickness (-1 for filled).
+    """
+    if mask.dtype != np.bool_:
+        raise ValueError("mask must be boolean")
+    
+    # Convert mask to uint8 gray if needed
+    m = mask
+    m = (mask.astype(np.uint8) * 255)
+
+    # Make BGR canvas
+    canvas = cv2.cvtColor(m, cv2.COLOR_GRAY2BGR)
+
+    # Draw each point
+    for (u, v) in projected_points:
+        # Round down to int pixel coords
+        pt = (int(np.floor(u)), int(np.floor(v)))
+        cv2.circle(canvas, pt, point_radius, point_color, point_thickness)
+
+    # Display
+    cv2.namedWindow(title, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(title, 700, 550)
+    cv2.imshow(title, canvas)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+
+def curvature_term(bspline, num_samples=200):
+    """Compute total squared curvature as regularizer."""
+    u = np.linspace(0, 1, num_samples)
+    d2 = bspline(u, 2)  # 2nd derivative (curvature proxy)
+    return np.sum(np.linalg.norm(d2, axis=1)**2) / num_samples
+
+def curvature_residuals(bspline, weight, num_curv_samples=200):
+    # sample in the same parameter domain you use for fitting
+    t0, t1 = bspline.t[bspline.k], bspline.t[-bspline.k-1]
+    u_curv = np.linspace(t0, t1, num_curv_samples)
+    d2 = bspline(u_curv, 2)                      # second derivative vectors
+    # L2 norm of each second derivative, scaled by sqrt(weight)
+    return np.sqrt(weight) * np.linalg.norm(d2, axis=1)
+
+def optimize_bspline_custom(
+        initial_spline,
+        camera_parameters,
+        masks,
+        camera_poses,
+        decay=0.95,
+        num_samples=200,
+        stay_close_weight=1e-3,
+        smoothness_weight=1e-4,
+        max_nfev=50,
+        verbose=True,
+    ):
+
+    ctrl_points_initial_flat = initial_spline.c.copy().reshape(-1)
+    degree = initial_spline.k
+    knot_vector = initial_spline.t.copy()
+    dim = initial_spline.c.shape[1]
+    num_ctrl = initial_spline.c.shape[0]
+
+    def make_bspline(ctrl_points_flat):
+        ctrl_points = ctrl_points_flat.reshape(num_ctrl, dim)
+        return BSpline(knot_vector, ctrl_points, degree)
+
+    dts = []
+    skeletons = []
+    for mask in masks:
+        print(f"Mask type: {mask.dtype}")
+        sk = skeletonize(mask > 0)
+        skeletons.append(sk)
+        dt = distance_transform_edt(~sk)
+        dts.append(dt)
+        # show_masks([sk * 255], title="Skeleton")
+        print(dt)
+        # show_distance_transform(dt)
+
+    def objective(ctrl_points_flat):
+        spline = make_bspline(ctrl_points_flat)
+        sampled_bspline_points_3d = sample_bspline(spline, num_samples)
+        # print(f"sampled_bspline_points: {sampled_bspline_points_3d.shape}: {sampled_bspline_points_3d}")
+
+        residuals = []
+        M = len(dts)
+        for i, (dt, camera_pose) in enumerate(zip(dts, camera_poses)):
+            projected_points = project_3d_points(sampled_bspline_points_3d, camera_pose, camera_parameters)
+            # print(f"projected_points: {projected_points.shape}: {projected_points}")
+            # show_2d_points_with_mask(projected_points, mask, title="Projected Points on Mask")
+
+            w = decay ** (M - 1 - i)
+
+            H, W = dt.shape
+            u = projected_points[:, 0]
+            v = projected_points[:, 1]
+            # u_i = np.round(u).astype(int)
+            # v_i = np.round(v).astype(int)
+            # u_i = np.clip(u_i, 0, W-1)
+            # v_i = np.clip(v_i, 0, H-1)
+            # u_clamped = np.clip(u, 0, W - 1)
+            # v_clamped = np.clip(v, 0, H - 1)
+
+            # distances = dt[v_i, u_i]
+            # distances = cv2.remap(
+            #     dt.astype(np.float32),          # source image
+            #     u_clamped.astype(np.float32),   # x map
+            #     v_clamped.astype(np.float32),   # y map
+            #     interpolation=cv2.INTER_LINEAR,
+            #     borderMode=cv2.BORDER_REPLICATE
+            # ).flatten()
+            coords = np.vstack((v, u))
+
+            # order=1 → bilinear; mode='nearest' keeps you in bounds
+            dists = map_coordinates(dt, coords, order=1, mode='nearest')
+            # distances = dists.reshape(-1)
+            residuals.extend(np.sqrt(w) * dists)
+            # residuals.extend(distances)
+
+            # print(f"distances: {distances.shape}: {distances}")
+            # show_2d_points_with_mask(np.column_stack((u_i, v_i)), mask, title="Projected integer points on mask")
+
+        residuals.extend(curvature_residuals(spline, smoothness_weight, num_samples))
+        # curv = smoothness_weight * curvature_term(make_bspline(ctrl_points_flat), num_samples)
+        # residuals.append(curv)
+        # print(f"residuals: {np.array(residuals).shape}: {residuals}")
+        return residuals
+    
+    initial_residuals = objective(ctrl_points_initial_flat)
+    print(f"initial_residuals: {initial_residuals}")
+
+    result = least_squares(
+        objective,
+        ctrl_points_initial_flat,
+        method="trf",
+        verbose=1
+    )
+
+    optimal_residuals = objective(result.x)
+    print(f"optimal_residuals: {optimal_residuals}")
+
+    print(f"result (optimal control points): {result}")
+    optimal_spline = make_bspline(result.x)
+    for index, (skeleton, camera_pose) in enumerate(zip(skeletons, camera_poses)):
+        sampled_bspline_points_3d = sample_bspline(optimal_spline, num_samples)
+        projected_points = project_3d_points(sampled_bspline_points_3d, camera_pose, camera_parameters)
+        show_2d_points_with_mask(projected_points, skeleton, title=f"Optimal Spline on Skeleton {index}")
+
+    return optimal_spline
+    
 
 
 #endregion

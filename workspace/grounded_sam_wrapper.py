@@ -118,7 +118,7 @@ class GroundedSamWrapper:
             masks = self.get_mask_grounded(image, prompt=prompt)
             # store the chosen mask (take first mask) for future tracking
             self._last_mask = masks[0]
-            return masks
+            return masks.astype(bool)
 
         # 3. For frame 2+, run track_sequence over all frames so far
         results = self.track_sequence(self.previous_frames, prompt=prompt)
@@ -134,7 +134,7 @@ class GroundedSamWrapper:
         # update _last_mask so that future logic could reuse it if needed
         self._last_mask = mask
         # wrap into the same shape your original returned
-        return mask[None, ...]   # shape (1, H, W)
+        return mask[None, ...].astype(bool)  # shape (1, H, W)
 
     def track_sequence(self, frames: list[np.ndarray], prompt="tube.cable."):
         """
