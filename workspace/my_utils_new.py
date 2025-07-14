@@ -2707,6 +2707,69 @@ def interactive_translate_bspline(ctrl_points: np.ndarray,
     cv2.destroyWindow(window)
 
 
+def trim_bspline(
+    spl: BSpline,
+    remove_ctrl_lo: int = 1,
+    remove_ctrl_hi: int = 1
+) -> BSpline:
+    """
+    Trim a BSpline by removing control points from each end (no refitting).
+
+    Parameters
+    ----------
+    spl : BSpline
+        Original spline to trim. Must be open/uniform with endpoint knot multiplicity k+1.
+    remove_ctrl_lo : int
+        Number of control points to remove from the start (>=0).
+    remove_ctrl_hi : int
+        Number of control points to remove from the end (>=0).
+
+    Returns
+    -------
+    BSpline
+        New spline of same degree, with fewer control points and adjusted knot vector.
+    """
+    # copy inputs
+    t = spl.t.copy()
+    c = spl.c.copy()
+    k = spl.k
+
+    n_ctrl = c.shape[0]
+    # Minimum controls = degree + 1
+    min_ctrl = k + 1
+    if (remove_ctrl_lo + remove_ctrl_hi) > (n_ctrl - min_ctrl):
+        raise ValueError(
+            f"Cannot remove {remove_ctrl_lo}+{remove_ctrl_hi} controls; must leave at least {min_ctrl}."
+        )
+
+    # New control points
+    new_c = c[remove_ctrl_lo : n_ctrl - remove_ctrl_hi]
+
+    # Knot vector: open uniform has first/last k+1 repeated knots
+    # Interior knots
+    interior = t[k+1 : -(k+1)]  # len = n_ctrl - k - 1
+    # Remove corresponding interior knots
+    new_interior = interior[remove_ctrl_lo : len(interior) - remove_ctrl_hi]
+
+    # Reassemble knot vector
+    new_t = np.concatenate([
+        t[: k+1],       # first k+1 knots
+        new_interior,
+        t[-(k+1) :],    # last k+1 knots
+    ])
+
+    # Validate lengths: len(new_t) should equal len(new_c) + k + 1
+    if new_t.size != new_c.shape[0] + k + 1:
+        raise ValueError(
+            f"Inconsistent sizes: knots {new_t.size}, controls {new_c.shape[0]}, degree {k}."
+        )
+
+    return BSpline(new_t, new_c, k)
+
+
+
+
+
 
 
 
@@ -4059,13 +4122,13 @@ def show_distance_transform(dt, title="Distance Transform", colormap=cv2.COLORMA
     cv2.waitKey(0)
     cv2.destroyAllWindows()
 
-def sample_bspline(spl: BSpline, n_samples: int):
+def sample_bspline(spline: BSpline, n_samples: int):
     """
     Sample a 3-dimensional BSpline so that you get an (n_samples, 3) array back.
 
     Parameters
     ----------
-    spl : BSpline
+    spline : BSpline
         A BSpline whose coefficient dimension is 3.
     n_samples : int
         Number of points to sample.
@@ -4078,14 +4141,14 @@ def sample_bspline(spl: BSpline, n_samples: int):
         Spline evaluated at each u, shape guaranteed to be (n_samples,3).
     """
     # domain
-    t, c, k = spl.t, spl.c, spl.k
+    t, c, k = spline.t, spline.c, spline.k
     u_min, u_max = t[k], t[-k-1]
     u = np.linspace(u_min, u_max, n_samples)
 
-    # evaluate; for a 3D spline spl(u) returns shape (n_samples, 3)
-    pts = spl(u)
+    # evaluate; for a 3D spline spline(u) returns shape (n_samples, 3)
+    pts = spline(u)
 
-    # sometimes spl(u) returns shape (3, n_samples), so transpose if needed
+    # sometimes spline(u) returns shape (3, n_samples), so transpose if needed
     if pts.ndim == 2 and pts.shape[0] == 3 and pts.shape[1] == n_samples:
         pts = pts.T
 
@@ -4239,13 +4302,13 @@ def optimize_bspline_custom(
     dts = []
     skeletons = []
     for mask in masks:
-        print(f"Mask type: {mask.dtype}")
+        # print(f"Mask type: {mask.dtype}")
         sk = skeletonize(mask > 0)
         skeletons.append(sk)
         dt = distance_transform_edt(~sk)
         dts.append(dt)
         # show_masks([sk * 255], title="Skeleton")
-        print(dt)
+        # print(dt)
         # show_distance_transform(dt)
 
     def objective(ctrl_points_flat):
@@ -4303,8 +4366,8 @@ def optimize_bspline_custom(
     result = least_squares(
         objective,
         ctrl_points_initial_flat,
-        method="trf",
-        verbose=1
+        method="trf", # "lm",
+        verbose=2
     )
 
     optimal_residuals = objective(result.x)

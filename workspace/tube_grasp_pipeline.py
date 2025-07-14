@@ -63,7 +63,7 @@ def tube_grasp_pipeline(debug: bool = False):
     camera_pose5 = convert_trans_and_rot_to_stamped_pose([1.014, 0.493, 0.672], [0.960, 0.001, 0.282, -0.000])
     camera_pose6 = convert_trans_and_rot_to_stamped_pose([1.025, 0.493, 0.643], [0.983, 0.001, 0.184, -0.000])
     all_camera_poses = [camera_pose0, camera_pose1, camera_pose2, camera_pose3, camera_pose4, camera_pose5, camera_pose6]
-    offline_image_name = "cable"
+    offline_image_name = "tube"
 
     camera_parameters = (149.09148, 187.64966, 334.87706, 268.23742)
     SAM_prompt = "wire.cable.tube."
@@ -308,13 +308,18 @@ def tube_grasp_pipeline(debug: bool = False):
     #     show_masks([mask, projected_spline], f"Projected B-Spline Cam {i}")
     #endregion
 
+    b_splines[-1] = trim_bspline(b_splines[-1], remove_ctrl_lo=2, remove_ctrl_hi=2)
+    visualize_spline_with_pc(pointcloud=best_pc_world, spline=b_splines[-1], num_samples=200, title="Optimized Spline with PC")
+    ctrl_points.append(b_splines[-1].c)
+    print(f"trimmed ctrl_points {ctrl_points[-1].shape}: {ctrl_points[-1]}")
+
     #region Optimize B-spline custom
     b_splines.append(optimize_bspline_custom(
         initial_spline=b_splines[-1],
         camera_parameters=camera_parameters,
         masks=masks,
         camera_poses=camera_poses,
-        decay=0.5,
+        decay=0.95,
         num_samples=20,
         stay_close_weight=1e-3,
         smoothness_weight=1e0,
@@ -610,13 +615,14 @@ def tube_grasp_pipeline(debug: bool = False):
         #     show_masks([mask, projected_spline], f"Projected B-Spline Cam {i}")
         #endregion
 
+
         #region Optimize B-spline custom
         b_splines.append(optimize_bspline_custom(
             initial_spline=b_splines[-1],
             camera_parameters=camera_parameters,
             masks=masks,
             camera_poses=camera_poses,
-            decay=0.5,
+            decay=0.95,
             num_samples=20,
             stay_close_weight=1e-3,
             smoothness_weight=1e0,
