@@ -55,15 +55,20 @@ class ImageProcessing:
 
 
 def tube_grasp_pipeline(debug: bool = False):
-    camera_pose0 = convert_trans_and_rot_to_stamped_pose([0.767, 0.495, 0.712], [0.707, 0.001, 0.707, -0.001])
-    camera_pose1 = convert_trans_and_rot_to_stamped_pose([0.839, 0.493, 0.727], [0.774, 0.001, 0.633, -0.001])
-    camera_pose2 = convert_trans_and_rot_to_stamped_pose([0.903, 0.493, 0.728], [0.834, 0.001, 0.552, -0.000])
-    camera_pose3 = convert_trans_and_rot_to_stamped_pose([0.953, 0.493, 0.717], [0.885, 0.000, 0.466, -0.000])
-    camera_pose4 = convert_trans_and_rot_to_stamped_pose([0.991, 0.492, 0.698], [0.927, 0.001, 0.376, -0.000])
-    camera_pose5 = convert_trans_and_rot_to_stamped_pose([1.014, 0.493, 0.672], [0.960, 0.001, 0.282, -0.000])
-    camera_pose6 = convert_trans_and_rot_to_stamped_pose([1.025, 0.493, 0.643], [0.983, 0.001, 0.184, -0.000])
-    all_camera_poses = [camera_pose0, camera_pose1, camera_pose2, camera_pose3, camera_pose4, camera_pose5, camera_pose6]
-    offline_image_name = "tube"
+    # camera_pose0 = convert_trans_and_rot_to_stamped_pose([0.767, 0.495, 0.712], [0.707, 0.001, 0.707, -0.001])
+    # camera_pose1 = convert_trans_and_rot_to_stamped_pose([0.839, 0.493, 0.727], [0.774, 0.001, 0.633, -0.001])
+    # camera_pose2 = convert_trans_and_rot_to_stamped_pose([0.903, 0.493, 0.728], [0.834, 0.001, 0.552, -0.000])
+    # camera_pose3 = convert_trans_and_rot_to_stamped_pose([0.953, 0.493, 0.717], [0.885, 0.000, 0.466, -0.000])
+    # camera_pose4 = convert_trans_and_rot_to_stamped_pose([0.991, 0.492, 0.698], [0.927, 0.001, 0.376, -0.000])
+    # camera_pose5 = convert_trans_and_rot_to_stamped_pose([1.014, 0.493, 0.672], [0.960, 0.001, 0.282, -0.000])
+    # camera_pose6 = convert_trans_and_rot_to_stamped_pose([1.025, 0.493, 0.643], [0.983, 0.001, 0.184, -0.000])
+    # all_camera_poses = [camera_pose0, camera_pose1, camera_pose2, camera_pose3, camera_pose4, camera_pose5, camera_pose6]
+    # offline_image_name = "tube"
+
+    optimizer_decay=1
+    optimizer_num_samples=40
+    optimizer_smoothness_weight=1e-1 # 1e-2
+    optimizer_verbose=2
 
     camera_parameters = (149.09148, 187.64966, 334.87706, 268.23742)
     SAM_prompt = "wire.cable.tube."
@@ -77,7 +82,7 @@ def tube_grasp_pipeline(debug: bool = False):
     save_image_folder = f'/root/workspace/images/pipeline_saved/{timestamp}'
 
     image_processing = ImageProcessing()
-    # ros_handler = ROSHandler()
+    ros_handler = ROSHandler()
     image_subscriber = ImageSubscriber('/hsrb/hand_camera/image_rect_color')
     pose_publisher = PosePublisher("/next_pose")
     path_publisher = PathPublisher("/my_path")
@@ -94,13 +99,13 @@ def tube_grasp_pipeline(debug: bool = False):
     b_splines = []
     ctrl_points = []
     # Pipeline
-    # images.append(image_subscriber.get_current_image(show=False)) # Take image
-    images.append(cv2.imread(f'/root/workspace/images/moves/{offline_image_name}{0}.jpg')) # <- offline
-    # camera_poses.append(ros_handler.get_current_pose(hand_camera_frame, map_frame)) # Get current camera pose
-    camera_poses.append(camera_pose0)
-    # palm_poses.append(ros_handler.get_current_pose(hand_palm_frame, map_frame)) # Get current hand palm pose
+    images.append(image_subscriber.get_current_image(show=False)) # Take image
+    # images.append(cv2.imread(f'/root/workspace/images/moves/{offline_image_name}{0}.jpg')) # <- offline
+    camera_poses.append(ros_handler.get_current_pose(hand_camera_frame, map_frame)) # Get current camera pose
+    # camera_poses.append(camera_pose0)
+    palm_poses.append(ros_handler.get_current_pose(hand_palm_frame, map_frame)) # Get current hand palm pose
     # Process image
-    masks.append(image_processing.get_mask(image=images[-1], prompt=SAM_prompt, show=False))
+    masks.append(image_processing.get_mask(image=images[-1], prompt=SAM_prompt, show=True))
     depths_unmasked.append(image_processing.get_depth_unmasked(image=images[-1], show=False))
     depths.append(image_processing.get_depth_masked(image=images[-1], mask=masks[-1], show=False))
 
@@ -109,8 +114,8 @@ def tube_grasp_pipeline(debug: bool = False):
     # save_masks(data[-1][1], save_image_folder, "Mask")
 
 
-    # usr_input = input("Mask Correct? [y]/n: ")
-    # if usr_input == "n": exit()
+    usr_input = input("Mask Correct? [y]/n: ")
+    if usr_input == "n": exit()
     # Move arm a predetermined length
     next_pose = create_pose(z=0.1, pitch=-0.4, reference_frame=hand_palm_frame)
     pose_publisher.publish(next_pose)
@@ -123,11 +128,11 @@ def tube_grasp_pipeline(debug: bool = False):
     # usr_input = input("Press Enter when image is correct")
     # if usr_input == "c": exit()
     #region -------------------- Depth Anything --------------------
-    # images.append(image_subscriber.get_current_image(show=False)) # Take image
-    images.append(cv2.imread(f'/root/workspace/images/moves/{offline_image_name}{1}.jpg')) # <- offline
-    # camera_poses.append(ros_handler.get_current_pose(hand_camera_frame, map_frame)) # Get current camera pose
-    camera_poses.append(camera_pose1)
-    # palm_poses.append(ros_handler.get_current_pose(hand_palm_frame, map_frame)) # Get current hand palm pose
+    images.append(image_subscriber.get_current_image(show=False)) # Take image
+    # images.append(cv2.imread(f'/root/workspace/images/moves/{offline_image_name}{1}.jpg')) # <- offline
+    camera_poses.append(ros_handler.get_current_pose(hand_camera_frame, map_frame)) # Get current camera pose
+    # camera_poses.append(camera_pose1)
+    palm_poses.append(ros_handler.get_current_pose(hand_palm_frame, map_frame)) # Get current hand palm pose
     # Process image
     masks.append(image_processing.get_mask(image=images[-1], prompt=SAM_prompt, show=False))
     depths_unmasked.append(image_processing.get_depth_unmasked(image=images[-1], show=False))
@@ -151,11 +156,10 @@ def tube_grasp_pipeline(debug: bool = False):
     show_pointclouds([centerline_pts_world])
     degree = 3
     # Fit B-spline
-    b_splines.append(fit_bspline_scipy(centerline_pts_world, degree=degree, smooth=1e-3, nest=20))
+    b_splines.append(fit_bspline_scipy(centerline_pts_world, degree=degree, smooth=1e-3, nest=20, num_ctrl=14))
     
     ctrl_points.append(b_splines[-1].c)
-    print(f"Number of controlpoints: {ctrl_points[-1].shape}")
-    print(f"ctrl_points: {ctrl_points[-1]}")
+    print(f"Initial ctrl_points {ctrl_points[-1].shape}: {ctrl_points[-1]}")
 
     # interactive_bspline_editor(ctrl_points[-1], masks[-1], camera_poses[-1], camera_parameters, degree)
 
@@ -309,9 +313,10 @@ def tube_grasp_pipeline(debug: bool = False):
     #endregion
 
     b_splines[-1] = trim_bspline(b_splines[-1], remove_ctrl_lo=2, remove_ctrl_hi=2)
+    # b_splines[-1] = trim_bspline_equal(b_splines[-1], keep_ctrl=8)
     visualize_spline_with_pc(pointcloud=best_pc_world, spline=b_splines[-1], num_samples=200, title="Optimized Spline with PC")
     ctrl_points.append(b_splines[-1].c)
-    print(f"trimmed ctrl_points {ctrl_points[-1].shape}: {ctrl_points[-1]}")
+    print(f"Trimmed ctrl_points {ctrl_points[-1].shape}: {ctrl_points[-1]}")
 
     #region Optimize B-spline custom
     b_splines.append(optimize_bspline_custom(
@@ -319,13 +324,13 @@ def tube_grasp_pipeline(debug: bool = False):
         camera_parameters=camera_parameters,
         masks=masks,
         camera_poses=camera_poses,
-        decay=0.95,
-        num_samples=20,
-        stay_close_weight=1e-3,
-        smoothness_weight=1e0,
-        max_nfev=30,
-        verbose=True
+        decay=optimizer_decay,
+        num_samples=optimizer_num_samples,
+        smoothness_weight=optimizer_smoothness_weight,
+        verbose=optimizer_verbose
     ))
+    spline_pc = convert_bspline_to_pointcloud(b_splines[-1])
+    pointcloud_publisher.publish(spline_pc)
     visualize_spline_with_pc(pointcloud=best_pc_world, spline=b_splines[-1], num_samples=200, title="Optimized Spline with PC")
 
     #endregion
@@ -338,40 +343,42 @@ def tube_grasp_pipeline(debug: bool = False):
 
 
 
+    best_point, best_idx, best_score, best_u = get_best_matching_point(spline=b_splines[-1], masks=masks, camera_poses=camera_poses, camera_parameters=camera_parameters)
+    
 
 
-
-
-    # # Get highest Point in pointcloud
+    # Get highest Point in pointcloud
     # target_point, target_angle = get_highest_point_and_angle_spline(b_splines[-1])
-    # print(f"Target Point: {target_point}, Target Angle: {target_angle}")
-    # tarrget_point_offset = target_point.copy()
-    # tarrget_point_offset[2] += 0.098 + 0.010 # - 0.020 # Make target Pose hover above actual target pose - tested offset
-    # grasp_point_publisher.publish(target_point)
-    # # Convert to Pose
-    # base_footprint = ros_handler.get_current_pose("base_footprint", map_frame)
-    # target_poses.append(get_desired_pose(tarrget_point_offset, base_footprint))
-    # # Calculate Path
-    # target_path = interpolate_poses(palm_poses[-1], target_poses[-1], num_steps=4)
-    # # Move arm a step
-    # path_publisher.publish(target_path)
-    # pose_publisher.publish(target_path[1])
-    # # input("Press Enter when moves are finished…")
+    # target_point, target_angle = get_midpoint_and_angle_spline(b_splines[-1])
+    target_point, target_angle = get_point_and_angle_spline(spline=b_splines[-1], u=best_u)
 
-    index_loop = 1
+    print(f"Target Point: {target_point}, Target Angle: {target_angle}")
+    tarrget_point_offset = target_point.copy()
+    tarrget_point_offset[2] += 0.098 + 0.010 # - 0.020 # Make target Pose hover above actual target pose - tested offset
+    grasp_point_publisher.publish(target_point)
+    # Convert to Pose
+    base_footprint = ros_handler.get_current_pose("base_footprint", map_frame)
+    target_poses.append(get_desired_pose(tarrget_point_offset, base_footprint))
+    # Calculate Path
+    target_path = interpolate_poses(palm_poses[-1], target_poses[-1], num_steps=5)
+    # Move arm a step
+    path_publisher.publish(target_path)
+    pose_publisher.publish(target_path[1])
+    # input("Press Enter when moves are finished…")
+
+    # index_loop = 1
     while not rospy.is_shutdown():
-        index_loop += 1
+        # index_loop += 1
         rospy.sleep(5)
 
         # usr_input = input("Press Enter when image is correct")
         # if usr_input == "c": exit()
 
-        # images.append(image_subscriber.get_current_image(show=False)) # Take image
-        images.append(cv2.imread(f'/root/workspace/images/moves/{offline_image_name}{index_loop}.jpg')) # <- offline
-        # camera_poses.append(ros_handler.get_current_pose(hand_camera_frame, map_frame)) # Get current camera pose
-        camera_poses.append(all_camera_poses[index_loop]) # <- offline
-        # camera_poses.append(ros_handler.get_current_pose(hand_camera_frame, map_frame)) # Get current camera pose
-        # palm_poses.append(ros_handler.get_current_pose(hand_palm_frame, map_frame)) # Get current hand palm pose
+        images.append(image_subscriber.get_current_image(show=False)) # Take image
+        # images.append(cv2.imread(f'/root/workspace/images/moves/{offline_image_name}{index_loop}.jpg')) # <- offline
+        camera_poses.append(ros_handler.get_current_pose(hand_camera_frame, map_frame)) # Get current camera pose
+        # camera_poses.append(all_camera_poses[index_loop]) # <- offline
+        palm_poses.append(ros_handler.get_current_pose(hand_palm_frame, map_frame)) # Get current hand palm pose
         # Process image
         masks.append(image_processing.get_mask(image=images[-1], prompt=SAM_prompt, show=False))
 
@@ -622,17 +629,15 @@ def tube_grasp_pipeline(debug: bool = False):
             camera_parameters=camera_parameters,
             masks=masks,
             camera_poses=camera_poses,
-            decay=0.95,
-            num_samples=20,
-            stay_close_weight=1e-3,
-            smoothness_weight=1e0,
-            max_nfev=30,
-            verbose=True
+            decay=optimizer_decay,
+            num_samples=optimizer_num_samples,
+            smoothness_weight=optimizer_smoothness_weight,
+            verbose=optimizer_verbose
         ))
         visualize_spline_with_pc(pointcloud=best_pc_world, spline=b_splines[-1], num_samples=200, title="Optimized Spline with PC")
-        usr_input = input("Continue? ([y]/n)")
-        if usr_input == "n":
-            break
+        # usr_input = input("Continue? ([y]/n)")
+        # if usr_input == "n":
+        #     break
         #endregion
 
 
@@ -648,32 +653,35 @@ def tube_grasp_pipeline(debug: bool = False):
         # visualize_spline_with_pc(best_pc_world, b_splines[-1])
 
         # Movement
-        # # Get highest Point in pointcloud
+        best_point, best_idx, best_score, best_u = get_best_matching_point(spline=b_splines[-1], masks=masks, camera_poses=camera_poses, camera_parameters=camera_parameters)
+        # Get highest Point in pointcloud
         # target_point, target_angle = get_highest_point_and_angle_spline(b_splines[-1])
-        # tarrget_point_offset = target_point.copy()
-        # tarrget_point_offset[2] += 0.098 + 0.010 - 0.03 # Make target Pose hover above actual target pose - tested offset
-        # # Convert to Pose
-        # base_footprint = ros_handler.get_current_pose("base_footprint", map_frame)
-        # target_poses.append(get_desired_pose(tarrget_point_offset, base_footprint))
-        # # Calculate Path
-        # target_path = interpolate_poses(palm_poses[-1], target_poses[-1], num_steps=4)
-        # grasp_point_publisher.publish(target_point)
-        # # Move arm a step
-        # path_publisher.publish(target_path)
-        # usr_input = input("Go to final Pose? y/[n] or enter pose index: ").strip().lower()
-        # if usr_input == "c": exit()
-        # if usr_input == "y":
-        #     rotated_target_pose = rotate_pose_around_z(target_poses[-1], target_angle)
-        #     pose_publisher.publish(rotated_target_pose)
-        #     break
-        # else:
-        #     try:
-        #         idx = int(usr_input)
-        #         pose_publisher.publish(target_path[idx])
-        #     except ValueError:
-        #         pose_publisher.publish(target_path[1])
-        # # input("Press Enter when moves are finished…")
-        # rospy.sleep(5)
+        # target_point, target_angle = get_midpoint_and_angle_spline(b_splines[-1])
+        target_point, target_angle = get_point_and_angle_spline(spline=b_splines[-1], u=best_u)
+        tarrget_point_offset = target_point.copy()
+        tarrget_point_offset[2] += 0.098 + 0.010 - 0.03 # Make target Pose hover above actual target pose - tested offset
+        # Convert to Pose
+        base_footprint = ros_handler.get_current_pose("base_footprint", map_frame)
+        target_poses.append(get_desired_pose(tarrget_point_offset, base_footprint))
+        # Calculate Path
+        target_path = interpolate_poses(palm_poses[-1], target_poses[-1], num_steps=5)
+        grasp_point_publisher.publish(target_point)
+        # Move arm a step
+        path_publisher.publish(target_path)
+        usr_input = input("Go to final Pose? y/[n] or enter pose index: ").strip().lower()
+        if usr_input == "c": exit()
+        if usr_input == "y":
+            rotated_target_pose = rotate_pose_around_z(target_poses[-1], target_angle)
+            pose_publisher.publish(rotated_target_pose)
+            break
+        else:
+            try:
+                idx = int(usr_input)
+                pose_publisher.publish(target_path[idx])
+            except ValueError:
+                pose_publisher.publish(target_path[1])
+        # input("Press Enter when moves are finished…")
+        rospy.sleep(5)
 
     #endregion -------------------- Spline --------------------
 

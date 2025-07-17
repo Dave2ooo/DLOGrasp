@@ -1,3 +1,4 @@
+#!/usr/bin/env python3.11
 import os
 import cv2, numpy as np
 from numpy.typing import NDArray
@@ -40,6 +41,8 @@ from scipy.spatial.transform import Rotation
 
 from scipy.optimize import least_squares
 from scipy.ndimage import map_coordinates
+
+import warnings
 
 # TransformStamped -> PoseStamped 
 # t = camera_pose.pose.position
@@ -1206,37 +1209,77 @@ def extract_centerline_from_mask_individual(depth_image: np.ndarray, mask: np.nd
     
 #     return ctrl_pts
 
-def fit_bspline_scipy(centerline_pts: np.ndarray,
-                      degree: int = 3,
-                      smooth: float = None,
-                      nest: int = None) -> np.ndarray:
+
+# def fit_bspline_scipy(centerline_pts: np.ndarray,
+#                       degree: int = 3,
+#                       smooth: float = None,
+#                       nest: int = None) -> np.ndarray:
+#     """
+#     Fit a B-spline to a 3D centerline using SciPy's modern make_splprep.
+
+#     Args:
+#         centerline_pts: (N×3) array of ordered 3D points along the centerline.
+#         degree: Spline degree (k). Must be <= 5.
+#         smooth: Smoothing factor (s). If None, defaults to s=0 (interpolating spline).
+#         nest: Maximum number of knots. If None, SciPy chooses based on data size.
+
+#     Returns:
+#         ctrl_pts: (M×3) array of the spline's control points.
+#     """
+#     # Split out each coordinate into a separate 1D array
+#     coords = [centerline_pts[:, i] for i in range(centerline_pts.shape[1])]
+
+#     # make_splprep returns (BSpline instance, parameter values u)
+#     s = 0.0 if smooth is None else smooth
+#     spline: np.ndarray  # BSpline
+#     u: np.ndarray
+#     spline, u = make_splprep(coords, k=degree, s=s, nest=nest)  # :contentReference[oaicite:0]{index=0}
+
+#     # The BSpline.c attribute holds the coefficient array;
+#     # for vector-valued data this is an (n_coeff × ndim) array.
+#     ctrl_pts = np.asarray(spline.c)
+
+#     # return ctrl_pts
+#     return spline
+
+def fit_bspline_scipy(
+        centerline_pts: np.ndarray,
+        degree: int = 3,
+        smooth: float | None = None,
+        nest: int | None = None,
+        num_ctrl: int | None = None,
+        use_make: bool = True  # stay on modern API
+    ) -> BSpline:
     """
-    Fit a B-spline to a 3D centerline using SciPy's modern make_splprep.
-
-    Args:
-        centerline_pts: (N×3) array of ordered 3D points along the centerline.
-        degree: Spline degree (k). Must be <= 5.
-        smooth: Smoothing factor (s). If None, defaults to s=0 (interpolating spline).
-        nest: Maximum number of knots. If None, SciPy chooses based on data size.
-
-    Returns:
-        ctrl_pts: (M×3) array of the spline's control points.
+    Fit a 3-D B-spline; if `num_ctrl` is set, force that many control points.
+    Returns the BSpline object (coefficients in .c).
     """
-    # Split out each coordinate into a separate 1D array
-    coords = [centerline_pts[:, i] for i in range(centerline_pts.shape[1])]
+    # chord-length parameterisation
+    u = np.r_[0, np.cumsum(np.linalg.norm(np.diff(centerline_pts, axis=0), axis=1))]
+    u /= u[-1]
 
-    # make_splprep returns (BSpline instance, parameter values u)
-    s = 0.0 if smooth is None else smooth
-    spline: np.ndarray  # BSpline
-    u: np.ndarray
-    spline, u = make_splprep(coords, k=degree, s=s, nest=nest)  # :contentReference[oaicite:0]{index=0}
+    if num_ctrl is not None:
+        k = degree
+        # how many internal knots do we need?
+        n_internal = num_ctrl - (k + 1)  # because of 2*(k+1) clamped end knots
+        if n_internal < 0:
+            raise ValueError("num_ctrl must exceed degree+1")
+        # uniform internal knot vector
+        t_internal = np.linspace(u[k+1], u[-k-2], n_internal, endpoint=True)
+        # build full knot vector (clamped)
+        t_full = np.r_[np.repeat(u[0], k + 1),
+                    t_internal,
+                    np.repeat(u[-1], k + 1)]
+        # small positive s lets FITPACK adjust within fixed knots
+        s = 0.0 if smooth is None else smooth
+        spline, _ = make_splprep(centerline_pts.T, k=k, s=s, t=t_full, u=u)
+    else:
+        s = 0.0 if smooth is None else smooth
+        spline, _ = make_splprep(centerline_pts.T, k=degree, s=s, nest=nest)
 
-    # The BSpline.c attribute holds the coefficient array;
-    # for vector-valued data this is an (n_coeff × ndim) array.
-    ctrl_pts = np.asarray(spline.c)
+    return spline        # control points are spline.c.shape == (num_ctrl, 3)
 
-    # return ctrl_pts
-    return spline
+
 
 # def convert_bspline_to_pointcloud(ctrl_points: np.ndarray, samples: int = 150, degree: int = 3) -> o3d.geometry.PointCloud:
 #     """
@@ -1669,10 +1712,121 @@ def get_highest_point_and_angle_spline(spline: BSpline,
 
     # --- 5) angle via atan2
     angle = np.arctan2(dy, dx)
+    angle += np.pi/2
+    # normalize to [-pi/2, pi/2]
+    while angle > np.pi/2:
+        angle -= np.pi
+    while angle < -np.pi/2:
+        angle += np.pi
+
     # if you really need to clamp to [-pi/2, pi/2], you can do:
     # angle = np.clip(angle, -np.pi/2, np.pi/2)
 
     return highest_pt, angle
+
+def get_midpoint_and_angle_spline(spline: BSpline):
+    """
+    Evaluates the given 3D BSpline at the midpoint of its parameter domain,
+    and computes the tangent angle at that point (projection onto the XY-plane)
+    via arctan2(dy, dx). Raises if something unexpected shows up.
+    """
+    # --- 1) domain of definition
+    k = spline.k
+    t = spline.t
+    u_start = t[k]
+    u_end   = t[-(k+1)]
+    if u_end <= u_start:
+        raise ValueError(f"Invalid parameter range: [{u_start}, {u_end}]")
+
+    # --- 2) midpoint parameter
+    u_mid = (u_start + u_end) / 2.0
+
+    # --- 3) evaluate spline at midpoint
+    pt = spline(u_mid)
+    pt = np.atleast_1d(pt)
+    if pt.ndim != 1:
+        raise ValueError(f"BSpline({u_mid}) returned shape {pt.shape}; expected 1D array")
+    D = pt.shape[0]
+    if D < 3:
+        raise ValueError(f"Spline output has dimension {D}<3; need 3D point.")
+
+    # --- 4) derivative & tangent
+    dspline = spline.derivative(nu=1)
+    d_pt = dspline(u_mid)
+    d_pt = np.atleast_1d(d_pt)
+    if d_pt.ndim != 1 or d_pt.shape[0] < 2:
+        raise ValueError(f"Derivative at {u_mid} returned shape {d_pt.shape}; expected >=2D.")
+    dx, dy = d_pt[0], d_pt[1]
+
+    # --- 5) angle via atan2
+    angle = np.arctan2(dy, dx)
+    # angle += np.pi/2
+    # # normalize to [-pi/2, pi/2]
+    # while angle > np.pi/2:
+    #     angle -= np.pi
+    # while angle < -np.pi/2:
+    #     angle += np.pi
+    return pt, angle
+
+def get_point_and_angle_spline(
+    spline: BSpline,
+    u: float = None,
+    *,
+    return_degrees: bool = False
+):
+    """
+    Evaluate the point on the BSpline and its tangent angle (in the XY-plane) at parameter u.
+    
+    Parameters
+    ----------
+    spline : BSpline
+        A SciPy BSpline object with c.shape[1] >= 2 for XY coordinates.
+    u : float
+        Parameter value, must satisfy t[k] <= u <= t[-k-1].
+    return_degrees : bool, optional
+        If True, return the angle in degrees; otherwise in radians.
+    
+    Returns
+    -------
+    point : ndarray
+        Coordinates of the spline at u (shape (dim,)).
+    angle : float
+        Tangent angle at u in radians (or degrees if requested).
+    """
+    if u is None:
+        t = spline.t
+        k = spline.k
+        u_start = t[k]
+        u_end   = t[-(k+1)]
+        if u_end <= u_start:
+            raise ValueError(f"Invalid parameter range: [{u_start}, {u_end}]")
+
+        # --- 2) midpoint parameter
+        u = (u_start + u_end) / 2.0   
+
+    # 1. Evaluate position and first derivative
+    point = spline(u)
+    deriv = spline(u, nu=1)
+    
+    # 2. Extract XY components
+    dx, dy = deriv[0], deriv[1]
+    
+    # 3. Compute angle
+    angle_rad = np.arctan2(dy, dx)
+
+    angle_rad += np.pi/2
+    # normalize to [-pi/2, pi/2]
+    while angle_rad > np.pi/2:
+        angle_rad -= np.pi
+    while angle_rad < -np.pi/2:
+        angle_rad += np.pi
+
+    if return_degrees:
+        angle = np.degrees(angle_rad)
+    else:
+        angle = angle_rad
+    
+    return point, angle
 
 
 def get_desired_pose(position, base_footprint, frame: str = "map") -> PoseStamped:
@@ -2371,8 +2525,8 @@ def estimate_scale_shift(depth1, mask2, camera_pose1, camera_pose2, camera_param
         bounds=bounds,                     # same ±0.5 bounds per coord
         options={
             'maxiter': 1e3,
-            'ftol': 1e-8,
-            'eps': 0.0005,
+            'ftol': 1e-10, # 1e-8,
+            'eps': 1e-6, # 0.0005,
             'disp': True
     }
     )
@@ -2766,6 +2920,76 @@ def trim_bspline(
 
     return BSpline(new_t, new_c, k)
 
+def trim_bspline_equal(
+    spl: BSpline,
+    keep_ctrl: int
+) -> BSpline:
+    """
+    Trim an open/uniform B-spline so that exactly `keep_ctrl` control-points remain,
+    removing floor((n_ctrl-keep_ctrl)/2) from the start and ceil((n_ctrl-keep_ctrl)/2) from the end.
+    If keep_ctrl > current control count, emits a warning and returns the original spline.
+
+    Parameters
+    ----------
+    spl : BSpline
+        Original spline. Must be open/uniform with endpoint knot multiplicity k+1.
+    keep_ctrl : int
+        Desired total number of control-points after trimming.
+        Must be >= (degree+1).
+
+    Returns
+    -------
+    BSpline
+        New spline of same degree, with fewer control points and adjusted knot vector,
+        or the original spline if keep_ctrl > original control count.
+    """
+    # copy inputs
+    t = spl.t.copy()
+    c = spl.c.copy()
+    k = spl.k
+
+    n_ctrl = c.shape[0]
+    min_ctrl = k + 1
+
+    if keep_ctrl < min_ctrl:
+        raise ValueError(
+            f"Cannot keep only {keep_ctrl} controls; degree {k} requires at least {min_ctrl}."
+        )
+
+    if keep_ctrl > n_ctrl:
+        warnings.warn(
+            f"keep_ctrl={keep_ctrl} exceeds current control-point count ({n_ctrl}); "
+            "returning original spline.",
+            UserWarning
+        )
+        return spl
+
+    total_remove = n_ctrl - keep_ctrl
+    # how many to drop from each side:
+    remove_lo = total_remove // 2
+    remove_hi = total_remove - remove_lo
+
+    # Trim control points
+    new_c = c[remove_lo : n_ctrl - remove_hi]
+
+    # Trim interior knots
+    interior = t[k+1 : -(k+1)]
+    new_interior = interior[remove_lo : len(interior) - remove_hi]
+
+    # Reassemble full knot vector
+    new_t = np.concatenate([
+        t[: k+1],
+        new_interior,
+        t[-(k+1) :],
+    ])
+
+    # Sanity check
+    if new_t.size != new_c.shape[0] + k + 1:
+        raise ValueError(
+            f"Inconsistent sizes: knots {new_t.size}, controls {new_c.shape[0]}, degree {k}."
+        )
+
+    return BSpline(new_t, new_c, k)
 
 
 
@@ -4283,10 +4507,8 @@ def optimize_bspline_custom(
         camera_poses,
         decay=0.95,
         num_samples=200,
-        stay_close_weight=1e-3,
         smoothness_weight=1e-4,
-        max_nfev=50,
-        verbose=True,
+        verbose=2,
     ):
 
     ctrl_points_initial_flat = initial_spline.c.copy().reshape(-1)
@@ -4363,12 +4585,17 @@ def optimize_bspline_custom(
     initial_residuals = objective(ctrl_points_initial_flat)
     print(f"initial_residuals: {initial_residuals}")
 
+    start = time.perf_counter()
     result = least_squares(
         objective,
         ctrl_points_initial_flat,
-        method="trf", # "lm",
-        verbose=2
+        method=  "lm", # "trf",
+        verbose=verbose,
+        xtol=1e-10, ftol=1e-10, gtol=1e-10,
+        max_nfev=10_000
     )
+    end = time.perf_counter()
+    print(f"B-spline translation took {end - start:.2f} seconds")
 
     optimal_residuals = objective(result.x)
     print(f"optimal_residuals: {optimal_residuals}")
@@ -4381,12 +4608,187 @@ def optimize_bspline_custom(
         show_2d_points_with_mask(projected_points, skeleton, title=f"Optimal Spline on Skeleton {index}")
 
     return optimal_spline
-    
+   
 
 
 #endregion
 
+def get_best_matching_point(spline: BSpline,
+                            masks,
+                            camera_poses,
+                            camera_parameters,
+                            decay = 0.95,
+                            num_samples=200):
+    
+    degree = spline.k
+    knot_vector = spline.t.copy()
+    dim = spline.c.shape[1]
+    num_ctrl = spline.c.shape[0]
+
+    dts = []
+    skeletons = []
+    for mask in masks:
+        # print(f"Mask type: {mask.dtype}")
+        sk = skeletonize(mask > 0)
+        skeletons.append(sk)
+        dt = distance_transform_edt(~sk)
+        dts.append(dt)
+        # show_masks([sk * 255], title="Skeleton")
+        # print(dt)
+        # show_distance_transform(dt)
+
+        sampled_bspline_points_3d = sample_bspline(spline, num_samples)
+        # print(f"sampled_bspline_points: {sampled_bspline_points_3d.shape}: {sampled_bspline_points_3d}")
+
+
+
+def get_best_matching_point(spline: BSpline,
+                            masks,
+                            camera_poses,
+                            camera_parameters,
+                            decay = 0.95,
+                            num_samples=200):
+    """
+    Returns the sampled 3D point whose cumulative weighted chamfer distance 
+    (over all dt masks) is minimal.
+
+    Parameters
+    ----------
+    ctrl_points_flat : array-like
+        Flattened control‐point vector for your B‐spline.
+    num_samples : int
+        Number of points to sample along the spline.
+    dts : list of 2D arrays
+        Distance‐transform masks.
+    camera_poses : list
+        Camera poses corresponding to each dt.
+    camera_parameters : dict or object
+        Intrinsics needed by project_3d_points().
+    decay : float
+        Exponential decay factor for weighting older frames.
+
+    Returns
+    -------
+    best_point : ndarray, shape (3,)
+        The 3D coordinates of the sampled point with minimal summed distance.
+    best_idx : int
+        Index of that point in the sampled‐points array.
+    best_score : float
+        The summed (weighted) chamfer distance for that point.
+    """
+    degree = spline.k
+    knot_vector = spline.t.copy()
+    dim = spline.c.shape[1]
+    num_ctrl = spline.c.shape[0]
+
+    dts = []
+    skeletons = []
+    for mask in masks:
+        # print(f"Mask type: {mask.dtype}")
+        sk = skeletonize(mask > 0)
+        skeletons.append(sk)
+        dt = distance_transform_edt(~sk)
+        dts.append(dt)
+        # show_masks([sk * 255], title="Skeleton")
+        # print(dt)
+        # show_distance_transform(dt)
+
+        sampled_bspline_points_3d = sample_bspline(spline, num_samples)
+        # print(f"sampled_bspline_points: {sampled_bspline_points_3d.shape}: {sampled_bspline_points_3d}")
+
+
+    # 1) sample the B-spline in 3D
+    sampled_pts = sample_bspline(spline, num_samples)  # shape (N,3)
+    N = sampled_pts.shape[0]
+    M = len(dts)
+
+    # 2) accumulate weighted distances per sample point
+    total_scores = np.zeros(N, dtype=float)
+    for i, (dt, cam_pose) in enumerate(zip(dts, camera_poses)):
+        proj = project_3d_points(sampled_pts, cam_pose, camera_parameters)
+        w = np.sqrt(decay ** (M - 1 - i))
+        # map_coordinates expects (rows, cols) = (v, u)
+        coords = np.vstack((proj[:,1], proj[:,0]))
+        dists = map_coordinates(dt, coords, order=1, mode='nearest')
+        total_scores += w * dists
+
+    # 3) pick the best one
+    best_idx = np.argmin(total_scores)
+    best_point = sampled_pts[best_idx]
+    best_score = total_scores[best_idx]
+
+    return best_point, best_idx, best_score
 
 
 
 
+def get_best_matching_point(spline: BSpline,
+                            masks,
+                            camera_poses,
+                            camera_parameters,
+                            decay = 0.95,
+                            num_samples=200):
+    """
+    Returns the sampled 3D point whose cumulative weighted chamfer distance 
+    is minimal, along with its index, its score, and its spline parameter u.
+
+    Parameters
+    ----------
+    ctrl_points_flat : array-like
+        Flattened control‐point vector for your B‐spline.
+    num_samples : int
+        Number of points to sample along the spline.
+    dts : list of 2D arrays
+        Distance‐transform masks.
+    camera_poses : list
+        Camera poses corresponding to each dt.
+    camera_parameters : dict or object
+        Intrinsics needed by project_3d_points().
+    decay : float
+        Exponential decay factor for weighting older frames.
+
+    Returns
+    -------
+    best_point : ndarray, shape (3,)
+        The 3D coordinates of the sampled point with minimal summed distance.
+    best_idx : int
+        Index of that point in the sampled‐points array.
+    best_score : float
+        The summed (weighted) chamfer distance for that point.
+    best_u : float
+        The parameter value along the spline (in [0,1]) for that point.
+    """
+    dts = []
+    skeletons = []
+    for mask in masks:
+        # print(f"Mask type: {mask.dtype}")
+        sk = skeletonize(mask > 0)
+        skeletons.append(sk)
+        dt = distance_transform_edt(~sk)
+        dts.append(dt)
+
+    # 1) build spline and sample both u and pts
+    u_vals = np.linspace(0.0, 1.0, num_samples)
+    sampled_pts = spline(u_vals)    # shape (num_samples, 3)
+    M = len(dts)
+
+    # 2) accumulate weighted distances per sample point
+    total_scores = np.zeros(num_samples, dtype=float)
+    for i, (dt, cam_pose) in enumerate(zip(dts, camera_poses)):
+        proj = project_3d_points(sampled_pts, cam_pose, camera_parameters)
+        w = np.sqrt(decay ** (M - 1 - i))
+        coords = np.vstack((proj[:,1], proj[:,0]))  # (v,u) for map_coordinates
+        dists = map_coordinates(dt, coords, order=1, mode='nearest')
+        total_scores += w * dists
+
+    # 3) pick the best one
+    best_idx = np.argmin(total_scores)
+    best_point = sampled_pts[best_idx]
+    best_score = total_scores[best_idx]
+    best_u = u_vals[best_idx]
+
+    print(f"total scores: {total_scores}")
+
+    print(f"Best matching point: {best_point}\nbest index: {best_idx}\nbest score: {best_score}\nbest u: {best_u}")
+
+    return best_point, best_idx, best_score, best_u
