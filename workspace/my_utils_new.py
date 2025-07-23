@@ -869,71 +869,6 @@ def show_spline_gradient(mask: np.ndarray, centerline: np.ndarray, title: str = 
     cv2.waitKey(0)
     cv2.destroyWindow(title)
 
-
-
-
-
-def interpolate_poses(pose_start: PoseStamped, pose_end: PoseStamped, num_steps: int) -> list[PoseStamped]:
-    """
-    Generate a smooth path of PoseStamped messages interpolating between two poses.
-    Inputs can be either PoseStamped or PoseStamped. Outputs are PoseStamped.
-
-    Parameters
-    ----------
-    pose_start : PoseStamped
-        Starting pose.
-    pose_end : PoseStamped
-        Ending pose.
-    num_steps : int
-        Number of intermediate steps (inclusive of end). Returned list length = num_steps+1.
-
-    Returns
-    -------
-    List[PoseStamped]
-        The interpolated sequence from start to end.
-    """
-    def extract(t):
-        # Return (translation: np.ndarray(3), quaternion: np.ndarray(4), header: Header)
-        if isinstance(t, PoseStamped):
-            p = t.pose.position
-            q = t.pose.orientation
-            hdr = copy.deepcopy(t.header)
-            return (np.array([p.x, p.y, p.z], dtype=float),
-                    np.array([q.x, q.y, q.z, q.w], dtype=float),
-                    hdr)
-        else:
-            raise TypeError("pose_start and pose_end must be PoseStamped or PoseStamped")
-
-    t0, q0, hdr0 = extract(pose_start)
-    t1, q1, hdr1 = extract(pose_end)
-    # Use start header frame_id; keep stamp constant (or update if desired)
-    frame_id = hdr0.frame_id
-    stamp = hdr0.stamp
-
-    path = []
-    for i in range(num_steps + 1):
-        alpha = i / float(num_steps)
-        # linear translation
-        ti = (1 - alpha) * t0 + alpha * t1
-        # slerp rotation
-        qi = quaternion_slerp(q0, q1, alpha)
-
-        ps = PoseStamped()
-        ps.header.frame_id = frame_id
-        ps.header.stamp = stamp
-        ps.pose.position.x = float(ti[0])
-        ps.pose.position.y = float(ti[1])
-        ps.pose.position.z = float(ti[2])
-        ps.pose.orientation.x = float(qi[0])
-        ps.pose.orientation.y = float(qi[1])
-        ps.pose.orientation.z = float(qi[2])
-        ps.pose.orientation.w = float(qi[3])
-        path.append(ps)
-
-    return path
-
-
-
 def convert_transform_stamped_to_pose_stamped(transform: 'TransformStamped') -> 'PoseStamped':
     """
     Convert a geometry_msgs/TransformStamped into a geometry_msgs/PoseStamped.
@@ -1248,7 +1183,6 @@ def fit_bspline_scipy(
         smooth: float | None = None,
         nest: int | None = None,
         num_ctrl: int | None = None,
-        use_make: bool = True  # stay on modern API
     ) -> BSpline:
     """
     Fit a 3-D B-spline; if `num_ctrl` is set, force that many control points.
@@ -1320,7 +1254,7 @@ def fit_bspline_scipy(
 
 #     return pcd
 
-def convert_bspline_to_pointcloud(spline: BSpline, samples: int = 200) -> o3d.geometry.PointCloud:
+def convert_bspline_to_pointcloud(spline: BSpline, samples: int = 60) -> o3d.geometry.PointCloud:
     """
     Converts a SciPy BSpline into an Open3D PointCloud by sampling points along the curve.
 
@@ -3195,7 +3129,7 @@ def trim_bspline_equal(
 
 
 
-# # region differentiable chamfer - multiple views
+# region differentiable chamfer - multiple views
 import numpy as np
 import torch
 import torch.nn as nn
@@ -4500,6 +4434,260 @@ def curvature_residuals(bspline, weight, num_curv_samples=200):
     # L2 norm of each second derivative, scaled by sqrt(weight)
     return np.sqrt(weight) * np.linalg.norm(d2, axis=1)
 
+# def optimize_bspline_custom(
+#         initial_spline,
+#         camera_parameters,
+#         masks,
+#         camera_poses,
+#         decay=0.95,
+#         num_samples=200,
+#         smoothness_weight=1e-4,
+#         verbose=2,
+#     ):
+
+#     ctrl_points_initial_flat = initial_spline.c.copy().reshape(-1)
+#     degree = initial_spline.k
+#     knot_vector = initial_spline.t.copy()
+#     dim = initial_spline.c.shape[1]
+#     num_ctrl = initial_spline.c.shape[0]
+
+#     def make_bspline(ctrl_points_flat):
+#         ctrl_points = ctrl_points_flat.reshape(num_ctrl, dim)
+#         return BSpline(knot_vector, ctrl_points, degree)
+
+#     dts = []
+#     skeletons = []
+#     for mask in masks:
+#         # print(f"Mask type: {mask.dtype}")
+#         sk = skeletonize(mask > 0)
+#         skeletons.append(sk)
+#         dt = distance_transform_edt(~sk)
+#         dts.append(dt)
+#         # show_masks([sk * 255], title="Skeleton")
+#         # print(dt)
+#         # show_distance_transform(dt)
+
+#     def objective(ctrl_points_flat):
+#         spline = make_bspline(ctrl_points_flat)
+#         sampled_bspline_points_3d = sample_bspline(spline, num_samples)
+#         # print(f"sampled_bspline_points: {sampled_bspline_points_3d.shape}: {sampled_bspline_points_3d}")
+
+#         residuals = []
+#         M = len(dts)
+#         for i, (dt, camera_pose) in enumerate(zip(dts, camera_poses)):
+#             projected_points = project_3d_points(sampled_bspline_points_3d, camera_pose, camera_parameters)
+#             # print(f"projected_points: {projected_points.shape}: {projected_points}")
+#             # show_2d_points_with_mask(projected_points, mask, title="Projected Points on Mask")
+
+#             w = decay ** (M - 1 - i)
+
+#             H, W = dt.shape
+#             u = projected_points[:, 0]
+#             v = projected_points[:, 1]
+#             # u_i = np.round(u).astype(int)
+#             # v_i = np.round(v).astype(int)
+#             # u_i = np.clip(u_i, 0, W-1)
+#             # v_i = np.clip(v_i, 0, H-1)
+#             # u_clamped = np.clip(u, 0, W - 1)
+#             # v_clamped = np.clip(v, 0, H - 1)
+
+#             # distances = dt[v_i, u_i]
+#             # distances = cv2.remap(
+#             #     dt.astype(np.float32),          # source image
+#             #     u_clamped.astype(np.float32),   # x map
+#             #     v_clamped.astype(np.float32),   # y map
+#             #     interpolation=cv2.INTER_LINEAR,
+#             #     borderMode=cv2.BORDER_REPLICATE
+#             # ).flatten()
+#             coords = np.vstack((v, u))
+
+#             # order=1 → bilinear; mode='nearest' keeps you in bounds
+#             dists = map_coordinates(dt, coords, order=1, mode='nearest')
+#             # dists = np.sqrt(dists)
+#             # distances = dists.reshape(-1)
+#             residuals.extend(np.sqrt(w) * dists)
+#             # residuals.extend(distances)
+
+#             # print(f"distances: {distances.shape}: {distances}")
+#             # show_2d_points_with_mask(np.column_stack((u_i, v_i)), mask, title="Projected integer points on mask")
+
+#         residuals.extend(curvature_residuals(spline, smoothness_weight, num_samples))
+#         # curv = smoothness_weight * curvature_term(make_bspline(ctrl_points_flat), num_samples)
+#         # residuals.append(curv)
+#         # print(f"residuals: {np.array(residuals).shape}: {residuals}")
+
+#         # return np.sum(residuals)
+#         return residuals
+    
+#     initial_residuals = objective(ctrl_points_initial_flat)
+#     print(f"initial_residuals: {initial_residuals}")
+
+#     bounds = make_bspline_bounds_new(ctrl_points_initial_flat, delta=0.2)
+#     print(f"initial control points: {ctrl_points_initial_flat}")
+#     print(f"bounds: {bounds}")
+#     start = time.perf_counter()
+#     result = least_squares(
+#         objective,
+#         ctrl_points_initial_flat,
+#         verbose=verbose,
+#         # Original
+#         # method=  "lm", # "trf",
+#         # xtol=1e-10, ftol=1e-10, gtol=1e-10,
+#         max_nfev=100_000,
+
+#         # ChatGPT
+#         method="dogbox",                    # supports bounds
+#         bounds=bounds,
+#         loss="arctan", f_scale=5.0,     # robust to outliers
+#         xtol=1e-14, ftol=1e-10, gtol=1e-10
+
+#     )
+#     # result = opt.minimize(
+#     #     fun=objective,
+#     #     x0=ctrl_points_initial_flat,
+#     #     method='Powell', # 'L-BFGS-B',
+#     #     bounds=bounds,
+#     #     options={'maxiter':1e10, 'ftol':1e-8, 'eps':1e-8, 'xtol':1e-4, 'disp':True}
+#     # )
+
+#     end = time.perf_counter()
+#     print(f"B-spline translation took {end - start:.2f} seconds")
+
+#     optimal_residuals = objective(result.x)
+#     print(f"optimal_residuals: {optimal_residuals}")
+
+#     print(f"result (optimal control points): {result}")
+#     optimal_spline = make_bspline(result.x)
+#     for index, (skeleton, camera_pose) in enumerate(zip(skeletons, camera_poses)):
+#         sampled_bspline_points_3d = sample_bspline(optimal_spline, num_samples)
+#         projected_points = project_3d_points(sampled_bspline_points_3d, camera_pose, camera_parameters)
+#         show_2d_points_with_mask(projected_points, skeleton, title=f"Optimal Spline on Skeleton {index}")
+
+#     return optimal_spline
+   
+
+# def optimize_bspline_custom(
+#         initial_spline,
+#         camera_parameters,
+#         masks,
+#         camera_poses,
+#         decay=0.95,
+#         num_samples=200,
+#         smoothness_weight=1e-4,
+#         symmetric=True,
+#         verbose=2,
+#     ):
+#     # Assume sample_bspline, project_3d_points, curvature_residuals, make_bspline_bounds_new,
+#     # show_2d_points_with_mask are imported or defined elsewhere.
+
+#     # Flatten initial control points
+#     ctrl_points_initial_flat = initial_spline.c.copy().reshape(-1)
+#     degree = initial_spline.k
+#     knot_vector = initial_spline.t.copy()
+#     dim = initial_spline.c.shape[1]
+#     num_ctrl = initial_spline.c.shape[0]
+
+#     def make_bspline(ctrl_points_flat):
+#         ctrl_points = ctrl_points_flat.reshape(num_ctrl, dim)
+#         return BSpline(knot_vector, ctrl_points, degree)
+
+#     # Precompute skeletons, distance transforms, and skeleton coordinates
+#     dts = []
+#     skeletons = []
+#     skeleton_coords = []
+#     for mask in masks:
+#         sk = skeletonize(mask > 0)
+#         skeletons.append(sk)
+#         # Record skeleton pixel positions (row, col)
+#         coords = np.vstack(np.nonzero(sk)).T  # each row is [v, u]
+#         skeleton_coords.append(coords)
+#         # Distance transform of the inverse skeleton
+#         dt = distance_transform_edt(~sk)
+#         dts.append(dt)
+
+#     def objective(ctrl_points_flat):
+#         spline = make_bspline(ctrl_points_flat)
+#         sampled_bspline_points_3d = sample_bspline(spline, num_samples)
+
+#         residuals = []
+#         M = len(dts)
+#         # For each camera/view
+#         for i, (dt, camera_pose, sk_coords) in enumerate(zip(dts, camera_poses, skeleton_coords)):
+#             # Project 3D samples into image plane
+#             projected_points = project_3d_points(
+#                 sampled_bspline_points_3d, camera_pose, camera_parameters
+#             )
+#             u = projected_points[:, 0]
+#             v = projected_points[:, 1]
+
+#             # Temporal decay weight
+#             w = decay ** (M - 1 - i)
+
+#             # One-way Chamfer: from projected points to skeleton
+#             H, W = dt.shape
+#             coords = np.vstack((v, u))  # shape (2, num_samples)
+#             dists_to_skel = map_coordinates(dt, coords, order=1, mode='nearest')
+#             residuals.extend(np.sqrt(w) * dists_to_skel)
+
+#             # If symmetric, also measure from skeleton pixels to the curve
+#             if symmetric:
+#                 # Build KD-tree in (v, u) coordinates
+#                 points_2d = np.vstack((v, u)).T  # shape (num_samples, 2)
+#                 tree = cKDTree(points_2d)
+#                 # Query each skeleton pixel
+#                 dists_to_curve, _ = tree.query(sk_coords)
+#                 residuals.extend(np.sqrt(w) * dists_to_curve)
+
+#         # Add curvature/smoothness term
+#         residuals.extend(curvature_residuals(spline, smoothness_weight, num_samples))
+#         return residuals
+
+#     # Evaluate initial residuals
+#     initial_residuals = objective(ctrl_points_initial_flat)
+#     print(f"initial_residuals: {initial_residuals}")
+
+#     # Define bounds on control points
+#     bounds = make_bspline_bounds_new(ctrl_points_initial_flat, delta=0.5)
+#     print(f"initial control points: {ctrl_points_initial_flat}")
+#     print(f"bounds: {bounds}")
+
+#     # Optimize B-spline control points
+#     start = time.perf_counter()
+#     result = least_squares(
+#         objective,
+#         ctrl_points_initial_flat,
+#         # bounds=bounds,
+#         method= "lm", # "trf", # can switch to 'trf' if needed
+#         verbose=verbose,
+#         xtol=1e-10,
+#         ftol=1e-10,
+#         gtol=1e-10,
+#         max_nfev=1_000_000,
+#     )
+#     end = time.perf_counter()
+#     print(f"B-spline translation took {end - start:.2f} seconds")
+
+#     # Evaluate optimal residuals
+#     optimal_residuals = objective(result.x)
+#     print(f"optimal_residuals: {optimal_residuals}")
+#     print(f"result (optimal control points): {result}")
+
+#     # Construct optimal spline and visualize per view
+#     optimal_spline = make_bspline(result.x)
+#     for index, (skeleton, camera_pose) in enumerate(zip(skeletons, camera_poses)):
+#         sampled_bspline_points_3d = sample_bspline(optimal_spline, num_samples)
+#         projected_points = project_3d_points(
+#             sampled_bspline_points_3d, camera_pose, camera_parameters
+#         )
+#         show_2d_points_with_mask(
+#             projected_points,
+#             skeleton,
+#             title=f"Optimal Spline on Skeleton {index}",
+#         )
+
+#     return optimal_spline
+
+
 def optimize_bspline_custom(
         initial_spline,
         camera_parameters,
@@ -4508,110 +4696,183 @@ def optimize_bspline_custom(
         decay=0.95,
         num_samples=200,
         smoothness_weight=1e-4,
+        symmetric=True,
+        translate=False,
         verbose=2,
     ):
-
-    ctrl_points_initial_flat = initial_spline.c.copy().reshape(-1)
+    # Initial control points
+    ctrl_pts_init = initial_spline.c.copy()
+    ctrl_pts_init_flat = ctrl_pts_init.reshape(-1)
     degree = initial_spline.k
     knot_vector = initial_spline.t.copy()
-    dim = initial_spline.c.shape[1]
-    num_ctrl = initial_spline.c.shape[0]
+    dim = ctrl_pts_init.shape[1]
+    num_ctrl = ctrl_pts_init.shape[0]
 
     def make_bspline(ctrl_points_flat):
         ctrl_points = ctrl_points_flat.reshape(num_ctrl, dim)
         return BSpline(knot_vector, ctrl_points, degree)
 
+    # Precompute skeletons, distance transforms, and coordinates
     dts = []
-    skeletons = []
+    skeleton_coords = []
     for mask in masks:
-        # print(f"Mask type: {mask.dtype}")
         sk = skeletonize(mask > 0)
-        skeletons.append(sk)
-        dt = distance_transform_edt(~sk)
-        dts.append(dt)
-        # show_masks([sk * 255], title="Skeleton")
-        # print(dt)
-        # show_distance_transform(dt)
+        coords = np.vstack(np.nonzero(sk)).T  # (v,u)
+        skeleton_coords.append((sk, coords))
+        dts.append(distance_transform_edt(~sk))
 
-    def objective(ctrl_points_flat):
-        spline = make_bspline(ctrl_points_flat)
-        sampled_bspline_points_3d = sample_bspline(spline, num_samples)
-        # print(f"sampled_bspline_points: {sampled_bspline_points_3d.shape}: {sampled_bspline_points_3d}")
+    # Set initial optimization parameters
+    initial_params = np.zeros(dim) if translate else ctrl_pts_init_flat.copy()
+
+    def objective(params):
+        # Compute effective control points
+        if translate:
+            translation = params
+            ctrl_flat_eff = ctrl_pts_init_flat + np.tile(translation, num_ctrl)
+        else:
+            ctrl_flat_eff = params
+
+        # Build spline and sample
+        spline = make_bspline(ctrl_flat_eff)
+        sampled_pts_3d = sample_bspline(spline, num_samples)
 
         residuals = []
         M = len(dts)
-        for i, (dt, camera_pose) in enumerate(zip(dts, camera_poses)):
-            projected_points = project_3d_points(sampled_bspline_points_3d, camera_pose, camera_parameters)
-            # print(f"projected_points: {projected_points.shape}: {projected_points}")
-            # show_2d_points_with_mask(projected_points, mask, title="Projected Points on Mask")
-
+        for i, ((sk, coords), dt, cam_pose) in enumerate(zip(skeleton_coords, dts, camera_poses)):
+            proj = project_3d_points(sampled_pts_3d, cam_pose, camera_parameters)
+            u, v = proj[:,0], proj[:,1]
             w = decay ** (M - 1 - i)
 
-            H, W = dt.shape
-            u = projected_points[:, 0]
-            v = projected_points[:, 1]
-            # u_i = np.round(u).astype(int)
-            # v_i = np.round(v).astype(int)
-            # u_i = np.clip(u_i, 0, W-1)
-            # v_i = np.clip(v_i, 0, H-1)
-            # u_clamped = np.clip(u, 0, W - 1)
-            # v_clamped = np.clip(v, 0, H - 1)
+            # Forward Chamfer: curve → skeleton
+            img_coords = np.vstack((v, u))
+            d_to_skel = map_coordinates(dt, img_coords, order=1, mode='nearest')
+            residuals.extend(np.sqrt(w) * d_to_skel)
 
-            # distances = dt[v_i, u_i]
-            # distances = cv2.remap(
-            #     dt.astype(np.float32),          # source image
-            #     u_clamped.astype(np.float32),   # x map
-            #     v_clamped.astype(np.float32),   # y map
-            #     interpolation=cv2.INTER_LINEAR,
-            #     borderMode=cv2.BORDER_REPLICATE
-            # ).flatten()
-            coords = np.vstack((v, u))
+            # Backward Chamfer: skeleton → curve
+            if symmetric:
+                pts2d = np.vstack((v, u)).T
+                tree = cKDTree(pts2d)
+                d_to_curve, _ = tree.query(coords)
+                residuals.extend(np.sqrt(w) * d_to_curve)
 
-            # order=1 → bilinear; mode='nearest' keeps you in bounds
-            dists = map_coordinates(dt, coords, order=1, mode='nearest')
-            # distances = dists.reshape(-1)
-            residuals.extend(np.sqrt(w) * dists)
-            # residuals.extend(distances)
+        # Smoothness only if shape can change
+        if not translate:
+            residuals.extend(curvature_residuals(spline, smoothness_weight, num_samples))
 
-            # print(f"distances: {distances.shape}: {distances}")
-            # show_2d_points_with_mask(np.column_stack((u_i, v_i)), mask, title="Projected integer points on mask")
-
-        residuals.extend(curvature_residuals(spline, smoothness_weight, num_samples))
-        # curv = smoothness_weight * curvature_term(make_bspline(ctrl_points_flat), num_samples)
-        # residuals.append(curv)
-        # print(f"residuals: {np.array(residuals).shape}: {residuals}")
         return residuals
-    
-    initial_residuals = objective(ctrl_points_initial_flat)
-    print(f"initial_residuals: {initial_residuals}")
 
+    # Print initial state
+    init_res = objective(initial_params)
+    print(f"initial_residuals: {init_res}")
+
+    # Setup bounds for non-translate mode
+    if not translate:
+        bounds = make_bspline_bounds_new(ctrl_pts_init_flat, delta=0.1)
+        print(f"initial control points: {ctrl_pts_init_flat}")
+        print(f"bounds: {bounds}")
+
+    # Solver configuration
+    # solver_opts = dict(verbose=verbose,
+    #                    xtol=1e-12,
+    #                    ftol=1e-10,
+    #                    gtol=1e-10,
+    #                    max_nfev=1_000_000,
+    #                    x_scale='jac')
+    # method = 'dogbox' # 'trf'
+
+    # Run optimization
     start = time.perf_counter()
-    result = least_squares(
-        objective,
-        ctrl_points_initial_flat,
-        method=  "lm", # "trf",
-        verbose=verbose,
-        xtol=1e-10, ftol=1e-10, gtol=1e-10,
-        max_nfev=10_000
-    )
+    if translate:
+        # result = least_squares(objective, initial_params,
+        #                        method=method,**solver_opts)
+        result = least_squares(
+            fun              = objective,    # your function
+            x0               = initial_params,    # shape (n,)
+            method           = "lm", # "dogbox", # "trf",
+            jac              = "3-point",            # or supply analytic/complex-step
+            # bounds           = bounds,             # e.g. physical limits on control pts
+            # loss             = "soft_l1",            # robust to skeleton gaps/outliers
+            f_scale          = np.median(init_res),  # soft inlier threshold
+            x_scale          = "jac",                # auto-scaling
+            ftol             = 1e-9,
+            xtol             = 1e-9,
+            gtol             = 1e-9,
+            diff_step        = None,                 # let SciPy pick
+            max_nfev         = 2000,                 # give it room
+            verbose          = 2,
+        )
+
+    else:
+        # result = least_squares(objective, initial_params,
+        #                        bounds=bounds,
+        #                        method=method, **solver_opts)
+        result = least_squares(
+            fun              = objective,    # your function
+            x0               = initial_params,    # shape (n,)
+            method           = "lm", # "dogbox", # "trf",
+            jac              = "3-point",            # or supply analytic/complex-step
+            bounds           = bounds,             # e.g. physical limits on control pts
+            # loss             = "soft_l1",            # robust to skeleton gaps/outliers
+            f_scale          = np.median(init_res),  # soft inlier threshold
+            x_scale          = "jac",                # auto-scaling
+            ftol             = 1e-9,
+            xtol             = 1e-9,
+            gtol             = 1e-9,
+            diff_step        = None,                 # let SciPy pick
+            max_nfev         = 2000,                 # give it room
+            verbose          = 2,
+        )
+
     end = time.perf_counter()
-    print(f"B-spline translation took {end - start:.2f} seconds")
+    print(f"B-spline optimization took {end - start:.2f} seconds")
 
-    optimal_residuals = objective(result.x)
-    print(f"optimal_residuals: {optimal_residuals}")
+    # Report final residuals
+    opt_res = objective(result.x)
+    print(f"optimal_residuals: {opt_res}")
+    print(f"result: {result}")
 
-    print(f"result (optimal control points): {result}")
-    optimal_spline = make_bspline(result.x)
-    for index, (skeleton, camera_pose) in enumerate(zip(skeletons, camera_poses)):
-        sampled_bspline_points_3d = sample_bspline(optimal_spline, num_samples)
-        projected_points = project_3d_points(sampled_bspline_points_3d, camera_pose, camera_parameters)
-        show_2d_points_with_mask(projected_points, skeleton, title=f"Optimal Spline on Skeleton {index}")
+    # Construct optimal spline
+    if translate:
+        best_flat = ctrl_pts_init_flat + np.tile(result.x, num_ctrl)
+    else:
+        best_flat = result.x
+    optimal_spline = make_bspline(best_flat)
+
+    # Visualization per view
+    for idx, ((sk, _), cam_pose) in enumerate(zip(skeleton_coords, camera_poses)):
+        pts3d = sample_bspline(optimal_spline, num_samples)
+        proj3d = project_3d_points(pts3d, cam_pose, camera_parameters)
+        show_2d_points_with_mask(proj3d, sk, title=f"Optimal Spline on Skeleton {idx}")
 
     return optimal_spline
-   
+
+
 
 
 #endregion
+
+def make_bspline_bounds_new(ctrl_points: np.ndarray, delta: float = 0.1):
+    """
+    Generate lower and upper bounds for B-spline control points.
+
+    Parameters
+    ----------
+    ctrl_points : np.ndarray
+        Initial control points, either shape (n_params,) or (n_points, dims).
+    delta : float
+        Maximum absolute deviation allowed for each parameter.
+
+    Returns
+    -------
+    lb : np.ndarray
+        Lower‐bound array of shape (n_params,), equal to ctrl_points−delta.
+    ub : np.ndarray
+        Upper‐bound array of shape (n_params,), equal to ctrl_points+delta.
+    """
+    flat = ctrl_points.ravel()
+    lb = flat - delta
+    ub = flat + delta
+    return lb, ub
 
 def get_best_matching_point(spline: BSpline,
                             masks,
@@ -4792,3 +5053,24 @@ def get_best_matching_point(spline: BSpline,
     print(f"Best matching point: {best_point}\nbest index: {best_idx}\nbest score: {best_score}\nbest u: {best_u}")
 
     return best_point, best_idx, best_score, best_u
+
+
+def create_bspline(ctrl_points: np.ndarray, degree: int = 3) -> o3d.geometry.PointCloud:
+    pts = np.asarray(ctrl_points, dtype=float)
+    n_ctrl = pts.shape[0]
+    k = degree
+    if n_ctrl <= k:
+        raise ValueError("Number of control points must exceed spline degree")
+
+    # Open-uniform knot vector: (k+1) zeros, inner knots, (k+1) ones
+    n_inner = n_ctrl - k - 1
+    if n_inner > 0:
+        inner = np.linspace(0, 1, n_inner + 2)[1:-1]
+        knots = np.concatenate((np.zeros(k+1), inner, np.ones(k+1)))
+    else:
+        knots = np.concatenate((np.zeros(k+1), np.ones(k+1)))
+
+    # Build the spline and sample
+    spline = BSpline(knots, pts, k, axis=0)
+
+    return spline

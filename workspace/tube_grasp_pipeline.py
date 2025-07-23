@@ -66,9 +66,13 @@ def tube_grasp_pipeline(debug: bool = False):
     # offline_image_name = "tube"
 
     optimizer_decay=1
-    optimizer_num_samples=40
-    optimizer_smoothness_weight=1e-1 # 1e-2
+    optimizer_num_samples=20
+    optimizer_smoothness_weight=1e0 # 1e-1 # 1e-2
     optimizer_verbose=2
+    optimizer_symmetric=False
+
+    num_initial_ctrl_points = None #15
+    num_interpolate_poses = 5
 
     camera_parameters = (149.09148, 187.64966, 334.87706, 268.23742)
     SAM_prompt = "wire.cable.tube."
@@ -149,14 +153,16 @@ def tube_grasp_pipeline(debug: bool = False):
     # save_masks([data[-1][1], data[-2][1]], save_image_folder, "Masks")
 
     #region -------------------- Spline --------------------
-    best_depth = scale_depth_map(depths[-1], best_alpha, best_beta)
-    centerline_pts_cam2_array = extract_centerline_from_mask_individual(best_depth, masks[-1], camera_parameters, show=False)
+    best_depth = scale_depth_map(depths[-2], best_alpha, best_beta)
+    centerline_pts_cam2_array = extract_centerline_from_mask_individual(best_depth, masks[-2], camera_parameters, show=False)
     centerline_pts_cam2 = max(centerline_pts_cam2_array, key=lambda s: s.shape[0]) # Extract the longest path
-    centerline_pts_world = transform_points_to_world(centerline_pts_cam2, camera_poses[-1])
-    show_pointclouds([centerline_pts_world])
+    centerline_pts_world = transform_points_to_world(centerline_pts_cam2, camera_poses[-2])
+    # show_pointclouds([best_pc_world, centerline_pts_world], title="Centerline")
+
+
     degree = 3
     # Fit B-spline
-    b_splines.append(fit_bspline_scipy(centerline_pts_world, degree=degree, smooth=1e-3, nest=20, num_ctrl=14))
+    b_splines.append(fit_bspline_scipy(centerline_pts_world, degree=degree, smooth=1e-3, nest=20, num_ctrl=num_initial_ctrl_points))
     
     ctrl_points.append(b_splines[-1].c)
     print(f"Initial ctrl_points {ctrl_points[-1].shape}: {ctrl_points[-1]}")
@@ -179,12 +185,6 @@ def tube_grasp_pipeline(debug: bool = False):
     # show_masks([correct_skeleton, projected_spline_cam1], "Correct Skeleton and Projected Spline (CAM1)")
 
     # skeletons, interps = precompute_skeletons_and_interps(masks)        # 2) Call optimizer with our new score:
-
-
-
-
-
-
 
 
 
@@ -312,11 +312,12 @@ def tube_grasp_pipeline(debug: bool = False):
     #     show_masks([mask, projected_spline], f"Projected B-Spline Cam {i}")
     #endregion
 
-    b_splines[-1] = trim_bspline(b_splines[-1], remove_ctrl_lo=2, remove_ctrl_hi=2)
+    # b_splines[-1] = trim_bspline(b_splines[-1], remove_ctrl_lo=2, remove_ctrl_hi=2)
     # b_splines[-1] = trim_bspline_equal(b_splines[-1], keep_ctrl=8)
-    visualize_spline_with_pc(pointcloud=best_pc_world, spline=b_splines[-1], num_samples=200, title="Optimized Spline with PC")
+    visualize_spline_with_pc(pointcloud=best_pc_world, spline=b_splines[-1], num_samples=60, title="Optimized Spline with PC")
     ctrl_points.append(b_splines[-1].c)
     print(f"Trimmed ctrl_points {ctrl_points[-1].shape}: {ctrl_points[-1]}")
+
 
     #region Optimize B-spline custom
     b_splines.append(optimize_bspline_custom(
@@ -327,30 +328,86 @@ def tube_grasp_pipeline(debug: bool = False):
         decay=optimizer_decay,
         num_samples=optimizer_num_samples,
         smoothness_weight=optimizer_smoothness_weight,
-        verbose=optimizer_verbose
+        symmetric=optimizer_symmetric,
+        translate=True,
+        verbose=optimizer_verbose,
     ))
+    visualize_spline_with_pc(pointcloud=best_pc_world, spline=b_splines[-1], num_samples=50, title="Optimized Spline with PC")
     spline_pc = convert_bspline_to_pointcloud(b_splines[-1])
     pointcloud_publisher.publish(spline_pc)
-    visualize_spline_with_pc(pointcloud=best_pc_world, spline=b_splines[-1], num_samples=200, title="Optimized Spline with PC")
+    #endregion
 
+    # rospy.sleep(5)
+    # exit()
+
+    #region Optimize B-spline custom
+    b_splines.append(optimize_bspline_custom(
+        initial_spline=b_splines[-1],
+        camera_parameters=camera_parameters,
+        masks=masks,
+        camera_poses=camera_poses,
+        decay=optimizer_decay,
+        num_samples=optimizer_num_samples,
+        smoothness_weight=optimizer_smoothness_weight,
+        symmetric=optimizer_symmetric,
+        translate=False,
+        verbose=optimizer_verbose,
+    ))
+    visualize_spline_with_pc(pointcloud=best_pc_world, spline=b_splines[-1], num_samples=60, title="Optimized Spline with PC")
+    spline_pc = convert_bspline_to_pointcloud(b_splines[-1])
+    pointcloud_publisher.publish(spline_pc)
     #endregion
 
 
+    #region first optimization that worked once
+    # skeletons, interps = precompute_skeletons_and_interps(masks)        # 2) Call optimizer with our new score:
+    # bounds = make_bspline_bounds(ctrl_points[-1], delta=0.5)
+    # init_x_coarse = ctrl_points[-1].flatten()
+    # reg_weight = 0 # 500
+    # decay = 1 # 0..1
+    # curvature_weight = 1
+    # # 2) Coarse/fine minimization calls:
+    # start = time.perf_counter()
+    # result = opt.minimize(
+    #     fun=score_function_bspline_reg_multiple_pre,
+    #     x0=init_x_coarse,
+    #     args=(
+    #         camera_poses,
+    #         camera_parameters,
+    #         degree,
+    #         init_x_coarse,
+    #         reg_weight,
+    #         decay,
+    #         curvature_weight,
+    #         skeletons,
+    #         interps,
+    #         10
+    #     ),
+    #     method='L-BFGS-B', # 'Powell',
+    #     bounds=bounds,
+    #     options={'maxiter':1e6, 'ftol':1e-6, 'eps':1e-6, 'xtol':1e-4, 'disp':True}
+    # )
+    # end = time.perf_counter()
+    # print(f"Optimization took {end - start:.2f} seconds")
+
+    # ctrl_points_new = result.x.reshape(-1, 3)
+    # b_splines.append(create_bspline(ctrl_points_new))
+    #endregion
+
+
+    usr_input = input("Continue [y]/n: ").strip().lower()
+    if usr_input == "n": exit()
 
 
 
-
-
-
-
-    best_point, best_idx, best_score, best_u = get_best_matching_point(spline=b_splines[-1], masks=masks, camera_poses=camera_poses, camera_parameters=camera_parameters)
+    # best_point, best_idx, best_score, best_u = get_best_matching_point(spline=b_splines[-1], masks=masks, camera_poses=camera_poses, camera_parameters=camera_parameters)
     
 
 
     # Get highest Point in pointcloud
     # target_point, target_angle = get_highest_point_and_angle_spline(b_splines[-1])
-    # target_point, target_angle = get_midpoint_and_angle_spline(b_splines[-1])
-    target_point, target_angle = get_point_and_angle_spline(spline=b_splines[-1], u=best_u)
+    target_point, target_angle = get_midpoint_and_angle_spline(b_splines[-1])
+    # target_point, target_angle = get_point_and_angle_spline(spline=b_splines[-1], u=best_u)
 
     print(f"Target Point: {target_point}, Target Angle: {target_angle}")
     tarrget_point_offset = target_point.copy()
@@ -360,7 +417,7 @@ def tube_grasp_pipeline(debug: bool = False):
     base_footprint = ros_handler.get_current_pose("base_footprint", map_frame)
     target_poses.append(get_desired_pose(tarrget_point_offset, base_footprint))
     # Calculate Path
-    target_path = interpolate_poses(palm_poses[-1], target_poses[-1], num_steps=5)
+    target_path = interpolate_poses(palm_poses[-1], target_poses[-1], num_steps=num_interpolate_poses)
     # Move arm a step
     path_publisher.publish(target_path)
     pose_publisher.publish(target_path[1])
@@ -632,9 +689,27 @@ def tube_grasp_pipeline(debug: bool = False):
             decay=optimizer_decay,
             num_samples=optimizer_num_samples,
             smoothness_weight=optimizer_smoothness_weight,
-            verbose=optimizer_verbose
+            symmetric=optimizer_symmetric,
+            translate=True,
+            verbose=optimizer_verbose,
         ))
         visualize_spline_with_pc(pointcloud=best_pc_world, spline=b_splines[-1], num_samples=200, title="Optimized Spline with PC")
+        spline_pc = convert_bspline_to_pointcloud(b_splines[-1])
+        pointcloud_publisher.publish(spline_pc)
+
+        b_splines.append(optimize_bspline_custom(
+            initial_spline=b_splines[-1],
+            camera_parameters=camera_parameters,
+            masks=masks,
+            camera_poses=camera_poses,
+            decay=optimizer_decay,
+            num_samples=optimizer_num_samples,
+            smoothness_weight=optimizer_smoothness_weight,
+            symmetric=optimizer_symmetric,
+            translate=False,
+            verbose=optimizer_verbose,
+        ))
+        visualize_spline_with_pc(pointcloud=best_pc_world, spline=b_splines[-1], num_samples=60, title="Optimized Spline with PC")
         # usr_input = input("Continue? ([y]/n)")
         # if usr_input == "n":
         #     break
@@ -653,18 +728,18 @@ def tube_grasp_pipeline(debug: bool = False):
         # visualize_spline_with_pc(best_pc_world, b_splines[-1])
 
         # Movement
-        best_point, best_idx, best_score, best_u = get_best_matching_point(spline=b_splines[-1], masks=masks, camera_poses=camera_poses, camera_parameters=camera_parameters)
+        # best_point, best_idx, best_score, best_u = get_best_matching_point(spline=b_splines[-1], masks=masks, camera_poses=camera_poses, camera_parameters=camera_parameters)
         # Get highest Point in pointcloud
         # target_point, target_angle = get_highest_point_and_angle_spline(b_splines[-1])
-        # target_point, target_angle = get_midpoint_and_angle_spline(b_splines[-1])
-        target_point, target_angle = get_point_and_angle_spline(spline=b_splines[-1], u=best_u)
+        target_point, target_angle = get_midpoint_and_angle_spline(b_splines[-1])
+        # target_point, target_angle = get_point_and_angle_spline(spline=b_splines[-1], u=best_u)
         tarrget_point_offset = target_point.copy()
         tarrget_point_offset[2] += 0.098 + 0.010 - 0.03 # Make target Pose hover above actual target pose - tested offset
         # Convert to Pose
         base_footprint = ros_handler.get_current_pose("base_footprint", map_frame)
         target_poses.append(get_desired_pose(tarrget_point_offset, base_footprint))
         # Calculate Path
-        target_path = interpolate_poses(palm_poses[-1], target_poses[-1], num_steps=5)
+        target_path = interpolate_poses(palm_poses[-1], target_poses[-1], num_steps=num_interpolate_poses)
         grasp_point_publisher.publish(target_point)
         # Move arm a step
         path_publisher.publish(target_path)
