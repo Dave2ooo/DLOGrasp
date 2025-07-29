@@ -9,7 +9,7 @@ import copy
 
 from geometry_msgs.msg import TransformStamped, Pose, PoseStamped
 from nav_msgs.msg import Path
-from tf.transformations import quaternion_from_euler, quaternion_slerp, quaternion_matrix, quaternion_from_matrix, quaternion_multiply
+from tf.transformations import quaternion_from_euler, quaternion_slerp, quaternion_matrix, quaternion_from_matrix, quaternion_multiply, quaternion_inverse
 from std_msgs.msg import Header
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs import point_cloud2
@@ -29,6 +29,12 @@ from skimage.draw import line as skline
 
 from scipy.ndimage import distance_transform_edt
 from scipy.interpolate import RegularGridInterpolator
+
+import time
+
+
+from scipy.optimize import least_squares
+from scipy.ndimage import map_coordinates
 
 # ----------------------------------------------------------------------------
 
@@ -2756,7 +2762,7 @@ def score_function_bspline_reg_multiple_pre(x, camera_poses: PoseStamped, camera
 
     # 5) final loss
     loss = mean_assd + reg_weight * drift + curvature_weight * curvature_penalty
-    print(f"loss: {loss:.3f}")
+    # print(f"loss: {loss:.3f}")
     return float(loss)
 
 def score_function_bspline_reg_multiple(x, datas, camera_poses, camera_parameters, degree, init_x, reg_weight: float = 1000.0, decay: float = 1.0, curvature_weight: float = 1.0, show: bool = False):
@@ -3471,5 +3477,517 @@ def get_midpoint_and_angle_spline(spline: BSpline):
         angle += np.pi
 
     return pt, angle
+
+def optimize_bspline_custom(
+        initial_spline,
+        camera_parameters,
+        masks,
+        camera_poses,
+        decay=0.95,
+        num_samples=200,
+        smoothness_weight=1e-4,
+        symmetric=True,
+        translate=False,
+        verbose=2,
+    ):
+    # Initial control points
+    ctrl_pts_init = initial_spline.c.copy()
+    ctrl_pts_init_flat = ctrl_pts_init.reshape(-1)
+    degree = initial_spline.k
+    knot_vector = initial_spline.t.copy()
+    dim = ctrl_pts_init.shape[1]
+    num_ctrl = ctrl_pts_init.shape[0]
+
+    def make_bspline(ctrl_points_flat):
+        ctrl_points = ctrl_points_flat.reshape(num_ctrl, dim)
+        return BSpline(knot_vector, ctrl_points, degree)
+
+    # Precompute skeletons, distance transforms, and coordinates
+    dts = []
+    skeleton_coords = []
+    for mask in masks:
+        sk = skeletonize(mask > 0)
+        coords = np.vstack(np.nonzero(sk)).T  # (v,u)
+        skeleton_coords.append((sk, coords))
+        dts.append(distance_transform_edt(~sk))
+
+    # Set initial optimization parameters
+    initial_params = np.zeros(dim) if translate else ctrl_pts_init_flat.copy()
+
+    def objective(params):
+        # Compute effective control points
+        if translate:
+            translation = params
+            ctrl_flat_eff = ctrl_pts_init_flat + np.tile(translation, num_ctrl)
+        else:
+            ctrl_flat_eff = params
+
+        # Build spline and sample
+        spline = make_bspline(ctrl_flat_eff)
+        sampled_pts_3d = sample_bspline(spline, num_samples)
+
+        residuals = []
+        M = len(dts)
+        for i, ((sk, coords), dt, cam_pose) in enumerate(zip(skeleton_coords, dts, camera_poses)):
+            proj = project_3d_points(sampled_pts_3d, cam_pose, camera_parameters)
+            u, v = proj[:,0], proj[:,1]
+            w = decay ** (M - 1 - i)
+
+            # Forward Chamfer: curve → skeleton
+            img_coords = np.vstack((v, u))
+            d_to_skel = map_coordinates(dt, img_coords, order=1, mode='nearest')
+            residuals.extend(np.sqrt(w) * d_to_skel)
+
+            # Backward Chamfer: skeleton → curve
+            if symmetric:
+                pts2d = np.vstack((v, u)).T
+                tree = cKDTree(pts2d)
+                d_to_curve, _ = tree.query(coords)
+                residuals.extend(np.sqrt(w) * d_to_curve)
+
+        # Smoothness only if shape can change
+        if not translate:
+            residuals.extend(curvature_residuals(spline, smoothness_weight, num_samples))
+
+        return residuals
+
+    # Print initial state
+    init_res = objective(initial_params)
+    print(f"initial_residuals: {init_res}")
+
+    # Setup bounds for non-translate mode
+    if not translate:
+        bounds = make_bspline_bounds_new(ctrl_pts_init_flat, delta=0.1)
+        print(f"initial control points: {ctrl_pts_init_flat}")
+        print(f"bounds: {bounds}")
+
+    # Solver configuration
+    # solver_opts = dict(verbose=verbose,
+    #                    xtol=1e-12,
+    #                    ftol=1e-10,
+    #                    gtol=1e-10,
+    #                    max_nfev=1_000_000,
+    #                    x_scale='jac')
+    # method = 'dogbox' # 'trf'
+
+    # Run optimization
+    start = time.perf_counter()
+    if translate:
+        # result = least_squares(objective, initial_params,
+        #                        method=method,**solver_opts)
+        result = least_squares(
+            fun              = objective,    # your function
+            x0               = initial_params,    # shape (n,)
+            method           = "lm", # "dogbox", # "trf",
+            jac              = "3-point",            # or supply analytic/complex-step
+            # bounds           = bounds,             # e.g. physical limits on control pts
+            # loss             = "soft_l1",            # robust to skeleton gaps/outliers
+            f_scale          = np.median(init_res),  # soft inlier threshold
+            x_scale          = "jac",                # auto-scaling
+            ftol             = 1e-6,
+            xtol             = 1e-4,
+            gtol             = 1e-8,
+            diff_step        = None,                 # let SciPy pick
+            max_nfev         = 1_000_000,                 # give it room
+            verbose          = 2,
+        )
+
+    else:
+        # result = least_squares(objective, initial_params,
+        #                        bounds=bounds,
+        #                        method=method, **solver_opts)
+        result = least_squares(
+            fun              = objective,    # your function
+            x0               = initial_params,    # shape (n,)
+            method           = "lm", # "dogbox", # "trf",
+            jac              = "3-point",            # or supply analytic/complex-step
+            # bounds           = bounds,             # e.g. physical limits on control pts
+            # loss             = "soft_l1",            # robust to skeleton gaps/outliers
+            f_scale          = np.median(init_res),  # soft inlier threshold
+            x_scale          = "jac",                # auto-scaling
+            ftol             = 1e-6,
+            xtol             = 1e-4,
+            gtol             = 1e-8,
+            diff_step        = None,                 # let SciPy pick
+            max_nfev         = 1_000_000,                 # give it room
+            verbose          = 2,
+        )
+
+    end = time.perf_counter()
+    print(f"B-spline optimization took {end - start:.2f} seconds")
+
+    # Report final residuals
+    opt_res = objective(result.x)
+    print(f"optimal_residuals: {opt_res}")
+    print(f"result: {result}")
+
+    # Construct optimal spline
+    if translate:
+        best_flat = ctrl_pts_init_flat + np.tile(result.x, num_ctrl)
+    else:
+        best_flat = result.x
+    optimal_spline = make_bspline(best_flat)
+
+    # Visualization per view
+    for idx, ((sk, _), cam_pose) in enumerate(zip(skeleton_coords, camera_poses)):
+        # pts3d = sample_bspline(optimal_spline, num_samples)
+        # proj3d = project_3d_points(pts3d, cam_pose, camera_parameters)
+        # show_2d_points_with_mask(proj3d, sk, title=f"Optimal Spline on Skeleton {idx}")
+
+        projected_spline = project_bspline(optimal_spline, camera_poses[-1], camera_parameters)
+        show_masks([sk, projected_spline], title=f"Optimal Spline on Skeleton {idx}")
+
+    return optimal_spline
+
+def make_bspline_bounds_new(ctrl_points: np.ndarray, delta: float = 0.1):
+    """
+    Generate lower and upper bounds for B-spline control points.
+
+    Parameters
+    ----------
+    ctrl_points : np.ndarray
+        Initial control points, either shape (n_params,) or (n_points, dims).
+    delta : float
+        Maximum absolute deviation allowed for each parameter.
+
+    Returns
+    -------
+    lb : np.ndarray
+        Lower‐bound array of shape (n_params,), equal to ctrl_points−delta.
+    ub : np.ndarray
+        Upper‐bound array of shape (n_params,), equal to ctrl_points+delta.
+    """
+    flat = ctrl_points.ravel()
+    lb = flat - delta
+    ub = flat + delta
+    return lb, ub
+
+def curvature_residuals(bspline, weight, num_curv_samples=200):
+    # sample in the same parameter domain you use for fitting
+    t0, t1 = bspline.t[bspline.k], bspline.t[-bspline.k-1]
+    u_curv = np.linspace(t0, t1, num_curv_samples)
+    d2 = bspline(u_curv, 2)                      # second derivative vectors
+    # L2 norm of each second derivative, scaled by sqrt(weight)
+    return np.sqrt(weight) * np.linalg.norm(d2, axis=1)
+
+def sample_bspline(spline: BSpline, n_samples: int):
+    """
+    Sample a 3-dimensional BSpline so that you get an (n_samples, 3) array back.
+
+    Parameters
+    ----------
+    spline : BSpline
+        A BSpline whose coefficient dimension is 3.
+    n_samples : int
+        Number of points to sample.
+
+    Returns
+    -------
+    u : (n_samples,) float array
+        Parameter values uniformly spaced on [t[k], t[-k-1]].
+    pts : (n_samples, 3) float array
+        Spline evaluated at each u, shape guaranteed to be (n_samples,3).
+    """
+    # domain
+    t, c, k = spline.t, spline.c, spline.k
+    u_min, u_max = t[k], t[-k-1]
+    u = np.linspace(u_min, u_max, n_samples)
+
+    # evaluate; for a 3D spline spline(u) returns shape (n_samples, 3)
+    pts = spline(u)
+
+    # sometimes spline(u) returns shape (3, n_samples), so transpose if needed
+    if pts.ndim == 2 and pts.shape[0] == 3 and pts.shape[1] == n_samples:
+        pts = pts.T
+
+    # final sanity check
+    if pts.shape != (n_samples, 3):
+        raise ValueError(f"Expected output shape ({n_samples},3), got {pts.shape}")
+
+    return pts
+
+def project_3d_points(points, camera_pose, camera_parameters):
+    """
+    Project 3D world points into pixel coordinates, given camera pose & intrinsics.
+
+    Parameters
+    ----------
+    points : (n,3) array-like of float
+        3D points in the world frame.
+    camera_pose : geometry_msgs.msg.PoseStamped
+        Pose of the camera in the world frame.
+    camera_parameters : tuple of 4 floats
+        (fx, fy, cx, cy) intrinsic parameters.
+
+    Returns
+    -------
+    projected : (n,2) ndarray of float
+        Pixel coordinates (u, v) for each 3D point.
+    """
+    # Unpack intrinsics
+    fx, fy, cx, cy = camera_parameters
+
+    # Convert input to ndarray
+    pts_w = np.asarray(points, dtype=float)  # shape (n,3)
+
+    # Extract translation
+    t = camera_pose.pose.position
+    cam_t = np.array([t.x, t.y, t.z], dtype=float)
+
+    # Extract quaternion
+    q = camera_pose.pose.orientation
+    x, y, z, w = q.x, q.y, q.z, q.w
+
+    # Build rotation matrix R_cam→world from q,
+    # then invert to get R_world→cam = R_cam→world.T
+    R = np.array([
+        [1 - 2*(y*y + z*z),     2*(x*y - z*w),     2*(x*z + y*w)],
+        [    2*(x*y + z*w), 1 - 2*(x*x + z*z),     2*(y*z - x*w)],
+        [    2*(x*z - y*w),     2*(y*z + x*w), 1 - 2*(x*x + y*y)]
+    ], dtype=float)
+    R_wc = R.T  # world → camera
+
+    # Transform points into the camera frame
+    # p_cam = R_wc @ (p_world - cam_t)
+    pts_cam = (R_wc @ (pts_w - cam_t).T).T  # still shape (n,3)
+
+    # Perspective projection (no rounding!)
+    X = pts_cam[:, 0]
+    Y = pts_cam[:, 1]
+    Z = pts_cam[:, 2]
+    if np.any(Z <= 0):
+        # points behind the camera will give nonsense—warn if you like
+        pass
+
+    u = fx * (X / Z) + cx
+    v = fy * (Y / Z) + cy
+
+    return np.stack([u, v], axis=1)
+
+def show_2d_points_with_mask(projected_points, mask, 
+                                    title="Projected Points on Mask",
+                                    point_color=(0, 0, 255),  # red in BGR
+                                    point_radius=0,
+                                    point_thickness=-1):      # filled circle
+    """
+    Overlay projected 2D points on a mask and display with OpenCV.
+
+    Parameters
+    ----------
+    projected_points : (n,2) array-like of float
+        Pixel coordinates (u, v) to draw.
+    mask : 2D ndarray
+        Binary or grayscale mask image. Values will be shown in gray.
+    title : str
+        Window title.
+    point_color : tuple of 3 ints
+        BGR color for the points.
+    point_radius : int
+        Radius of each circle in pixels.
+    point_thickness : int
+        Thickness (-1 for filled).
+    """
+    if mask.dtype != np.bool_:
+        raise ValueError("mask must be boolean")
+    
+    # Convert mask to uint8 gray if needed
+    m = mask
+    m = (mask.astype(np.uint8) * 255)
+
+    # Make BGR canvas
+    canvas = cv2.cvtColor(m, cv2.COLOR_GRAY2BGR)
+
+    # Draw each point
+    for (u, v) in projected_points:
+        # Round down to int pixel coords
+        pt = (int(np.floor(u)), int(np.floor(v)))
+        cv2.circle(canvas, pt, point_radius, point_color, point_thickness)
+
+    # Display
+    cv2.namedWindow(title, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(title, 700, 550)
+    cv2.imshow(title, canvas)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+
+def extract_centerline_from_mask_individual(depth_image: np.ndarray, mask: np.ndarray, camera_parameters: tuple, depth_scale: float = 1.0, connectivity: int = 8, min_length: int = 20, show: bool = False) -> list:
+    """
+    Extracts individual 3D centerline segments (no connections).
+
+    Returns:
+        centerlines: list of (Ni,3) arrays of segment points in camera coords.
+    """
+    fx, fy, cx, cy = camera_parameters
+
+    # 1. Ensure mask is in uint8 format (0 or 1)
+    # If mask is boolean, convert directly
+    if mask.dtype == bool:
+        mask_u8 = mask.astype(np.uint8)
+    else:
+        # If mask has other types (e.g., 0/255), normalize to 0/1
+        mask_u8 = np.where(mask > 127, 1, 0).astype(np.uint8)
+
+    # 2. Binarise and skeletonize + excise + remove short segments
+    # Use threshold on uint8 mask
+    _, binary = cv2.threshold(mask_u8, 0, 1, cv2.THRESH_BINARY)
+
+    skeleton_bool = skeletonize(binary.astype(bool))
+    kernel = np.array([[1,1,1],[1,0,1],[1,1,1]], np.uint8)
+    neighbor_count = cv2.filter2D(skeleton_bool.astype(np.uint8), -1, kernel)
+    ints = np.argwhere((skeleton_bool)&(neighbor_count>=3))
+    dist_map = distance_transform_edt(binary)
+    to_remove = np.zeros_like(skeleton_bool, bool)
+    H, W = skeleton_bool.shape
+    for y,x in ints:
+        r = dist_map[y, x]
+        R = int(np.ceil(r))
+        y0,y1 = max(0,y-R), min(H, y+R+1)
+        x0,x1 = max(0,x-R), min(W, x+R+1)
+        yy,xx = np.ogrid[y0:y1, x0:x1]
+        circle = (yy-y)**2 + (xx-x)**2 <= r**2
+        to_remove[y0:y1, x0:x1][circle] = True
+    skeleton_exc = skeleton_bool & ~to_remove
+    num_labels, labels = cv2.connectedComponents(skeleton_exc.astype(np.uint8), connectivity)
+    for lbl in range(1, num_labels):
+        comp = (labels==lbl)
+        if comp.sum() < min_length:
+            skeleton_exc[comp] = False
+
+    # 2. Extract each segment
+    num_labels2, labels2 = cv2.connectedComponents(skeleton_exc.astype(np.uint8), connectivity)
+    segments = []
+    for lbl in range(1, num_labels2):
+        comp_mask = (labels2 == lbl)
+        pixels = [tuple(pt) for pt in np.argwhere(comp_mask)]
+        nbrs = {p: [] for p in pixels}
+        for y, x in pixels:
+            for dy in (-1,0,1):
+                for dx in (-1,0,1):
+                    if dy==dx==0: continue
+                    q = (y+dy, x+dx)
+                    if q in nbrs:
+                        nbrs[(y,x)].append(q)
+        ends = [p for p,n in nbrs.items() if len(n)==1]
+        start = ends[0] if ends else pixels[0]
+        ordered, prev, curr = [], None, start
+        while True:
+            ordered.append(curr)
+            nxt = [n for n in nbrs[curr] if n!=prev]
+            if not nxt: break
+            prev, curr = curr, nxt[0]
+        coords = np.array(ordered)
+        if show:
+            show_spline_gradient(binary, coords, title=f"Segment {lbl}")
+
+        # 3. Convert to 3D and drop invalid
+        pts3d = []
+        for y,x in coords:
+            z = float(depth_image[y,x]) * depth_scale
+            if z <= 0:
+                continue
+            X = (x - cx) * z / fx
+            Y = (y - cy) * z / fy
+            pts3d.append((X, Y, z))
+        segments.append(np.array(pts3d, dtype=float))
+
+    return segments
+
+def show_spline_gradient(mask: np.ndarray, centerline: np.ndarray, title: str = "Gradient"):
+    """
+    Overlay the 2D centerline points on the mask with a blue→red gradient.
+
+    Args:
+        mask:        H×W binary mask.
+        centerline:  (N×2) array of (row, col) coordinates.
+        title:       OpenCV window name.
+    """
+    # Prepare the background image
+    img = (mask.astype(np.uint8) * 255)
+    img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+
+    N = len(centerline)
+    if N == 0:
+        cv2.imshow(title, img)
+        cv2.waitKey(0)
+        cv2.destroyWindow(title)
+        return
+
+    # Draw each point with its own gradient color
+    for i, (r, c) in enumerate(centerline):
+        t = i / (N - 1) if N > 1 else 0
+        # Compute B→R gradient: blue at start, red at end
+        color = (int(255 * (1 - t)), 0, int(255 * t))
+        # Draw a filled circle at each centerline point
+        cv2.circle(img, (int(c), int(r)), radius=1, color=color, thickness=-1)
+
+    # Show the result
+    cv2.imshow(title, img)
+    cv2.waitKey(0)
+    cv2.destroyWindow(title)
+
+
+
+def control_law(current_pose: PoseStamped,
+                      target_pose: PoseStamped,
+                      step_size: float) -> PoseStamped:
+    """
+    Compute the next gripper pose via a proportional control step.
+
+    Parameters
+    ----------
+    current_pose : PoseStamped
+        The gripper's current pose.
+    target_pose : PoseStamped
+        The desired target pose (with downward-pointing z-axis).
+    step_size : float
+        Control gain γ ∈ [0,1]. 1 = jump straight to target.
+
+    Returns
+    -------
+    PoseStamped
+        The next pose: pₙₑₓₜ = (1-γ)p₀ + γp₁,
+                         qₙₑₓₜ = q₀ ⊗ (q₀⁻¹ ⊗ q₁)^γ.
+    """
+    # Extract translation and quaternion
+    def unpack(ps: PoseStamped):
+        t = ps.pose.position
+        q = ps.pose.orientation
+        trans = np.array([t.x, t.y, t.z], dtype=float)
+        quat  = np.array([q.x, q.y, q.z, q.w], dtype=float)
+        hdr   = copy.deepcopy(ps.header)
+        return trans, quat, hdr
+
+    p0, q0, hdr = unpack(current_pose)
+    p1, q1, _   = unpack(target_pose)
+
+    # 1) Linear step in position:
+    p_next = (1.0 - step_size) * p0 + step_size * p1
+
+    # 2) Compute delta quaternion: q_delta = q0⁻¹ ⊗ q1
+    q_delta = quaternion_multiply(quaternion_inverse(q0), q1)
+
+    # 3) Raise delta to the γ power via slerp from identity [0,0,0,1]
+    identity = np.array([0.0, 0.0, 0.0, 1.0], dtype=float)
+    q_delta_gamma = quaternion_slerp(identity, q_delta, step_size)
+
+    # 4) Apply: q_next = q0 ⊗ q_delta^γ
+    q_next = quaternion_multiply(q0, q_delta_gamma)
+
+    # Build the next PoseStamped
+    ps = PoseStamped()
+    ps.header = hdr
+    # Optionally update timestamp:
+    # ps.header.stamp = rospy.Time.now()
+    ps.pose.position.x = float(p_next[0])
+    ps.pose.position.y = float(p_next[1])
+    ps.pose.position.z = float(p_next[2])
+    ps.pose.orientation.x = float(q_next[0])
+    ps.pose.orientation.y = float(q_next[1])
+    ps.pose.orientation.z = float(q_next[2])
+    ps.pose.orientation.w = float(q_next[3])
+
+    return ps
+
+
 
 #endregion additional after branching

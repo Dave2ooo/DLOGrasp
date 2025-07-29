@@ -20,6 +20,8 @@ from utils.video_utils import create_video_from_images
 import tempfile
 import time
 
+default_prompt = "tube.cable.wire."
+
 class GroundedSamWrapper:
     def __init__(self):
         self.previous_frames = [] 
@@ -55,7 +57,7 @@ class GroundedSamWrapper:
             ckpt_path=self.sam2_checkpoint
         )  # :contentReference[oaicite:4]{index=4}
 
-    def get_mask_grounded(self, image: NDArray[np.uint8], prompt="tube.cable."):
+    def get_mask_grounded(self, image: NDArray[np.uint8], prompt=default_prompt):
         image_pil = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
         text = prompt
 
@@ -82,7 +84,7 @@ class GroundedSamWrapper:
         if input_boxes.size == 0:
             H, W = image.shape[:2]
             rospy.logerr("Object cannot be found.")
-            return np.zeros((1, H, W), dtype=bool)
+            return None
 
         # prompt SAM 2 image predictor to get the mask for the object
         masks, scores, logits = self.image_predictor.predict(
@@ -103,7 +105,7 @@ class GroundedSamWrapper:
         # print(f'masks.shape = {masks.shape}')
         return masks
 
-    def get_mask(self, image: NDArray[np.uint8], prompt="tube.cable."):
+    def get_mask(self, image: NDArray[np.uint8], prompt=default_prompt):
         """
         Accumulates frames and—once we have at least one prior frame—
         uses track_sequence to propagate the mask forward.
@@ -113,12 +115,16 @@ class GroundedSamWrapper:
         self.previous_frames.append(image)
 
         # 2. If this is the very first frame, just ground it directly
-        if len(self.previous_frames) == 1:
+        if len(self.previous_frames) == 0:
             # run the original grounded SAM on this single image
             masks = self.get_mask_grounded(image, prompt=prompt)
+            if masks is None:
+                self.previous_frames = []
+                return None
             # store the chosen mask (take first mask) for future tracking
             self._last_mask = masks[0]
             return masks.astype(bool)
+
 
         # 3. For frame 2+, run track_sequence over all frames so far
         results = self.track_sequence(self.previous_frames, prompt=prompt)
@@ -134,6 +140,7 @@ class GroundedSamWrapper:
         # update _last_mask so that future logic could reuse it if needed
         self._last_mask = mask
         # wrap into the same shape your original returned
+
         return mask[None, ...].astype(bool)  # shape (1, H, W)
 
     def track_sequence(self, frames: list[np.ndarray], prompt="tube.cable."):
@@ -333,8 +340,6 @@ class GroundedSamWrapper:
         points : sequence of (x, y)
             List or array of pixel coordinates to draw on the mask.
         """
-        import cv2
-        import numpy as np
 
         # Normalize mask to uint8 [0,255]
         if mask.dtype == np.float32 or mask.dtype == np.float64:
