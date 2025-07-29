@@ -36,6 +36,9 @@ import time
 from scipy.optimize import least_squares
 from scipy.ndimage import map_coordinates
 
+
+import scipy.optimize as opt
+
 # ----------------------------------------------------------------------------
 
 def create_stamped_transform_from_trans_and_rot(translation, rotation):
@@ -1491,8 +1494,9 @@ def interactive_scale_shift(depth1: np.ndarray,
                             mask2: np.ndarray,
                             pose1: TransformStamped,
                             pose2: TransformStamped,
-                            scale_limits: tuple[float, float] = (0.005, 0.4),
-                            shift_limits: tuple[float, float] = (-1.0, 1.0)
+                            camera_parameters: tuple[float, float, float, float],
+                            scale_limits: tuple[float, float] = (0.1, 0.8),
+                            shift_limits: tuple[float, float] = (-2.0, 2.0)
                             ) -> tuple[float, float, int]:
     """
     Open an OpenCV window with two trackbars (“scale” and “shift”) that lets you
@@ -1545,10 +1549,10 @@ def interactive_scale_shift(depth1: np.ndarray,
         # 1) scale & shift depth1
         d1 = scale_depth_map(depth1, scale, shift)
         # 2) to world pointcloud
-        pc1 = get_pointcloud(d1)
+        pc1 = convert_depth_map_to_pointcloud(d1, camera_parameters)
         pc1_world = transform_pointcloud_to_world(pc1, pose1)
         # 3) project into cam2
-        _, reproj_mask = project_pointcloud(pc1_world, pose2)
+        _, reproj_mask = project_pointcloud_from_world(pc1_world, pose2, camera_parameters)
         # 4) overlay masks
         m2 = (mask2.astype(bool)).astype(np.uint8) * 255
         rm = (reproj_mask.astype(bool)).astype(np.uint8) * 255
@@ -2485,6 +2489,67 @@ def project_bspline_pts(ctrl_points, camera_pose, camera_parameters, degree=3, n
     valid = (z_cam>0) & (u>=-1) & (u<width+1) & (v>=-1) & (v<height+1)
     return np.stack([u[valid], v[valid]], axis=1)  # shape (M,2)
 
+def project_bspline_pts_new(spline, camera_pose, camera_parameters, degree=3, num_samples=200,  width=640, height=480):
+    """
+    Same as project_bspline but returns sampled 2D pixel coords (floats) along the spline,
+    instead of rasterizing to a mask.
+    """
+    # Unpack intrinsics
+    fx, fy, cx, cy = camera_parameters
+
+    # Build open-uniform knot vector
+    n_ctrl = ctrl_points.shape[0]
+    k = degree
+    if n_ctrl <= k:
+        raise ValueError("Number of control points must exceed spline degree")
+    num_inner = n_ctrl - k - 1
+    if num_inner > 0:
+        inner = np.linspace(1/(num_inner+1), num_inner/(num_inner+1), num_inner)
+        t = np.concatenate(([0]*(k+1), inner, [1]*(k+1)))
+    else:
+        t = np.concatenate(([0]*(k+1), [1]*(k+1)))
+
+    # Create vector-valued spline
+    spline = BSpline(t, ctrl_points, k, axis=0)
+
+    # Sample points along spline
+    u = np.linspace(0, 1, num_samples)
+    pts_world = spline(u)  # (num_samples x 3)
+
+    # Parse camera pose (world -> camera)
+    tx = camera_pose.pose.position.x
+    ty = camera_pose.pose.position.y
+    tz = camera_pose.pose.position.z
+    qx = camera_pose.pose.orientation.x
+    qy = camera_pose.pose.orientation.y
+    qz = camera_pose.pose.orientation.z
+    qw = camera_pose.pose.orientation.w
+
+    # Build rotation matrix from quaternion (camera -> world)
+    xx, yy, zz = qx*qx, qy*qy, qz*qz
+    xy, xz, yz = qx*qy, qx*qz, qy*qz
+    wx, wy, wz = qw*qx, qw*qy, qw*qz
+    R = np.array([
+        [1-2*(yy+zz),   2*(xy - wz),   2*(xz + wy)],
+        [  2*(xy + wz), 1-2*(xx+zz),   2*(yz - wx)],
+        [  2*(xz - wy),   2*(yz + wx), 1-2*(xx+yy)]
+    ])
+
+    # Transform points into camera frame: p_cam = R^T * (p_world - t)
+    diff = pts_world - np.array([tx, ty, tz])
+    # pts_cam = diff.dot(R.T)
+    pts_cam = diff.dot(R)
+
+    # Perspective projection
+    x_cam, y_cam, z_cam = pts_cam[:,0], pts_cam[:,1], pts_cam[:,2]
+    # compute pts_cam, do projection, but **don’t** round or clip:
+    u = fx * x_cam / z_cam + cx
+    v = fy * y_cam / z_cam + cy
+
+    # keep only those with z>0 and inside a slightly padded window
+    valid = (z_cam>0) & (u>=-1) & (u<width+1) & (v>=-1) & (v<height+1)
+    return np.stack([u[valid], v[valid]], axis=1)  # shape (M,2)
+
 def skeletonize_mask(mask: np.ndarray) -> np.ndarray:
     """
     Compute the 2D skeleton of a binary mask.
@@ -2764,6 +2829,8 @@ def score_function_bspline_reg_multiple_pre(x, camera_poses: PoseStamped, camera
     loss = mean_assd + reg_weight * drift + curvature_weight * curvature_penalty
     # print(f"loss: {loss:.3f}")
     return float(loss)
+
+
 
 def score_function_bspline_reg_multiple(x, datas, camera_poses, camera_parameters, degree, init_x, reg_weight: float = 1000.0, decay: float = 1.0, curvature_weight: float = 1.0, show: bool = False):
     """
@@ -3468,8 +3535,9 @@ def get_midpoint_and_angle_spline(spline: BSpline):
     dx, dy = d_pt[0], d_pt[1]
 
     # --- 5) angle via atan2
-    angle = np.arctan2(dy, dx)
-    angle += np.pi/2
+    # angle = np.arctan2(dy, dx)
+    angle = np.arctan2(dx, dy)
+    # angle += np.pi/2
     # normalize to [-pi/2, pi/2]
     while angle > np.pi/2:
         angle -= np.pi
@@ -3988,6 +4056,444 @@ def control_law(current_pose: PoseStamped,
 
     return ps
 
+
+
+
+def optimize_bspline_pre_working(
+        initial_spline,
+        camera_parameters,
+        masks,
+        camera_poses,
+        decay=0.95,
+        reg_weight=0,
+        curvature_weight=0,
+        num_samples=200,
+        symmetric=True,
+        translate=False,
+        disp=True,
+    ):
+    # Initial control points
+    ctrl_pts_init = initial_spline.c.copy()
+    ctrl_pts_init_flat = ctrl_pts_init.reshape(-1)
+    degree = initial_spline.k
+    knot_vector = initial_spline.t.copy()
+    dim = ctrl_pts_init.shape[1]
+    num_ctrl = ctrl_pts_init.shape[0]
+
+    n_frames = len(masks)
+    weights = np.array([decay**(n_frames - 1 - i) for i in range(n_frames)], dtype=float)
+    wsum = weights.sum()
+
+    _, interps = precompute_skeletons_and_interps(masks) 
+
+    def make_bspline(ctrl_points_flat):
+        ctrl_points = ctrl_points_flat.reshape(num_ctrl, dim)
+        return BSpline(knot_vector, ctrl_points, degree)  
+    
+    # Precompute skeletons, distance transforms, and coordinates
+    dts = []
+    skeleton_coords = []
+    for mask in masks:
+        sk = skeletonize(mask > 0)
+        coords = np.vstack(np.nonzero(sk)).T  # (v,u)
+        skeleton_coords.append((sk, coords))
+        dts.append(distance_transform_edt(~sk))
+
+
+    def objective(ctrl_points_flat):
+        ctrl_pts = ctrl_points_flat.reshape(-1, 3)
+
+        # 1) reshape & drift penalty
+        drift = np.linalg.norm(ctrl_points_flat - ctrl_pts_init_flat) / num_ctrl
+
+        # 2) curvature penalty
+        if num_ctrl >= 3:
+            diffs = ctrl_pts[1:] - ctrl_pts[:-1]
+            v1, v2 = diffs[:-1], diffs[1:]
+            dot = np.einsum('ij,ij->i', v1, v2)
+            n1 = np.linalg.norm(v1, axis=1)
+            n2 = np.linalg.norm(v2, axis=1)
+            cos_t = np.clip(dot/(n1*n2 + 1e-8), -1, 1)
+            angles = np.arccos(cos_t)
+            curvature_penalty = np.mean(angles**2)
+        else:
+            curvature_penalty = 0.0
+
+
+        # Build spline and sample
+        # spline = make_bspline(ctrl_points_flat)
+        spline = create_bspline(ctrl_points_flat.reshape(-1, 3))
+        sampled_pts_3d = sample_bspline(spline, num_samples)
+        
+        assd_sum = 0.0
+        for i, ((sk, coords), dt, cam_pose) in enumerate(zip(skeleton_coords, dts, camera_poses)):
+            pts2d = project_3d_points(sampled_pts_3d, cam_pose, camera_parameters)
+            # guard against empty projection
+            if pts2d.size == 0:
+                # no points visible → huge penalty
+                assd_i = np.max(interps[i].values)  # max distance
+            else:
+                # sample the precomputed interpolator
+                sample_pts = np.stack([pts2d[:,1], pts2d[:,0]], axis=1)
+                dists = interps[i](sample_pts)
+                # guard NaNs
+                assd_i = np.nanmean(dists) if np.isfinite(dists).any() else np.max(interps[i].values)
+
+            assd_sum += weights[i] * assd_i
+
+        mean_assd = assd_sum / wsum
+
+        # 5) final loss
+        loss = mean_assd + reg_weight * drift + curvature_weight * curvature_penalty
+        # print(f"loss: {loss:.3f}")
+        return float(loss)
+    
+    bounds = make_bspline_bounds(initial_spline, delta=0.4)
+
+    start = time.perf_counter()
+    result = opt.minimize(
+        fun=objective,
+        x0=ctrl_pts_init_flat,
+        method='L-BFGS-B', # 'Powell', # 
+        bounds=bounds,
+        jac='3-point',
+        options={'maxiter':1e6, 'ftol':1e-6, 'eps':1e-4, 'disp':True, 'maxfun':1e6}
+    )
+    end = time.perf_counter()
+    # print(f"Optimization took {end - start:.2f} seconds")
+    # return make_bspline(result.x)
+    return create_bspline(result.x.reshape(-1, 3))
+
+def optimize_bspline_pre_least_squares(
+        initial_spline,
+        camera_parameters,
+        masks,
+        camera_poses,
+        decay=0.95,
+        reg_weight=0,
+        curvature_weight=0,
+        num_samples=200,
+        symmetric=True,
+        translate=False,
+        disp=True,
+    ):
+    # Initial control points
+    ctrl_pts_init = initial_spline.c.copy()
+    ctrl_pts_init_flat = ctrl_pts_init.reshape(-1)
+    degree = initial_spline.k
+    knot_vector = initial_spline.t.copy()
+    dim = ctrl_pts_init.shape[1]
+    num_ctrl = ctrl_pts_init.shape[0]
+
+    n_frames = len(masks)
+    weights = np.array([decay**(n_frames - 1 - i) for i in range(n_frames)], dtype=float)
+    wsum = weights.sum()
+
+    _, interps = precompute_skeletons_and_interps(masks) 
+
+    def make_bspline(ctrl_points_flat):
+        ctrl_points = ctrl_points_flat.reshape(num_ctrl, dim)
+        return BSpline(knot_vector, ctrl_points, degree)  
+    
+    # Precompute skeletons, distance transforms, and coordinates
+    dts = []
+    skeleton_coords = []
+    for mask in masks:
+        sk = skeletonize(mask > 0)
+        coords = np.vstack(np.nonzero(sk)).T  # (v,u)
+        skeleton_coords.append((sk, coords))
+        dts.append(distance_transform_edt(~sk))
+
+    #region old residuals
+    # def objective(ctrl_points_flat):
+    #     residuals = []
+    #     ctrl_pts = ctrl_points_flat.reshape(-1, 3)
+
+    #     # 1) reshape & drift penalty
+    #     drift_penalty = (ctrl_points_flat - ctrl_pts_init_flat) / num_ctrl * reg_weight
+    #     residuals.extend(drift_penalty)
+
+    #     # 2) curvature penalty
+    #     if num_ctrl >= 3:
+    #         diffs = ctrl_pts[1:] - ctrl_pts[:-1]
+    #         v1, v2 = diffs[:-1], diffs[1:]
+    #         dot = np.einsum('ij,ij->i', v1, v2)
+    #         n1 = np.linalg.norm(v1, axis=1)
+    #         n2 = np.linalg.norm(v2, axis=1)
+    #         cos_t = np.clip(dot/(n1*n2 + 1e-8), -1, 1)
+    #         angles = np.arccos(cos_t)
+    #         # curvature_penalty = np.mean(angles**2)
+    #         curvature_penalty = angles**2 * curvature_weight
+    #         residuals.extend(curvature_penalty)
+    #     else:
+    #         # curvature_penalty = 0.0
+    #         pass
+
+
+    #     # Build spline and sample
+    #     spline = make_bspline(ctrl_points_flat)
+    #     sampled_pts_3d = sample_bspline(spline, num_samples)
+        
+    #     assd_sum = 0.0
+    #     for i, ((sk, coords), dt, cam_pose) in enumerate(zip(skeleton_coords, dts, camera_poses)):
+    #         pts2d = project_3d_points(sampled_pts_3d, cam_pose, camera_parameters)
+    #         # guard against empty projection
+    #         if pts2d.size == 0:
+    #             # no points visible → huge penalty
+    #             assd_i = np.max(interps[i].values)  # max distance
+    #         else:
+    #             # sample the precomputed interpolator
+    #             sample_pts = np.stack([pts2d[:,1], pts2d[:,0]], axis=1)
+    #             dists = interps[i](sample_pts)
+    #             # guard NaNs
+    #             assd_i = np.nanmean(dists) if np.isfinite(dists).any() else np.max(interps[i].values)
+
+    #         # assd_sum += weights[i] * assd_i
+    #         assd_i *= weights[i]
+    #         residuals.append(assd_i)
+
+    #     # mean_assd = assd_sum / wsum
+
+    #     # 5) final loss
+    #     # loss = mean_assd + reg_weight * drift + curvature_weight * curvature_penalty
+    #     # print(f"loss: {loss:.3f}")
+    #     print(f"residuals: {residuals}")
+    #     return residuals
+    #endregion old residuals
+
+    def objective(ctrl_points_flat):
+        """
+        Residual vector for scipy.optimize.least_squares.
+        0.5 * sum(residual**2)  reproduces  *exactly*:
+            mean_assd + reg_weight*drift + curvature_weight*curv
+        """
+        ctrl_pts = ctrl_points_flat.reshape(-1, 3)
+        res = []
+
+        # --- drift term: reg_weight * drift  ----------------------------------
+        drift = np.linalg.norm(ctrl_points_flat - ctrl_pts_init_flat) / num_ctrl
+        # choose r so that 0.5*r**2 = reg_weight * drift
+        res.append(np.sqrt(2 * reg_weight * max(drift, 1e-12)))
+
+        # --- curvature term: curvature_weight * mean(angles**2) ---------------
+        if num_ctrl >= 3 and curvature_weight:
+            v = ctrl_pts[1:] - ctrl_pts[:-1]
+            cos_t = np.einsum('ij,ij->i', v[:-1], v[1:]) / (
+                    np.linalg.norm(v[:-1], axis=1) *
+                    np.linalg.norm(v[1:],  axis=1) + 1e-12)
+            angles2 = np.arccos(np.clip(cos_t, -1, 1)) ** 2
+            curv = angles2.mean()
+            res.append(np.sqrt(2 * curvature_weight * max(curv, 1e-12)))
+
+        # --- data term:   (weights/wsum) * assd_i  ----------------------------
+        spline = make_bspline(ctrl_points_flat)
+        sampled_pts_3d = sample_bspline(spline, num_samples)
+
+        for i, (cam_pose, interp) in enumerate(zip(camera_poses, interps)):
+            pts2d = project_3d_points(sampled_pts_3d, cam_pose, camera_parameters)
+            if pts2d.size == 0:
+                assd_i = np.max(interp.values)
+            else:
+                dists = interp(np.stack([pts2d[:, 1], pts2d[:, 0]], axis=1))
+                assd_i = np.nanmean(dists) if np.isfinite(dists).any() else np.max(interp.values)
+
+            weight_i = weights[i] / wsum                      # same weight as before
+            res.append(np.sqrt(2 * weight_i * max(assd_i, 1e-12)))
+
+        return np.asarray(res, dtype=float)
+    
+    bounds = make_bspline_bounds(initial_spline, delta=0.4) # wring format for least squares
+    lo, hi = np.array(bounds, dtype=float).T      # shape both (n,)
+    init_res = objective(ctrl_pts_init_flat)
+
+    start = time.perf_counter()
+    # result = opt.minimize(
+    #     fun=objective,
+    #     x0=ctrl_pts_init_flat,
+    #     method='L-BFGS-B', # 'Powell', # 
+    #     bounds=bounds,
+    #     options={'maxiter':1e6, 'ftol':1e-6, 'eps':1e-6, 'xtol':1e-4, 'disp':True, 'maxfun':1e6}
+    # )
+
+    result = least_squares(
+        fun              = objective,    # your function
+        x0               = ctrl_pts_init_flat,    # shape (n,)
+        method           = "trf", # "lm", # "dogbox",
+        jac              = "2-point",            # or supply analytic/complex-step
+        bounds           = (lo, hi),             # e.g. physical limits on control pts
+        # loss             = "soft_l1",            # robust to skeleton gaps/outliers
+        f_scale          = np.median(init_res),  # soft inlier threshold
+        x_scale          = "jac",                # auto-scaling
+        ftol             = 1e-9,
+        xtol             = 1e-9,
+        gtol             = 1e-9,
+        diff_step        = None,                 # let SciPy pick
+        max_nfev         = 2000,                 # give it room
+        verbose          = disp,
+    )
+
+    end = time.perf_counter()
+    print(f"Optimization took {end - start:.2f} seconds")
+    return make_bspline(result.x), result.cost
+
+def sample_bspline(spline: BSpline, n_samples: int):
+    """
+    Sample a 3-dimensional BSpline so that you get an (n_samples, 3) array back.
+
+    Parameters
+    ----------
+    spline : BSpline
+        A BSpline whose coefficient dimension is 3.
+    n_samples : int
+        Number of points to sample.
+
+    Returns
+    -------
+    u : (n_samples,) float array
+        Parameter values uniformly spaced on [t[k], t[-k-1]].
+    pts : (n_samples, 3) float array
+        Spline evaluated at each u, shape guaranteed to be (n_samples,3).
+    """
+    # domain
+    t, c, k = spline.t, spline.c, spline.k
+    u_min, u_max = t[k], t[-k-1]
+    u = np.linspace(u_min, u_max, n_samples)
+
+    # evaluate; for a 3D spline spline(u) returns shape (n_samples, 3)
+    pts = spline(u)
+
+    # sometimes spline(u) returns shape (3, n_samples), so transpose if needed
+    if pts.ndim == 2 and pts.shape[0] == 3 and pts.shape[1] == n_samples:
+        pts = pts.T
+
+    # final sanity check
+    if pts.shape != (n_samples, 3):
+        raise ValueError(f"Expected output shape ({n_samples},3), got {pts.shape}")
+
+    return pts
+
+
+def optimize_depth_map(depths, masks, camera_poses, camera_parameters, show=False):
+    mask = masks[0]
+    camera_pose_mask = camera_poses[0]
+
+    depth = depths[1]
+    camera_pose_depth = camera_poses[1]
+
+    _, interps = precompute_skeletons_and_interps(masks=[mask])
+
+    def objective(scale_shift):
+        scale, shift = scale_shift
+
+        scaled_shifted_depth = scale_depth_map(depth=depth, scale=scale, shift=shift)
+        depth_pointcloud = convert_depth_map_to_pointcloud(depth=scaled_shifted_depth, camera_parameters=camera_parameters)
+        depth_pointcloud_world = transform_pointcloud_to_world(pointcloud=depth_pointcloud, camera_pose=camera_pose_depth)
+
+        pts2d = project_pointcloud_exact(pointcloud=depth_pointcloud_world, camera_pose=camera_pose_mask, camera_parameters=camera_parameters)
+
+        # print(f"pts2d: {pts2d.shape}")
+
+
+        # guard against empty projection
+        if pts2d.size == 0:
+            # no points visible → huge penalty
+            assd_i = np.max(interps[0].values)  # max distance
+        else:
+            # sample the precomputed interpolator
+            sample_pts = np.stack([pts2d[:,1], pts2d[:,0]], axis=1)
+            dists = interps[0](sample_pts)
+            # guard NaNs
+            assd_i = np.nanmean(dists) if np.isfinite(dists).any() else np.max(interps[0].values)
+
+        print(f"pts2d shape: {pts2d.shape}, ASSD: {assd_i}")
+        return assd_i
+        
+
+    # bounds = [(0.05, 0.4), (-0.3, 0.3)] # [(alpha_min, alpha_max), (beta_min,  beta_max)]
+    bounds = [(0.05, 1), (-1, 1)] # [(alpha_min, alpha_max), (beta_min,  beta_max)]
+
+    start = time.perf_counter()
+    result = opt.minimize(
+        objective,
+        bounds=bounds,
+        x0 = [0.28, 0.03],
+        method= 'Powell', #'L-BFGS-B', 
+            options={'maxiter':1e8, 'ftol':1e-2, 'eps':1e-6, 'disp':True, 'maxfun':1e8}
+    )
+    end = time.perf_counter()
+    print(f"Estimating scale & shift took {end - start:.2f} seconds")
+
+    scale, shift = result.x
+    print(f"Scale: {scale:.2f}, Shift: {shift:.2f}")
+
+    optimal_depth = scale_depth_map(depth=depth, scale=scale, shift=shift)
+
+    scaled_shifted_depth = scale_depth_map(depth=depth, scale=scale, shift=shift)
+    depth_pointcloud = convert_depth_map_to_pointcloud(depth=scaled_shifted_depth, camera_parameters=camera_parameters)
+    depth_pointcloud_world = transform_pointcloud_to_world(pointcloud=depth_pointcloud, camera_pose=camera_pose_depth)
+    _, projection = project_pointcloud_from_world(depth_pointcloud_world, camera_pose_mask, camera_parameters)
+
+
+    if show:
+        show_masks_union(mask, projection)
+
+    return scale, shift, depth_pointcloud_world, None
+
+
+def project_pointcloud_exact(pointcloud: 'o3d.geometry.PointCloud',
+                       camera_pose: 'PoseStamped',
+                       camera_parameters: tuple[float,float,float,float] | None = None
+                      ) -> np.ndarray:
+    """
+    Transform a pointcloud into camera frame and project.
+    
+    Parameters
+    ----------
+    pointcloud
+        Open3D PointCloud in the same frame as camera_pose.
+    camera_pose
+        geometry_msgs.msg.PoseStamped describing camera→world.
+    intrinsics
+        (fx, fy, cx, cy). If provided, returns pixel coords
+        [u_px, v_px]. Otherwise returns normalized [x/z, y/z].
+
+    Returns
+    -------
+    pts2d : (M,2) ndarray
+        2D points either normalized (if intrinsics=None) or in
+        pixel coordinates.
+    """
+    # 1) Build world→camera transform
+    q = camera_pose.pose.orientation
+    t = camera_pose.pose.position
+    T_cam_w = quaternion_matrix([q.x, q.y, q.z, q.w])
+    T_cam_w[0:3, 3] = [t.x, t.y, t.z]
+    T_w_cam = np.linalg.inv(T_cam_w)
+
+    # 2) Load points and make homogeneous
+    pts_w = np.asarray(pointcloud.points)            # (N,3)
+    pts_h = np.hstack([pts_w, np.ones((pts_w.shape[0],1))])  # (N,4)
+
+    # 3) Transform to camera frame
+    pts_cam = (T_w_cam @ pts_h.T).T[:, :3]           # (N,3)
+
+    # 4) Keep only in‐front points
+    mask = pts_cam[:,2] > 0
+    pts_cam = pts_cam[mask]
+
+    # 5) Project
+    x, y, z = pts_cam[:,0], pts_cam[:,1], pts_cam[:,2]
+    u_norm = x / z
+    v_norm = y / z
+    pts2d = np.vstack([u_norm, v_norm]).T            # (M,2)
+
+    if camera_parameters is not None:
+        fx, fy, cx, cy = camera_parameters
+        u_px = fx * u_norm + cx
+        v_px = fy * v_norm + cy
+        pts2d = np.vstack([u_px, v_px]).T            # pixel coords
+
+    return pts2d
 
 
 #endregion additional after branching

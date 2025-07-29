@@ -523,7 +523,7 @@ class MyClass:
             # disp=True,
             x0 = [0, 0],
             method='Powell', # 'L-BFGS-B',
-            options={'maxiter':1e6, 'ftol':1e-8, 'eps':1e-8, 'xtol':1e-6, 'disp':True, 'maxfun':1e6}
+            options={'maxiter':1e6, 'ftol':1e-10, 'eps':1e-8, 'xtol':1e-8, 'disp':True, 'maxfun':1e6}
         )
 
         # result_coarse = opt.minimize(
@@ -808,7 +808,6 @@ def pipeline_spline():
 
     # input("Press Enter when image is correct")
 
-    #region -------------------- Depth Anything --------------------
     # Take image
     images.append(image_subscriber.get_current_image()) # <- online
     # images.append(cv2.imread(f'/root/workspace/images/moves/cable{1}.jpg')) # <- offline
@@ -822,23 +821,34 @@ def pipeline_spline():
     # show_masks(masks[-1])
     # Estimate scale and shift
     # best_alpha, best_beta, best_pc_world, num_inliers, num_inliers_union = my_class.estimate_scale_shift_new(data[-2], data[-1], camera_poses[-2], camera_poses[-1], show=True)
-    best_alpha, best_beta, best_pc_world, score = my_class.estimate_scale_shift_from_multiple_cameras_distance(depths, masks, camera_poses, show=True)
-    best_alphas.append(best_alpha)
-    best_betas.append(best_beta)
+
+    #region old scale-shift
+    # best_alpha, best_beta, best_pc_world, score = my_class.estimate_scale_shift_from_multiple_cameras_distance(depths, masks, camera_poses, show=True)
+    # best_alphas.append(best_alpha)
+    # best_betas.append(best_beta)
+    # best_pcs_world.append(best_pc_world)
+    # pointcloud_publisher.publish(best_pcs_world[-1])
+    #endregion old scale-shift
+
+    # best_alpha, best_beta, score = interactive_scale_shift(depth1=depths[0], mask2=masks[1], pose1=camera_poses[0], pose2=camera_poses[1], camera_parameters=camera_parameters)
+  
+
+    #region new scale-shift
+    best_alpha, best_beta, best_pc_world, score = optimize_depth_map(depths=depths, masks=masks, camera_poses=camera_poses, camera_parameters=camera_parameters, show=True)
     best_pcs_world.append(best_pc_world)
     pointcloud_publisher.publish(best_pcs_world[-1])
-    #endregion -------------------- Depth Enything --------------------
+    #endregion new scale-shift
 
     #region -------------------- Spline --------------------
     best_depth = scale_depth_map(depths[-1], best_alpha, best_beta)
     # centerline_pts_cam2 = extract_centerline_from_mask(best_depth, masks[-1], camera_parameters)
     centerline_pts_cam2_array = extract_centerline_from_mask_individual(best_depth, masks[-1], camera_parameters, show=False)
-    print(f"centerline_pts_cam2_array: {len(centerline_pts_cam2_array)}: {centerline_pts_cam2_array}")
+    # print(f"centerline_pts_cam2_array: {len(centerline_pts_cam2_array)}: {centerline_pts_cam2_array}")
     centerline_pts_cam2 = max(centerline_pts_cam2_array, key=lambda s: s.shape[0]) # Extract the longest path
-    print(f"centerline_pts_cam2: {centerline_pts_cam2.shape[0]}: {centerline_pts_cam2}")
+    # print(f"centerline_pts_cam2: {centerline_pts_cam2.shape[0]}: {centerline_pts_cam2}")
     centerline_pts_world = transform_points_to_world(centerline_pts_cam2, camera_poses[-1])
     # Fit B-spline
-    b_splines.append(fit_bspline_scipy(centerline_pts_world, degree=degree, smooth=1e-5, nest=20))
+    b_splines.append(fit_bspline_scipy(centerline_pts_world, degree=degree, smooth=1e-5, nest=20, num_ctrl=20))
 
     spline_pc = convert_bspline_to_pointcloud(b_splines[-1])
     pointcloud_publisher.publish(spline_pc)
@@ -852,6 +862,7 @@ def pipeline_spline():
     show_masks([masks[-1], correct_skeleton], "Correct Skeleton")
 
     # show_masks([correct_skeleton, projected_spline_cam1], "Correct Skeleton and Projected Spline (CAM1)")
+
 
 
     # Get highest Point in pointcloud
@@ -902,12 +913,13 @@ def pipeline_spline():
             args=(masks[-1], camera_poses[-1], camera_parameters, degree, b_splines[-1]),
             method='L-BFGS-B', # 'Powell',                  # a quasi-Newton gradient‐based method
             bounds=bounds,                     # same ±0.5 bounds per coord
-            options={
-                'maxiter': 1e6,
-                'ftol': 1e-5,
-                'eps': 0.0005,
-                'disp': True
-            }
+            # options={
+            #     'maxiter': 1e6,
+            #     'ftol': 1e-5,
+            #     'eps': 0.0005,
+            #     'disp': True
+            # }
+            options={'maxiter':1e8, 'ftol':1e-2, 'eps':1e-6, 'disp':True, 'maxfun':1e8}
         )
         end = time.perf_counter()
         print(f"B-spline translation took {end - start:.2f} seconds")
@@ -915,72 +927,74 @@ def pipeline_spline():
         #endregion Translate b-spline old
 
         #region optimize control points - old/working
-        # 1) Precompute once:
-        skeletons, interps = precompute_skeletons_and_interps(masks)        # 2) Call optimizer with our new score:
-        bounds = make_bspline_bounds(bspline_translated, delta=0.4)
-        init_x_coarse = bspline_translated.c.flatten()
-        reg_weight = 0 # 500
-        decay = 1 # 0..1
-        curvature_weight = 1
-        # 2) Coarse/fine minimization calls:
-        start = time.perf_counter()
-        result_coarse = opt.minimize(
-            fun=score_function_bspline_reg_multiple_pre,
-            x0=init_x_coarse,
-            args=(
-                camera_poses,
-                camera_parameters,
-                degree,
-                init_x_coarse,
-                reg_weight,
-                decay,
-                curvature_weight,
-                skeletons,
-                interps,
-                50
-            ),
-            method='L-BFGS-B', # 'Powell', # 
-            bounds=bounds,
-            options={'maxiter':1e6, 'ftol':1e-6, 'eps':1e-6, 'xtol':1e-4, 'disp':True, 'maxfun':1e6}
-        )
-        end = time.perf_counter()
-        print(f"Coarse optimization took {end - start:.2f} seconds")
-        print(f"result: {result_coarse}")
-        ctrl_points_coarse = result_coarse.x.reshape(-1, 3)
-        spline_coarse = create_bspline(ctrl_points_coarse)
-        projected_spline_cam2_coarse = project_bspline(spline_coarse, camera_poses[-1], camera_parameters)
-        show_masks([masks[-1], projected_spline_cam2_coarse], "Projected B-Spline Cam2 Coarse")
+        # # 1) Precompute once:
+        # skeletons, interps = precompute_skeletons_and_interps(masks)        # 2) Call optimizer with our new score:
+        # bounds = make_bspline_bounds(bspline_translated, delta=0.4)
+        # init_x_coarse = bspline_translated.c.flatten()
+        # reg_weight = 0 # 500
+        # decay = 1 # 0..1
+        # curvature_weight = 1
+        # # 2) Coarse/fine minimization calls:
+        # start = time.perf_counter()
+        # result_coarse = opt.minimize(
+        #     fun=score_function_bspline_reg_multiple_pre,
+        #     x0=init_x_coarse,
+        #     args=(
+        #         camera_poses,
+        #         camera_parameters,
+        #         degree,
+        #         init_x_coarse,
+        #         reg_weight,
+        #         decay,
+        #         curvature_weight,
+        #         skeletons,
+        #         interps,
+        #         50
+        #     ),
+        #     jac='3-point',
+        #     method='L-BFGS-B', # 'Powell', # 
+        #     bounds=bounds,
+        #     options={'maxiter':1e6, 'ftol':1e-6, 'eps':1e-4, 'xtol':1e-4, 'disp':False, 'maxfun':1e6}
+        # )
+        # end = time.perf_counter()
+        # print(f"Coarse optimization took {end - start:.2f} seconds")
+        # print(f"result: {result_coarse}")
+        # ctrl_points_coarse = result_coarse.x.reshape(-1, 3)
+        # spline_coarse = create_bspline(ctrl_points_coarse)
+        # projected_spline_cam2_coarse = project_bspline(spline_coarse, camera_poses[-1], camera_parameters)
+        # show_masks([masks[-1], projected_spline_cam2_coarse], "Projected B-Spline Cam2 Coarse")
 
-        spline_pc = convert_bspline_to_pointcloud(b_splines[-1])
-        pointcloud_publisher.publish(spline_pc)
+        # spline_pc = convert_bspline_to_pointcloud(b_splines[-1])
+        # pointcloud_publisher.publish(spline_pc)
 
 
-        init_x_fine = ctrl_points_coarse.flatten()
-        start = time.perf_counter()
-        result_fine = opt.minimize(
-            fun=score_function_bspline_reg_multiple_pre,
-            x0=init_x_fine,
-            args=(
-                camera_poses,
-                camera_parameters,
-                degree,
-                init_x_fine,
-                reg_weight,
-                decay,
-                curvature_weight,
-                skeletons,
-                interps,
-                200
-            ),
-            method='L-BFGS-B', # 'Powell', # 
-            bounds=bounds,
-            options={'maxiter':1e6, 'ftol':1e-6, 'eps':1e-8, 'xtol':1e-4, 'disp':True, 'maxfun':1e6}
-        )
-        end = time.perf_counter()
-        print(f"Fine optimization took {end - start:.2f} seconds")
-        print(f"result: {result_fine}")
-        ctrl_points_fine = result_fine.x.reshape(-1, 3)
-        b_splines.append(create_bspline(ctrl_points_fine))
+        # init_x_fine = ctrl_points_coarse.flatten()
+        # start = time.perf_counter()
+        # result_fine = opt.minimize(
+        #     fun=score_function_bspline_reg_multiple_pre,
+        #     x0=init_x_fine,
+        #     args=(
+        #         camera_poses,
+        #         camera_parameters,
+        #         degree,
+        #         init_x_fine,
+        #         reg_weight,
+        #         decay,
+        #         curvature_weight,
+        #         skeletons,
+        #         interps,
+        #         200
+        #     ),
+        #     jac='3-point',
+        #     method='L-BFGS-B', # 'Powell', # 
+        #     bounds=bounds,
+        #     options={'maxiter':1e6, 'ftol':1e-6, 'eps':1e-4, 'xtol':1e-4, 'disp':False, 'maxfun':1e6}
+        # )
+        # end = time.perf_counter()
+        # print(f"Fine optimization took {end - start:.2f} seconds")
+        # print(f"result: {result_fine}")
+        # ctrl_points_fine = result_fine.x.reshape(-1, 3)
+        # b_splines.append(create_bspline(ctrl_points_fine))
         #endregion
 
         #region optimize control points - new/semi-working
@@ -1030,6 +1044,90 @@ def pipeline_spline():
         #     verbose=optimizer_verbose,
         # ))
         #endregion optimize control points - new/semi-working
+
+        #region optimize control points - least-squares
+        # # 1) Precompute once:
+        # skeletons, interps = precompute_skeletons_and_interps(masks) 
+        # print("--------------------    Coarse Optimization    --------------------")
+        # b_splines.append(optimize_bspline_pre_least_squares(initial_spline=b_splines[-1],
+        #                      camera_parameters=camera_parameters,
+        #                      masks=masks,
+        #                      camera_poses=camera_poses,
+        #                      decay=1,
+        #                      reg_weight=10,
+        #                      curvature_weight=1,
+        #                      num_samples=50,
+        #                      symmetric=True,
+        #                      translate=False,
+        #                      disp=True))
+
+        # for index, (skeleton, camera_pose) in enumerate(zip(skeletons, camera_poses)):
+        #     projected_spline_cam2_fine = project_bspline(b_splines[-1], camera_pose, camera_parameters)
+        #     show_masks([skeleton, projected_spline_cam2_fine], f"Projected B-Spline Cam {index} Coarse")
+
+
+        # print("--------------------    Fine Optimization    --------------------")
+        # b_splines.append(optimize_bspline_pre_least_squares(initial_spline=b_splines[-1],
+        #                      camera_parameters=camera_parameters,
+        #                      masks=masks,
+        #                      camera_poses=camera_poses,
+        #                      decay=1,
+        #                      reg_weight=10,
+        #                      curvature_weight=1,
+        #                      num_samples=200,
+        #                      symmetric=True,
+        #                      translate=False,
+        #                      disp=True))
+        
+
+        # for index, (skeleton, camera_pose) in enumerate(zip(skeletons, camera_poses)):
+        #     projected_spline_cam2_fine = project_bspline(b_splines[-1], camera_pose, camera_parameters)
+        #     show_masks([skeleton, projected_spline_cam2_fine], f"Projected B-Spline Cam {index} Fine")
+        #endregion optimize control points - least-squares
+        
+        #region optimize control points - new-pre - funktioniert, arbeite mit dem weiter
+        skeletons, interps = precompute_skeletons_and_interps(masks) 
+        print("--------------------    Coarse Optimization    --------------------")
+        coarse_bspline = optimize_bspline_pre_working(initial_spline=b_splines[-1],
+                             camera_parameters=camera_parameters,
+                             masks=masks,
+                             camera_poses=camera_poses,
+                             decay=1,
+                             reg_weight=0,
+                             curvature_weight=1,
+                             num_samples=50,
+                             symmetric=True,
+                             translate=False,
+                             disp=2)
+        b_splines.append(coarse_bspline)
+
+        for index, (skeleton, camera_pose) in enumerate(zip(skeletons, camera_poses)):
+            projected_spline_cam2_fine = project_bspline(b_splines[-1], camera_pose, camera_parameters)
+            show_masks([skeleton, projected_spline_cam2_fine], f"Projected B-Spline Cam {index} Coarse")
+
+        spline_pc = convert_bspline_to_pointcloud(b_splines[-1])
+        pointcloud_publisher.publish(spline_pc)
+
+
+        print("--------------------    Fine Optimization    --------------------")
+        fine_bspline = optimize_bspline_pre_working(initial_spline=b_splines[-1],
+                             camera_parameters=camera_parameters,
+                             masks=masks,
+                             camera_poses=camera_poses,
+                             decay=1,
+                             reg_weight=0,
+                             curvature_weight=1,
+                             num_samples=200,
+                             symmetric=True,
+                             translate=False,
+                             disp=2)
+        b_splines.append(fine_bspline)
+        
+
+        for index, (skeleton, camera_pose) in enumerate(zip(skeletons, camera_poses)):
+            projected_spline_cam2_fine = project_bspline(b_splines[-1], camera_pose, camera_parameters)
+            show_masks([skeleton, projected_spline_cam2_fine], f"Projected B-Spline Cam {index} Fine")
+        #endregion optimize control points - new-pre
 
         spline_pc = convert_bspline_to_pointcloud(b_splines[-1])
         pointcloud_publisher.publish(spline_pc)
