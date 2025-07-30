@@ -4121,9 +4121,9 @@ def optimize_bspline_pre_working(
 
 
         # Build spline and sample
-        # spline = make_bspline(ctrl_points_flat)
-        spline = create_bspline(ctrl_points_flat.reshape(-1, 3))
-        sampled_pts_3d = sample_bspline(spline, num_samples)
+        spline = make_bspline(ctrl_points_flat)
+        # spline = create_bspline(ctrl_points_flat.reshape(-1, 3))
+        sampled_pts_3d = sample_bspline(spline, num_samples, equal_spacing=False)
         
         assd_sum = 0.0
         for i, ((sk, coords), dt, cam_pose) in enumerate(zip(skeleton_coords, dts, camera_poses)):
@@ -4161,10 +4161,10 @@ def optimize_bspline_pre_working(
     )
     end = time.perf_counter()
     # print(f"Optimization took {end - start:.2f} seconds")
-    # return make_bspline(result.x)
-    return create_bspline(result.x.reshape(-1, 3))
+    return make_bspline(result.x)
+    # return create_bspline(result.x.reshape(-1, 3))
 
-def optimize_bspline_pre_least_squares(
+def optimize_bspline_pre_least_squares_manualy_coded(
         initial_spline,
         camera_parameters,
         masks,
@@ -4336,39 +4336,271 @@ def optimize_bspline_pre_least_squares(
     print(f"Optimization took {end - start:.2f} seconds")
     return make_bspline(result.x), result.cost
 
-def sample_bspline(spline: BSpline, n_samples: int):
+def optimize_bspline_pre_least_squares_one_residual(
+        initial_spline,
+        camera_parameters,
+        masks,
+        camera_poses,
+        decay=0.95,
+        reg_weight=0,
+        curvature_weight=0,
+        num_samples=200,
+        symmetric=True,
+        translate=False,
+        disp=True,
+    ):
+    # ---------- unchanged bookkeeping ----------
+    ctrl_pts_init   = initial_spline.c.copy()
+    ctrl_pts_init_f = ctrl_pts_init.reshape(-1)
+    degree          = initial_spline.k
+    knot_vector     = initial_spline.t.copy()
+    dim, num_ctrl   = ctrl_pts_init.shape[1], ctrl_pts_init.shape[0]
+
+    n_frames  = len(masks)
+    weights   = np.array([decay**(n_frames-1-i) for i in range(n_frames)], float)
+    wsum      = weights.sum()
+
+    _, interps = precompute_skeletons_and_interps(masks)
+
+    def make_bspline(flat):
+        return BSpline(knot_vector, flat.reshape(num_ctrl, dim), degree)
+
+    # ---------- per-frame pre-computations ----------
+    skel_coords, dts = [], []
+    for m in masks:
+        sk = skeletonize(m > 0)
+        skel_coords.append(np.vstack(np.nonzero(sk)).T)  # (v,u)
+        dts.append(distance_transform_edt(~sk))
+
+    # ---------- residual function ----------
+    def residuals(flat):
+        ctrl_pts = flat.reshape(-1, 3)
+
+        # drift
+        drift = np.linalg.norm(flat - ctrl_pts_init_f) / num_ctrl
+
+        # curvature
+        if num_ctrl >= 3:
+            diffs = ctrl_pts[1:] - ctrl_pts[:-1]
+            v1, v2  = diffs[:-1], diffs[1:]
+            cos_t   = np.einsum('ij,ij->i', v1, v2) / (
+                        np.linalg.norm(v1, 2, 1)*np.linalg.norm(v2, 2, 1) + 1e-8)
+            curvature = np.mean(np.arccos(np.clip(cos_t, -1, 1))**2)
+        else:
+            curvature = 0.0
+
+        spline        = make_bspline(flat)
+        pts3d_sampled = sample_bspline(spline, num_samples)
+
+        res = []
+
+        # data term – one residual per visible sample point
+        for i, (interp, cam_pose, wt) in enumerate(zip(interps, camera_poses, weights)):
+            pts2d = project_3d_points(pts3d_sampled, cam_pose, camera_parameters)
+            if pts2d.size == 0:
+                # if nothing is visible, emit one huge residual so the solver moves
+                res.append(np.sqrt(2.0*wt/wsum) * np.max(interp.values))
+                continue
+
+            # interp expects (v,u) = (row, col)
+            samples = np.stack([pts2d[:, 1], pts2d[:, 0]], axis=1)
+            dists   = interp(samples)
+            # replace NaNs with max distance
+            dists[~np.isfinite(dists)] = np.max(interp.values)
+
+            # scale each point: sqrt(2*wt/wsum) matches original weighting
+            res.extend(np.sqrt(2.0*wt/wsum) * dists)
+
+        # regularisation residuals
+        if reg_weight:
+            res.append(np.sqrt(2.0*reg_weight) * drift)
+        if curvature_weight:
+            res.append(np.sqrt(2.0*curvature_weight) * curvature)
+
+        return np.asarray(res, float)
+
+    # ---------- bounds ----------
+    b_low, b_up = map(np.asarray, zip(*make_bspline_bounds(initial_spline, delta=0.4)))
+
+    # ---------- solve ----------
+    t0 = time.perf_counter()
+    sol = opt.least_squares(
+        fun       = residuals,
+        x0        = ctrl_pts_init_f,
+        jac       = '3-point',
+        bounds    = (b_low, b_up),
+        method    = 'trf',      # bounds-aware, robust to rank-deficiency
+        loss      = 'linear',   # same as your original scalar loss
+        ftol=1e-6, xtol=1e-6, gtol=1e-6,
+        verbose   = 2 if disp else 0
+    )
+    if disp:
+        elapsed = time.perf_counter() - t0
+        final_loss = 0.5*np.sum(residuals(sol.x)**2)
+        print(f'Optimisation finished in {elapsed:.2f}s — loss={final_loss:.6f}')
+
+    return create_bspline(sol.x.reshape(-1, 3))
+
+def optimize_bspline_pre_least_squares_many_residuals(
+        initial_spline,
+        camera_parameters,
+        masks,
+        camera_poses,
+        decay=0.95,
+        reg_weight=0.0,
+        curvature_weight=0.0,
+        num_samples=200,
+        symmetric=True,
+        translate=False,
+        disp=True,
+    ):
+    # --------------- bookkeeping -------------------------------------
+    ctrl_init     = initial_spline.c.copy()
+    ctrl_init_f   = ctrl_init.reshape(-1)
+    k, t          = initial_spline.k, initial_spline.t.copy()
+    dim, n_ctrl   = ctrl_init.shape[1], ctrl_init.shape[0]
+
+    n_frames      = len(masks)
+    w_frame       = decay ** np.arange(n_frames-1, -1, -1, dtype=float)
+    wsum          = w_frame.sum()
+
+    _, interps    = precompute_skeletons_and_interps(masks)
+
+    def make_bspline(flat):
+        return BSpline(t, flat.reshape(n_ctrl, dim), k)
+
+    # --------------- frame-level pre-computations ---------------------
+    dts, skel_coords = [], []
+    for m in masks:
+        skel = skeletonize(m > 0)
+        skel_coords.append(np.vstack(np.nonzero(skel)).T)      # (v,u)
+        dts.append(distance_transform_edt(~skel))
+
+    # --------------- residual function -------------------------------
+    def residuals(flat):
+        ctrl   = flat.reshape(-1, 3)
+
+        # drift regulariser
+        drift  = np.linalg.norm(flat - ctrl_init_f) / n_ctrl
+        r_drift = np.sqrt(2*reg_weight) * drift if reg_weight else None
+
+        # curvature regulariser
+        if n_ctrl >= 3:
+            d01     = ctrl[1:] - ctrl[:-1]
+            v1, v2  = d01[:-1], d01[1:]
+            cosang  = np.einsum('ij,ij->i', v1, v2) / (
+                       np.linalg.norm(v1,2,1)*np.linalg.norm(v2,2,1) + 1e-8)
+            curvature = np.mean(np.arccos(np.clip(cosang, -1, 1))**2)
+        else:
+            curvature = 0.0
+        r_curv = np.sqrt(2*curvature_weight) * curvature if curvature_weight else None
+
+        # sample B-spline in 3-D
+        pts3d = sample_bspline(make_bspline(flat), num_samples)
+
+        # data residuals
+        res = []
+        for w_i, interp, cam_pose in zip(w_frame, interps, camera_poses):
+            pts2d = project_3d_points(pts3d, cam_pose, camera_parameters)
+            if pts2d.size == 0:
+                res.append(np.sqrt(2*w_i/wsum) * np.max(interp.values))
+                continue
+
+            samples = np.stack([pts2d[:,1], pts2d[:,0]], 1)   # (v,u)
+            dists   = interp(samples)
+            dists[~np.isfinite(dists)] = np.max(interp.values)
+            # scale distances the same way the frame weight was scaled in mean-assd
+            res.extend(np.sqrt(2*w_i / wsum) * dists)
+
+        if r_drift is not None:
+            res.append(r_drift)
+        if r_curv is not None:
+            res.append(r_curv)
+
+        return np.asarray(res, float)
+
+    # --------------- bounds ------------------------------------------
+    lb, ub = map(np.asarray, zip(*make_bspline_bounds(initial_spline, 0.4)))
+
+    # --------------- solve -------------------------------------------
+    t0 = time.perf_counter()
+    sol = opt.least_squares(
+        fun     = residuals,
+        x0      = ctrl_init_f,
+        jac     = '3-point',
+        bounds  = (lb, ub),
+        method  = 'trf',
+        loss    = 'linear', # 'soft_l1',      # robust, closer to L1 than pure LS
+        ftol=1e-4, xtol=1e-4, gtol=1e-4,
+        verbose = 2 if disp else 0
+    )
+    if disp:
+        secs = time.perf_counter() - t0
+        print(f'least_squares finished in {secs:.2f}s; ½‖r‖² = {0.5*np.sum(sol.fun**2):.6f}')
+
+    return make_bspline(sol.x.reshape(-1, 3))
+
+def sample_bspline(
+        spline: BSpline,
+        n_samples: int,
+        *,
+        equal_spacing: bool = False
+    ):
     """
     Sample a 3-dimensional BSpline so that you get an (n_samples, 3) array back.
 
     Parameters
     ----------
-    spline : BSpline
+    spline : scipy.interpolate.BSpline
         A BSpline whose coefficient dimension is 3.
     n_samples : int
         Number of points to sample.
+    equal_spacing : bool, default False
+        If False (default) sample at uniformly spaced *parameter* values.
+        If True, return points that are (approximately) equally spaced
+        in Euclidean distance along the curve.
 
     Returns
     -------
-    u : (n_samples,) float array
-        Parameter values uniformly spaced on [t[k], t[-k-1]].
-    pts : (n_samples, 3) float array
-        Spline evaluated at each u, shape guaranteed to be (n_samples,3).
+    pts : (n_samples, 3) ndarray
+        Sampled points on the spline.
     """
-    # domain
-    t, c, k = spline.t, spline.c, spline.k
+    # Domain in parameter space
+    t, k = spline.t, spline.k
     u_min, u_max = t[k], t[-k-1]
-    u = np.linspace(u_min, u_max, n_samples)
 
-    # evaluate; for a 3D spline spline(u) returns shape (n_samples, 3)
-    pts = spline(u)
+    if not equal_spacing:
+        u = np.linspace(u_min, u_max, n_samples)
+        pts = spline(u)
 
-    # sometimes spline(u) returns shape (3, n_samples), so transpose if needed
+    else:
+        # --- 1. Oversample to build an arclength lookup --------------------
+        oversample = max(200, n_samples * 20)
+        u_dense = np.linspace(u_min, u_max, oversample)
+        pts_dense = spline(u_dense)
+
+        # shape-fix
+        if pts_dense.ndim == 2 and pts_dense.shape[0] == 3:
+            pts_dense = pts_dense.T
+
+        # --- 2. Cumulative arclength along the dense set -------------------
+        deltas = np.diff(pts_dense, axis=0)
+        seg_len = np.linalg.norm(deltas, axis=1)
+        s_cum = np.concatenate(([0.0], np.cumsum(seg_len)))          # length = oversample
+        total_len = s_cum[-1]
+
+        # --- 3. Target arclengths and corresponding parameter values -------
+        s_target = np.linspace(0.0, total_len, n_samples)
+        u = np.interp(s_target, s_cum, u_dense)                      # length = n_samples
+
+        # --- 4. Evaluate spline at those parameter values -----------------
+        pts = spline(u)
+
+    # Ensure shape is (n_samples, 3)
     if pts.ndim == 2 and pts.shape[0] == 3 and pts.shape[1] == n_samples:
         pts = pts.T
-
-    # final sanity check
     if pts.shape != (n_samples, 3):
-        raise ValueError(f"Expected output shape ({n_samples},3), got {pts.shape}")
+        raise ValueError(f"Expected output shape ({n_samples}, 3), got {pts.shape}")
 
     return pts
 
@@ -4405,7 +4637,7 @@ def optimize_depth_map(depths, masks, camera_poses, camera_parameters, show=Fals
             # guard NaNs
             assd_i = np.nanmean(dists) if np.isfinite(dists).any() else np.max(interps[0].values)
 
-        print(f"pts2d shape: {pts2d.shape}, ASSD: {assd_i}")
+        # print(f"pts2d shape: {pts2d.shape}, ASSD: {assd_i}")
         return assd_i
         
 
@@ -4497,3 +4729,278 @@ def project_pointcloud_exact(pointcloud: 'o3d.geometry.PointCloud',
 
 
 #endregion additional after branching
+
+
+#region bspline otpimization - many residuals new
+# --------------------------------------------------------------------------
+# UTILS
+# --------------------------------------------------------------------------
+def bspline_basis_matrix(knot_vector, degree, u, n_ctrl):
+    """
+    Return the (len(u) , n_ctrl) matrix whose (s,j) entry is N_{j,k}(u_s).
+    """
+    B = np.empty((len(u), n_ctrl), dtype=float)
+    for j in range(n_ctrl):
+        coeff = np.zeros(n_ctrl, dtype=float)
+        coeff[j] = 1.0
+        B[:, j] = BSpline(knot_vector, coeff, degree, extrapolate=False)(u)
+    return B
+
+
+# --------------------------------------------------------------------------
+# MAIN OPTIMISER
+# --------------------------------------------------------------------------
+def optimize_bspline_pre_ls_fast(
+        initial_spline,
+        camera_parameters,
+        masks,
+        camera_poses,
+        decay=0.95,
+        reg_weight=0.0,
+        curvature_weight=0.0,
+        coarse_levels=(50, 100, 200),          # sample counts for the cascade
+        bounds_delta=0.4,
+        disp=True,
+    ):
+    """
+    Fast least-squares B-spline fitting with coarse-to-fine sampling and
+    a pre-computed spline basis matrix.
+
+    Parameters
+    ----------
+    * initial_spline      : scipy.interpolate.BSpline
+    * camera_parameters   : whatever your `project_3d_points` expects
+    * masks               : list/array of binary 2-D numpy arrays
+    * camera_poses        : one 4×4 pose (world→camera) per frame
+    * decay               : float, temporal weight decay
+    * reg_weight          : λ_drift  (0 = off)
+    * curvature_weight    : λ_curv   (0 = off)
+    * coarse_levels       : tuple of `num_samples` for the cascade
+    * bounds_delta        : ±bound range in world units
+    * disp                : bool, print progress
+    """
+    # ------------------------------------------------------------------
+    # basic spline data
+    ctrl_init = initial_spline.c.copy()               # (n_ctrl , 3)
+    ctrl_init_flat = ctrl_init.reshape(-1)            # 1-D view
+    n_ctrl, dim = ctrl_init.shape
+    degree      = initial_spline.k
+    knot_vec    = initial_spline.t.copy()
+
+    # ------------------------------------------------------------------
+    # frame weights (same as your original)
+    n_frames = len(masks)
+    w_frame  = np.array([decay ** (n_frames - 1 - i) for i in range(n_frames)],
+                        dtype=float)
+    w_sum    = w_frame.sum()
+
+    # ------------------------------------------------------------------
+    # helpers pre-computed once per frame
+    _, interps = precompute_skeletons_and_interps(masks)      # your util
+    dts  = []
+    for m in masks:
+        skel = skeletonize(m > 0)
+        dts.append(distance_transform_edt(~skel))
+
+    # ------------------------------------------------------------------
+    # bounds in least_squares format
+    lb, ub = map(np.asarray,
+                 zip(*make_bspline_bounds(initial_spline, delta=bounds_delta)))
+
+    # ------------------------------------------------------------------
+    # start the coarse-to-fine cascade
+    x = ctrl_init_flat.copy()
+    total_start = time.perf_counter()
+
+    for level_idx, S in enumerate(coarse_levels, 1):
+        if disp:
+            print(f'\n=== Level {level_idx}/{len(coarse_levels)} '
+                  f'— {S} samples ===')
+
+        # --------------------------------------------------------------
+        # 1) pre-compute basis matrix for this sample count
+        u_samples = np.linspace(0.0, 1.0, S, endpoint=True)
+        B = bspline_basis_matrix(knot_vec, degree, u_samples, n_ctrl)  # (S,n)
+
+        # function that maps ctrl-points → sampled 3-D points
+        def spline_points(flat):
+            return B @ flat.reshape(n_ctrl, 3)         # (S,3)
+
+        # --------------------------------------------------------------
+        # 2) residual vector (Option B: one per visible sample + regs)
+        def residual_vec(flat):
+            P      = flat.reshape(n_ctrl, 3)
+            pts3d  = B @ P                              # (S,3)
+            res    = []
+
+            # data term
+            for w_i, interp, cam_pose in zip(w_frame, interps, camera_poses):
+                pts2d = project_3d_points(pts3d, cam_pose, camera_parameters)
+                if pts2d.size == 0:
+                    res.append(np.sqrt(2*w_i/w_sum) * np.max(interp.values))
+                    continue
+
+                sample_uv = np.stack([pts2d[:, 1], pts2d[:, 0]], axis=1)
+                dists = interp(sample_uv)
+                dists[~np.isfinite(dists)] = np.max(interp.values)
+                res.extend(np.sqrt(2*w_i / w_sum) * dists)
+
+            # drift regulariser
+            if reg_weight:
+                drift = np.linalg.norm(flat - ctrl_init_flat) / n_ctrl
+                res.append(np.sqrt(2*reg_weight) * drift)
+
+            # curvature regulariser
+            if curvature_weight and n_ctrl >= 3:
+                diffs = P[1:] - P[:-1]
+                v1, v2 = diffs[:-1], diffs[1:]
+                cosang = np.einsum('ij,ij->i', v1, v2) / (
+                           np.linalg.norm(v1,2,1) * np.linalg.norm(v2,2,1) + 1e-8)
+                curv = np.mean(np.arccos(np.clip(cosang, -1, 1))**2)
+                res.append(np.sqrt(2*curvature_weight) * curv)
+
+            return np.asarray(res, float)
+
+        # --------------------------------------------------------------
+        # 3) (optional) analytic Jacobian would go *here*
+        #    For now keep finite-difference but use '2-point' to halve calls.
+        # --------------------------------------------------------------
+        start = time.perf_counter()
+        sol = opt.least_squares(
+            fun     = residual_vec,
+            x0      = x,
+            jac     = '2-point',        # much cheaper than '3-point'
+            bounds  = (lb, ub),
+            method  = 'trf',
+            loss    = 'soft_l1',        # robust, close to your L1 objective
+            ftol=1e-6, xtol=1e-6, gtol=1e-6,
+            verbose = 2 if disp else 0
+        )
+        if disp:
+            print(f'  ↳ level finished in {time.perf_counter()-start:.2f}s  '
+                  f'(½‖r‖² = {0.5*np.sum(sol.fun**2):.6f})')
+        x = sol.x                       # refine next level from here
+
+    if disp:
+        print(f'\nTOTAL optimisation time: '
+              f'{time.perf_counter()-total_start:.2f}s')
+
+    # ------------------------------------------------------------------
+    return create_bspline(x.reshape(n_ctrl, 3))
+#endregion bspline otpimization - many residuals new
+
+
+
+import numpy as np
+from scipy.interpolate import BSpline
+
+# -------------------------------------------------------------------------
+# helper: rho(z) for each supported loss (mirror of scipy._lsq.utils)
+# -------------------------------------------------------------------------
+def _rho(z, loss: str = "soft_l1"):
+    if loss == "linear":                # same as least_squares default
+        return z**2
+    elif loss == "soft_l1":
+        return 2.0 * (np.sqrt(1.0 + z**2) - 1.0)
+    elif loss == "huber":
+        return np.where(np.abs(z) <= 1.0, z**2, 2.0*np.abs(z) - 1.0)
+    elif loss == "cauchy":
+        return np.log1p(z**2)
+    elif loss == "arctan":
+        return 2.0 * np.arctan(z) - np.pi/2.0
+    else:
+        raise ValueError(f"Unsupported loss '{loss}'")
+
+# -------------------------------------------------------------------------
+# factory: returns  lq_score(bspline: BSpline) -> float
+# -------------------------------------------------------------------------
+def make_ls_score(
+        *,
+        initial_spline: BSpline,
+        camera_parameters,
+        masks,
+        camera_poses,
+        decay: float           = 0.95,
+        reg_weight: float      = 0.0,
+        curvature_weight: float= 0.0,
+        num_samples: int       = 200,
+        loss: str              = "soft_l1",
+        f_scale: float         = 1.0,
+    ):
+    """
+    Build a scorer that reproduces the scalar **cost** `least_squares`
+    minimises:
+
+        cost(bspline) = 0.5 * Σ ρ( r_i / f_scale )
+
+    where `ρ` is the same robust loss you passed to `least_squares`
+    (default: 'soft_l1') and the residuals `r_i` are exactly those used
+    in the optimiser that sampled `num_samples` points per frame.
+
+    Usage
+    -----
+    >>> ls_cost = make_ls_score(initial_spline=init_spl, camera_parameters=K,
+    ...                         masks=masks, camera_poses=extrinsics,
+    ...                         decay=0.97, reg_weight=1e-3,
+    ...                         curvature_weight=1e-4,
+    ...                         num_samples=200, loss='soft_l1')
+    >>> print(ls_cost(best_bspline))
+    """
+    # -------------------- static data (same as optimiser) ------------------
+    ctrl_init_flat = initial_spline.c.reshape(-1)
+    n_ctrl, dim    = initial_spline.c.shape
+    weights        = decay ** np.arange(len(masks)-1, -1, -1, dtype=float)
+    w_sum          = weights.sum()
+    _, interps     = precompute_skeletons_and_interps(masks)
+
+    # -------------------- residual generator ------------------------------
+    def _residuals(bspl: BSpline):
+        P       = bspl.c                                  # (n_ctrl, 3)
+        flat    = P.reshape(-1)
+        pts3d   = sample_bspline(bspl, num_samples)       # (S,3)
+
+        res = []
+
+        # data term: one residual per visible sample
+        for w_i, interp, cam in zip(weights, interps, camera_poses):
+            pts2d = project_3d_points(pts3d, cam, camera_parameters)
+            if pts2d.size == 0:
+                res.append(np.sqrt(2*w_i/w_sum) * np.max(interp.values))
+                continue
+
+            uv     = np.stack([pts2d[:,1], pts2d[:,0]], axis=1)
+            d      = interp(uv)
+            d[~np.isfinite(d)] = np.max(interp.values)
+            res.extend(np.sqrt(2*w_i/w_sum) * d)
+
+        # drift residual
+        if reg_weight:
+            drift = np.linalg.norm(flat - ctrl_init_flat) / n_ctrl
+            res.append(np.sqrt(2*reg_weight) * drift)
+
+        # curvature residual
+        if curvature_weight and n_ctrl >= 3:
+            diffs   = P[1:] - P[:-1]
+            v1, v2  = diffs[:-1], diffs[1:]
+            cosang  = np.einsum('ij,ij->i', v1, v2) / (
+                        np.linalg.norm(v1,2,1)*np.linalg.norm(v2,2,1) + 1e-8)
+            curv    = np.mean(np.arccos(np.clip(cosang, -1, 1))**2)
+            res.append(np.sqrt(2*curvature_weight) * curv)
+
+        return np.asarray(res, float)
+
+    # -------------------- the scorer closure ------------------------------
+    def ls_cost(bspline: BSpline) -> float:
+        r = _residuals(bspline) / f_scale
+        return 0.5 * np.sum(_rho(r, loss))
+
+    return ls_cost
+
+
+
+
+
+
+
+
+

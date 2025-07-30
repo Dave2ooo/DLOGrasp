@@ -37,7 +37,7 @@ class ImageProcessing:
         # self.grounded_sam_wrapper = GroundedSamWrapper()
         self.depths_folder = f'/root/workspace/images/moves_depths'
         self.masks_folder = f'/root/workspace/images/moves_masks'
-        self.offline_image_name = "cable"
+        self.offline_image_name = "tube"
     
     def get_mask(self, index, show: bool = False):
         # mask = self.grounded_sam_wrapper.get_mask(image, prompt)[0][0]
@@ -248,8 +248,9 @@ def tube_grasp_pipeline(debug: bool = False):
 
     #region -------------------- Depth Anything --------------------
     # Estimate scale and shift
-    # best_alpha, best_beta, best_pc_world, num_inliers, num_inliers_union = my_class.estimate_scale_shift_new(data[-2], data[-1], camera_poses[-2], camera_poses[-1], show=True)
-    best_alpha, best_beta, best_pc_world, score = my_class.estimate_scale_shift_from_multiple_cameras_distance(depths, masks, camera_poses, show=False)
+    #region new scale-shift
+    best_alpha, best_beta, best_pc_world, score = optimize_depth_map(depths=depths, masks=masks, camera_poses=camera_poses, camera_parameters=camera_parameters, show=False)
+    #endregion new scale-shift
     #endregion -------------------- Depth Enything --------------------
 
 
@@ -273,10 +274,11 @@ def tube_grasp_pipeline(debug: bool = False):
 
     projected_spline_cam1 = project_bspline(b_splines[0], camera_poses[1], camera_parameters)
     correct_skeleton = skeletonize_mask(masks[-1])
-    show_masks([projected_spline_cam1, correct_skeleton], "Correct Skeleton")
+    # show_masks([projected_spline_cam1, correct_skeleton], "Correct Skeleton")
 
     # show_masks([correct_skeleton, projected_spline_cam1], "Correct Skeleton and Projected Spline (CAM1)")
 
+    index = 0
     while not rospy.is_shutdown():
         camera_poses.append(all_camera_poses[offline_index])
         masks.append(image_processing.get_mask(offline_index, show=False))
@@ -291,8 +293,8 @@ def tube_grasp_pipeline(debug: bool = False):
         # show_masks([skeletons[-1], projected_spline_cam2], "Projected B-Spline Cam2")
 
         #region Translate b-spline
-        print("--------------------    Translating B-spline    --------------------")
-        start = time.perf_counter()
+        # print("--------------------    Translating B-spline    --------------------")
+        start1 = time.perf_counter()
         bounds = [(-0.3, 0.3), (-0.3, 0.3)] # [(x_min, x_max), (y_min,  y_max)]
         result_translation = opt.minimize(
             fun=score_bspline_translation,   # returns –score
@@ -308,8 +310,8 @@ def tube_grasp_pipeline(debug: bool = False):
             # }
             options={'maxiter':1e8, 'ftol':1e-2, 'eps':1e-6, 'disp':True, 'maxfun':1e8}
         )
-        end = time.perf_counter()
-        print(f"B-spline translation took {end - start:.2f} seconds")
+        end1 = time.perf_counter()
+        # print(f"B-spline translation took {end1 - start1:.2f} seconds")
         bspline_translated = apply_translation_to_ctrl_points(b_splines[-1], result_translation.x, camera_poses[-1])
 
         # _, interps = precompute_skeletons_and_interps(masks)
@@ -427,7 +429,10 @@ def tube_grasp_pipeline(debug: bool = False):
 
         #region optimize control points - new-pre
         # 1) Precompute once:
-        print("--------------------    Coarse Optimization    --------------------")
+        # print("--------------------    Coarse Optimization    --------------------")
+        num_samples_coarse = 50
+        num_samples_fine = 200
+        start2 = time.perf_counter()
         coarse_bspline = optimize_bspline_pre_working(initial_spline=b_splines[-1],
                              camera_parameters=camera_parameters,
                              masks=masks,
@@ -435,10 +440,11 @@ def tube_grasp_pipeline(debug: bool = False):
                              decay=1,
                              reg_weight=0,
                              curvature_weight=1,
-                             num_samples=50,
+                             num_samples=num_samples_coarse,
                              symmetric=True,
                              translate=False,
                              disp=2)
+        end2 = time.perf_counter()
         b_splines.append(coarse_bspline)
 
         # for index, (skeleton, camera_pose) in enumerate(zip(skeletons, camera_poses)):
@@ -446,7 +452,8 @@ def tube_grasp_pipeline(debug: bool = False):
         #     show_masks([skeleton, projected_spline_cam2_fine], f"Projected B-Spline Cam {index} Coarse")
 
 
-        print("--------------------    Fine Optimization    --------------------")
+        # print("--------------------    Fine Optimization    --------------------")
+        start3 = time.perf_counter()
         fine_bspline = optimize_bspline_pre_working(initial_spline=b_splines[-1],
                              camera_parameters=camera_parameters,
                              masks=masks,
@@ -454,10 +461,11 @@ def tube_grasp_pipeline(debug: bool = False):
                              decay=1,
                              reg_weight=0,
                              curvature_weight=1,
-                             num_samples=200,
+                             num_samples=num_samples_fine,
                              symmetric=True,
                              translate=False,
                              disp=2)
+        end3 = time.perf_counter()
         b_splines.append(fine_bspline)
         
 
@@ -466,10 +474,75 @@ def tube_grasp_pipeline(debug: bool = False):
         #     show_masks([skeleton, projected_spline_cam2_fine], f"Projected B-Spline Cam {index} Fine")
         #endregion optimize control points - new-pre
 
+
+        #region optimize control points - least-squared - new
+        # # 1) Precompute once:
+        # # print("--------------------    Coarse Optimization    --------------------")
+        # num_samples_coarse = 50
+        # num_samples_fine = 200
+        # start2 = time.perf_counter()
+        # coarse_bspline = optimize_bspline_pre_least_squares_many_residuals(initial_spline=b_splines[-1],
+        #                      camera_parameters=camera_parameters,
+        #                      masks=masks,
+        #                      camera_poses=camera_poses,
+        #                      decay=1,
+        #                      reg_weight=0,
+        #                      curvature_weight=1,
+        #                      num_samples=num_samples_coarse,
+        #                     #  symmetric=True,
+        #                     #  translate=False,
+        #                      disp=0)
+        # end2 = time.perf_counter()
+        # b_splines.append(coarse_bspline)
+
+        # # for index, (skeleton, camera_pose) in enumerate(zip(skeletons, camera_poses)):
+        # #     projected_spline_cam2_fine = project_bspline(b_splines[-1], camera_pose, camera_parameters)
+        # #     show_masks([skeleton, projected_spline_cam2_fine], f"Projected B-Spline Cam {index} Coarse")
+
+
+        # # print("--------------------    Fine Optimization    --------------------")
+        # start3 = time.perf_counter()
+        # fine_bspline = optimize_bspline_pre_least_squares_many_residuals(initial_spline=b_splines[-1],
+        #                      camera_parameters=camera_parameters,
+        #                      masks=masks,
+        #                      camera_poses=camera_poses,
+        #                      decay=1,
+        #                      reg_weight=0,
+        #                      curvature_weight=1,
+        #                      num_samples=num_samples_fine,
+        #                     #  symmetric=True,
+        #                     #  translate=False,
+        #                      disp=0)
+        # end3 = time.perf_counter()
+        # b_splines.append(fine_bspline)
+        
+
+        # # for index, (skeleton, camera_pose) in enumerate(zip(skeletons, camera_poses)):
+        # #     projected_spline_cam2_fine = project_bspline(b_splines[-1], camera_pose, camera_parameters)
+        # #     show_masks([skeleton, projected_spline_cam2_fine], f"Projected B-Spline Cam {index} Fine")
+        #endregion optimize control points - least-squared - one residual
+
         # visualize_spline_with_pc(best_pc_world, b_splines[-1], degree)
         _, interps = precompute_skeletons_and_interps(masks)
         final_score_minimize = score_function_bspline_reg_multiple_pre(b_splines[-1].c.flatten(), camera_poses, camera_parameters, degree, b_splines[-1].c.flatten(), 0, 1, 1, skeletons, interps, 200)
-        print(f"Final Score Minimize: {final_score_minimize}")
+        print(f"{num_samples_coarse}/{num_samples_fine} Score {index}: {final_score_minimize:.2f}, Time: {end3-start3+end2-start2:.2f} seconds")
+        # print(f"{num_samples_coarse} Score {index}: {final_score_minimize:.2f}, Time: {end2-start2:.2f} seconds")
+
+        # ls_score = make_ls_score(
+        #     initial_spline=b_splines[-1],
+        #     camera_parameters=camera_parameters,
+        #     masks=masks,
+        #     camera_poses=camera_poses,
+        #     decay=0.95,
+        #     reg_weight=0,
+        #     curvature_weight=1,
+        #     num_samples=200,          # must match the final optimiser level
+        #     loss="soft_l1",           # must match least_squares(loss=...)
+        #     f_scale=1.0               # must match least_squares(f_scale=...)
+        # )
+        # print(f"Least Squares Score: {ls_score(b_splines[-1])}")
+
+        index += 1
 
         # print(f"Final Score Least Squares: {fine_score}")
 
