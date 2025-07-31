@@ -438,8 +438,8 @@ def tube_grasp_pipeline(debug: bool = False):
                              masks=masks,
                              camera_poses=camera_poses,
                              decay=1,
-                             reg_weight=0,
-                             curvature_weight=1,
+                             reg_weight=1,
+                             curvature_weight=1e-1,
                              num_samples=num_samples_coarse,
                              symmetric=True,
                              translate=False,
@@ -447,9 +447,9 @@ def tube_grasp_pipeline(debug: bool = False):
         end2 = time.perf_counter()
         b_splines.append(coarse_bspline)
 
-        # for index, (skeleton, camera_pose) in enumerate(zip(skeletons, camera_poses)):
-        #     projected_spline_cam2_fine = project_bspline(b_splines[-1], camera_pose, camera_parameters)
-        #     show_masks([skeleton, projected_spline_cam2_fine], f"Projected B-Spline Cam {index} Coarse")
+        for index, (skeleton, camera_pose) in enumerate(zip(skeletons, camera_poses)):
+            projected_spline_cam2_fine = project_bspline(b_splines[-1], camera_pose, camera_parameters)
+            show_masks([skeleton, projected_spline_cam2_fine], f"Projected B-Spline Cam {index} Coarse")
 
 
         # print("--------------------    Fine Optimization    --------------------")
@@ -459,8 +459,8 @@ def tube_grasp_pipeline(debug: bool = False):
                              masks=masks,
                              camera_poses=camera_poses,
                              decay=1,
-                             reg_weight=0,
-                             curvature_weight=1,
+                             reg_weight=1,
+                             curvature_weight=1e-1,
                              num_samples=num_samples_fine,
                              symmetric=True,
                              translate=False,
@@ -469,9 +469,9 @@ def tube_grasp_pipeline(debug: bool = False):
         b_splines.append(fine_bspline)
         
 
-        # for index, (skeleton, camera_pose) in enumerate(zip(skeletons, camera_poses)):
-        #     projected_spline_cam2_fine = project_bspline(b_splines[-1], camera_pose, camera_parameters)
-        #     show_masks([skeleton, projected_spline_cam2_fine], f"Projected B-Spline Cam {index} Fine")
+        for index, (skeleton, camera_pose) in enumerate(zip(skeletons, camera_poses)):
+            projected_spline_cam2_fine = project_bspline(b_splines[-1], camera_pose, camera_parameters)
+            show_masks([skeleton, projected_spline_cam2_fine], f"Projected B-Spline Cam {index} Fine")
         #endregion optimize control points - new-pre
 
 

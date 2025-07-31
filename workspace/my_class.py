@@ -798,7 +798,7 @@ def pipeline_spline():
     usr_input = input("Mask Correct? [y]/n: ")
     if usr_input == "n": exit()
     # Move arm
-    next_pose_stamped = create_pose(z=0.1, pitch=-0.4, reference_frame="hand_palm_link")
+    next_pose_stamped = create_pose(x=0.1, z=0.1, pitch=-0.4, reference_frame="hand_palm_link")
     next_pose_publisher.publish(next_pose_stamped)
     # input("Press Enter when moves are finished…")
     rospy.sleep(5)
@@ -865,6 +865,53 @@ def pipeline_spline():
 
 
 
+    #region optimize control points - new-pre - funktioniert, arbeite mit dem weiter
+    skeletons, interps = precompute_skeletons_and_interps(masks) 
+    print("--------------------    Coarse Optimization    --------------------")
+    coarse_bspline = optimize_bspline_pre_working(initial_spline=b_splines[-1],
+                            camera_parameters=camera_parameters,
+                            masks=masks,
+                            camera_poses=camera_poses,
+                            decay=1,
+                            reg_weight=0.1,
+                            curvature_weight=1e-2,
+                            num_samples=50,
+                            symmetric=True,
+                            translate=False,
+                            disp=True)
+    b_splines.append(coarse_bspline)
+
+    # for index, (skeleton, camera_pose) in enumerate(zip(skeletons, camera_poses)):
+    #     projected_spline_cam2_fine = project_bspline(b_splines[-1], camera_pose, camera_parameters)
+    #     show_masks([skeleton, projected_spline_cam2_fine], f"Projected B-Spline Cam {index} Coarse")
+
+    spline_pc = convert_bspline_to_pointcloud(b_splines[-1])
+    pointcloud_publisher.publish(spline_pc)
+
+
+    print("--------------------    Fine Optimization    --------------------")
+    fine_bspline = optimize_bspline_pre_working(initial_spline=b_splines[-1],
+                            camera_parameters=camera_parameters,
+                            masks=masks,
+                            camera_poses=camera_poses,
+                            decay=1,
+                            reg_weight=0.1,
+                            curvature_weight=1e-2,
+                            num_samples=200,
+                            symmetric=True,
+                            translate=False,
+                            disp=True)
+    b_splines.append(fine_bspline)
+    
+
+    # for index, (skeleton, camera_pose) in enumerate(zip(skeletons, camera_poses)):
+    #     projected_spline_cam2_fine = project_bspline(b_splines[-1], camera_pose, camera_parameters)
+    #     show_masks([skeleton, projected_spline_cam2_fine], f"Projected B-Spline Cam {index} Fine")
+    #endregion optimize control points - new-pre
+
+
+
+
     # Get highest Point in pointcloud
     # target_point, target_angle = get_highest_point_and_angle_spline(b_splines[-1])
     target_point, target_angle = get_midpoint_and_angle_spline(b_splines[-1])
@@ -884,8 +931,8 @@ def pipeline_spline():
     next_pose_publisher.publish(next_pose)
     # input("Press Enter when moves are finished…")
 
-
-    while not rospy.is_shutdown():
+    for loop in range(3):
+    # while not rospy.is_shutdown():
         rospy.sleep(5)
         # Take image
         images.append(image_subscriber.get_current_image()) # <- online
@@ -895,7 +942,7 @@ def pipeline_spline():
         # camera_poses.append(transform_stamped2) # <- offline
         palm_poses.append(ros_handler.get_current_pose("hand_palm_link", "map")) # <- online
         # Process image
-        masks.append(image_processing.get_mask(image=images[-1], prompt=SAM_prompt, show=True))
+        masks.append(image_processing.get_mask(image=images[-1], prompt=SAM_prompt, show=False))
         # show_masks(masks[-1])
 
         projected_spline_cam1 = project_bspline(b_splines[-1], camera_poses[-2], camera_parameters)
@@ -1092,18 +1139,18 @@ def pipeline_spline():
                              camera_parameters=camera_parameters,
                              masks=masks,
                              camera_poses=camera_poses,
-                             decay=1,
-                             reg_weight=0,
-                             curvature_weight=1,
+                             decay=1.1,
+                             reg_weight=0.1,
+                             curvature_weight=1e-2,
                              num_samples=50,
                              symmetric=True,
                              translate=False,
-                             disp=2)
+                             disp=True)
         b_splines.append(coarse_bspline)
 
-        for index, (skeleton, camera_pose) in enumerate(zip(skeletons, camera_poses)):
-            projected_spline_cam2_fine = project_bspline(b_splines[-1], camera_pose, camera_parameters)
-            show_masks([skeleton, projected_spline_cam2_fine], f"Projected B-Spline Cam {index} Coarse")
+        # for index, (skeleton, camera_pose) in enumerate(zip(skeletons, camera_poses)):
+        #     projected_spline_cam2_fine = project_bspline(b_splines[-1], camera_pose, camera_parameters)
+        #     show_masks([skeleton, projected_spline_cam2_fine], f"Projected B-Spline Cam {index} Coarse")
 
         spline_pc = convert_bspline_to_pointcloud(b_splines[-1])
         pointcloud_publisher.publish(spline_pc)
@@ -1114,27 +1161,27 @@ def pipeline_spline():
                              camera_parameters=camera_parameters,
                              masks=masks,
                              camera_poses=camera_poses,
-                             decay=1,
-                             reg_weight=0,
-                             curvature_weight=1,
+                             decay=1.1,
+                             reg_weight=0.1,
+                             curvature_weight=1e-2,
                              num_samples=200,
                              symmetric=True,
                              translate=False,
-                             disp=2)
+                             disp=True)
         b_splines.append(fine_bspline)
         
 
-        for index, (skeleton, camera_pose) in enumerate(zip(skeletons, camera_poses)):
-            projected_spline_cam2_fine = project_bspline(b_splines[-1], camera_pose, camera_parameters)
-            show_masks([skeleton, projected_spline_cam2_fine], f"Projected B-Spline Cam {index} Fine")
+        # for index, (skeleton, camera_pose) in enumerate(zip(skeletons, camera_poses)):
+        #     projected_spline_cam2_fine = project_bspline(b_splines[-1], camera_pose, camera_parameters)
+        #     show_masks([skeleton, projected_spline_cam2_fine], f"Projected B-Spline Cam {index} Fine")
         #endregion optimize control points - new-pre
 
         spline_pc = convert_bspline_to_pointcloud(b_splines[-1])
         pointcloud_publisher.publish(spline_pc)
 
-        projected_spline_opt = project_bspline(b_splines[-1], camera_poses[-1], camera_parameters)
-        correct_skeleton_cam2 = skeletonize_mask(masks[-1])
-        show_masks([correct_skeleton_cam2, projected_spline_opt])
+        # projected_spline_opt = project_bspline(b_splines[-1], camera_poses[-1], camera_parameters)
+        # correct_skeleton_cam2 = skeletonize_mask(masks[-1])
+        # show_masks([correct_skeleton_cam2, projected_spline_opt])
 
         # visualize_spline_with_pc(best_pc_world, b_splines[-1], degree)
 
@@ -1154,16 +1201,19 @@ def pipeline_spline():
         grasp_point_publisher.publish(target_point)
         # Move arm a step
         target_pose_publisher.publish(target_poses[-1])
-        usr_input = input("Go to final Pose? y/[n] or enter pose index: ").strip().lower()
-        if usr_input == "c": exit()
-        if usr_input == "y":
-            rotated_target_pose = rotate_pose_around_z(target_poses[-1], target_angle)
-            next_pose_publisher.publish(rotated_target_pose)
-            break
+        # usr_input = input("Go to final Pose? y/[n] or enter pose index: ").strip().lower()
+        # if usr_input == "c": exit()
+        # if usr_input == "y":
+        #     rotated_target_pose = rotate_pose_around_z(target_poses[-1], target_angle)
+        #     next_pose_publisher.publish(rotated_target_pose)
+        #     break
 
         next_pose_publisher.publish(next_pose)
         # input("Press Enter when moves are finished…")
         rospy.sleep(5)
+
+    rotated_target_pose = rotate_pose_around_z(target_poses[-1], target_angle)
+    next_pose_publisher.publish(rotated_target_pose)
 
     #endregion -------------------- Spline --------------------
 

@@ -3730,7 +3730,7 @@ def make_bspline_bounds_new(ctrl_points: np.ndarray, delta: float = 0.1):
     ub = flat + delta
     return lb, ub
 
-def curvature_residuals(bspline, weight, num_curv_samples=200):
+def curvature_residuals(bspline: BSpline, weight: float, num_curv_samples: int):
     # sample in the same parameter domain you use for fitting
     t0, t1 = bspline.t[bspline.k], bspline.t[-bspline.k-1]
     u_curv = np.linspace(t0, t1, num_curv_samples)
@@ -4103,27 +4103,28 @@ def optimize_bspline_pre_working(
     def objective(ctrl_points_flat):
         ctrl_pts = ctrl_points_flat.reshape(-1, 3)
 
+        # Build spline and sample
+        spline = make_bspline(ctrl_points_flat)
+        # spline = create_bspline(ctrl_points_flat.reshape(-1, 3))
+        sampled_pts_3d = sample_bspline(spline, num_samples, equal_spacing=False)
+
         # 1) reshape & drift penalty
         drift = np.linalg.norm(ctrl_points_flat - ctrl_pts_init_flat) / num_ctrl
 
         # 2) curvature penalty
         if num_ctrl >= 3:
-            diffs = ctrl_pts[1:] - ctrl_pts[:-1]
-            v1, v2 = diffs[:-1], diffs[1:]
-            dot = np.einsum('ij,ij->i', v1, v2)
-            n1 = np.linalg.norm(v1, axis=1)
-            n2 = np.linalg.norm(v2, axis=1)
-            cos_t = np.clip(dot/(n1*n2 + 1e-8), -1, 1)
-            angles = np.arccos(cos_t)
-            curvature_penalty = np.mean(angles**2)
+            # diffs = ctrl_pts[1:] - ctrl_pts[:-1]
+            # v1, v2 = diffs[:-1], diffs[1:]
+            # dot = np.einsum('ij,ij->i', v1, v2)
+            # n1 = np.linalg.norm(v1, axis=1)
+            # n2 = np.linalg.norm(v2, axis=1)
+            # cos_t = np.clip(dot/(n1*n2 + 1e-8), -1, 1)
+            # angles = np.arccos(cos_t)
+            # curvature_penalty = np.mean(angles**2)
+            curvature_penalty = np.mean(curvature_residuals(spline, 1, num_samples)**2)
         else:
             curvature_penalty = 0.0
 
-
-        # Build spline and sample
-        spline = make_bspline(ctrl_points_flat)
-        # spline = create_bspline(ctrl_points_flat.reshape(-1, 3))
-        sampled_pts_3d = sample_bspline(spline, num_samples, equal_spacing=False)
         
         assd_sum = 0.0
         for i, ((sk, coords), dt, cam_pose) in enumerate(zip(skeleton_coords, dts, camera_poses)):
@@ -4145,7 +4146,7 @@ def optimize_bspline_pre_working(
 
         # 5) final loss
         loss = mean_assd + reg_weight * drift + curvature_weight * curvature_penalty
-        # print(f"loss: {loss:.3f}")
+        # print(f"mean_assd: {mean_assd:.2f}, drift: {drift*reg_weight:.2f}, curvature_penalty: {curvature_penalty*curvature_weight:.2f}, loss: {loss:.2f}")
         return float(loss)
     
     bounds = make_bspline_bounds(initial_spline, delta=0.4)
@@ -4161,6 +4162,7 @@ def optimize_bspline_pre_working(
     )
     end = time.perf_counter()
     # print(f"Optimization took {end - start:.2f} seconds")
+    print(f"Optimization cost: {result.fun:.2f}")
     return make_bspline(result.x)
     # return create_bspline(result.x.reshape(-1, 3))
 
@@ -4606,11 +4608,13 @@ def sample_bspline(
 
 
 def optimize_depth_map(depths, masks, camera_poses, camera_parameters, show=False):
-    mask = masks[0]
-    camera_pose_mask = camera_poses[0]
+    index_mask = 0
+    mask = masks[index_mask]
+    camera_pose_mask = camera_poses[index_mask]
 
-    depth = depths[1]
-    camera_pose_depth = camera_poses[1]
+    index_depth = 1
+    depth = depths[index_depth]
+    camera_pose_depth = camera_poses[index_depth]
 
     _, interps = precompute_skeletons_and_interps(masks=[mask])
 
@@ -4891,116 +4895,155 @@ def optimize_bspline_pre_ls_fast(
 
 
 
-import numpy as np
-from scipy.interpolate import BSpline
 
-# -------------------------------------------------------------------------
-# helper: rho(z) for each supported loss (mirror of scipy._lsq.utils)
-# -------------------------------------------------------------------------
-def _rho(z, loss: str = "soft_l1"):
-    if loss == "linear":                # same as least_squares default
-        return z**2
-    elif loss == "soft_l1":
-        return 2.0 * (np.sqrt(1.0 + z**2) - 1.0)
-    elif loss == "huber":
-        return np.where(np.abs(z) <= 1.0, z**2, 2.0*np.abs(z) - 1.0)
-    elif loss == "cauchy":
-        return np.log1p(z**2)
-    elif loss == "arctan":
-        return 2.0 * np.arctan(z) - np.pi/2.0
-    else:
-        raise ValueError(f"Unsupported loss '{loss}'")
 
-# -------------------------------------------------------------------------
-# factory: returns  lq_score(bspline: BSpline) -> float
-# -------------------------------------------------------------------------
-def make_ls_score(
-        *,
-        initial_spline: BSpline,
-        camera_parameters,
-        masks,
-        camera_poses,
-        decay: float           = 0.95,
-        reg_weight: float      = 0.0,
-        curvature_weight: float= 0.0,
-        num_samples: int       = 200,
-        loss: str              = "soft_l1",
-        f_scale: float         = 1.0,
-    ):
+
+
+
+
+
+
+
+
+
+
+
+
+# ────────────────────────────────────────────────────────────────────────────────
+# 1.  PRECOMPUTE   — add the pixel coordinates of the mask’s skeleton
+# ────────────────────────────────────────────────────────────────────────────────
+def precompute_skeletons_and_interps_new(masks):
     """
-    Build a scorer that reproduces the scalar **cost** `least_squares`
-    minimises:
-
-        cost(bspline) = 0.5 * Σ ρ( r_i / f_scale )
-
-    where `ρ` is the same robust loss you passed to `least_squares`
-    (default: 'soft_l1') and the residuals `r_i` are exactly those used
-    in the optimiser that sampled `num_samples` points per frame.
-
-    Usage
-    -----
-    >>> ls_cost = make_ls_score(initial_spline=init_spl, camera_parameters=K,
-    ...                         masks=masks, camera_poses=extrinsics,
-    ...                         decay=0.97, reg_weight=1e-3,
-    ...                         curvature_weight=1e-4,
-    ...                         num_samples=200, loss='soft_l1')
-    >>> print(ls_cost(best_bspline))
+    From each mask build
+      • skeleton                   (bool  H×W)
+      • dt of skeleton complement  (float H×W)
+      • RegularGridInterpolator    (sub-pixel lookup into dt)
+      • sk_coords                  (N×2  int)  ← NEW: (row, col) of skeleton pix
     """
-    # -------------------- static data (same as optimiser) ------------------
-    ctrl_init_flat = initial_spline.c.reshape(-1)
-    n_ctrl, dim    = initial_spline.c.shape
-    weights        = decay ** np.arange(len(masks)-1, -1, -1, dtype=float)
-    w_sum          = weights.sum()
-    _, interps     = precompute_skeletons_and_interps(masks)
+    skeletons, interps, sk_coords_list = [], [], []
+    for mask in masks:
+        sk = skeletonize(mask > 0)
+        dt = distance_transform_edt(~sk)
+        H, W = sk.shape
 
-    # -------------------- residual generator ------------------------------
-    def _residuals(bspl: BSpline):
-        P       = bspl.c                                  # (n_ctrl, 3)
-        flat    = P.reshape(-1)
-        pts3d   = sample_bspline(bspl, num_samples)       # (S,3)
+        interps.append(
+            RegularGridInterpolator(
+                (np.arange(H), np.arange(W)),
+                dt,
+                bounds_error=False,
+                fill_value=dt.max(),
+            )
+        )
+        skeletons.append(sk)
+        # save the integer coords once; they never change during optimisation
+        sk_coords_list.append(np.column_stack(np.nonzero(sk)))
 
-        res = []
-
-        # data term: one residual per visible sample
-        for w_i, interp, cam in zip(weights, interps, camera_poses):
-            pts2d = project_3d_points(pts3d, cam, camera_parameters)
-            if pts2d.size == 0:
-                res.append(np.sqrt(2*w_i/w_sum) * np.max(interp.values))
-                continue
-
-            uv     = np.stack([pts2d[:,1], pts2d[:,0]], axis=1)
-            d      = interp(uv)
-            d[~np.isfinite(d)] = np.max(interp.values)
-            res.extend(np.sqrt(2*w_i/w_sum) * d)
-
-        # drift residual
-        if reg_weight:
-            drift = np.linalg.norm(flat - ctrl_init_flat) / n_ctrl
-            res.append(np.sqrt(2*reg_weight) * drift)
-
-        # curvature residual
-        if curvature_weight and n_ctrl >= 3:
-            diffs   = P[1:] - P[:-1]
-            v1, v2  = diffs[:-1], diffs[1:]
-            cosang  = np.einsum('ij,ij->i', v1, v2) / (
-                        np.linalg.norm(v1,2,1)*np.linalg.norm(v2,2,1) + 1e-8)
-            curv    = np.mean(np.arccos(np.clip(cosang, -1, 1))**2)
-            res.append(np.sqrt(2*curvature_weight) * curv)
-
-        return np.asarray(res, float)
-
-    # -------------------- the scorer closure ------------------------------
-    def ls_cost(bspline: BSpline) -> float:
-        r = _residuals(bspline) / f_scale
-        return 0.5 * np.sum(_rho(r, loss))
-
-    return ls_cost
+    return skeletons, interps, sk_coords_list
 
 
+# ────────────────────────────────────────────────────────────────────────────────
+# 2.  OPTIMISATION   — symmetric distance inside the objective
+# ────────────────────────────────────────────────────────────────────────────────
+def optimize_depth_map_new(depths, masks, camera_poses, camera_parameters, show=False):
 
+    # fixed reference (= mask) and moving (= depth) views ---------------
+    idx_mask, idx_depth = 0, 1
+    mask, depth = masks[idx_mask], depths[idx_depth]
+    pose_mask, pose_depth = camera_poses[idx_mask], camera_poses[idx_depth]
 
+    # pre-computation that never changes across objective calls ---------
+    _, interps, sk_coords_list = precompute_skeletons_and_interps_new([mask])
+    interp_mask_dt = interps[0]           # distance-transform of the mask skeleton
+    sk_coords = sk_coords_list[0]         # integer pixel coords of that skeleton
+    H, W = mask.shape                     # image size for quick reuse
+    max_dt = interp_mask_dt.values.max()  # used as a large penalty
 
+    # -------------------------------------------------------------------
+    def objective(scale_shift):
+        scale, shift = scale_shift
 
+        # 1.  transform the depth map as before -------------------------
+        d_world = transform_pointcloud_to_world(
+            convert_depth_map_to_pointcloud(
+                scale_depth_map(depth, scale, shift), camera_parameters
+            ),
+            pose_depth,
+        )
 
+        pts2d = project_pointcloud_exact(
+            d_world, camera_pose=pose_mask, camera_parameters=camera_parameters
+        )
 
+        # ----------------------------------------------------------------
+        # Ⓐ distance mask ← pts2d  (old direction, sub-pixel)
+        # ----------------------------------------------------------------
+        if pts2d.size == 0:
+            d12 = max_dt                          # nothing is visible → huge error
+        else:
+            sample_pts = np.stack([pts2d[:, 1], pts2d[:, 0]], axis=1)  # (row, col)
+            d12 = interp_mask_dt(sample_pts)      # mask DT sampled at projected pts
+            d12 = d12[np.isfinite(d12)]           # guard against NaNs
+            if d12.size == 0:
+                d12 = np.array([max_dt])          # all NaN → huge error
 
+        # ----------------------------------------------------------------
+        # Ⓑ distance pts2d ← mask  (new direction)
+        #     1. build a binary image of projected pts
+        #     2. DT of its complement
+        #     3. sample that DT at every skeleton pixel of the mask
+        # ----------------------------------------------------------------
+        if pts2d.size == 0:
+            d21 = np.array([max_dt])              # nothing to project
+        else:
+            # integer pixel positions, clipped to image bounds
+            pix = np.round(pts2d).astype(int)
+            inside = (0 <= pix[:, 0]) & (pix[:, 0] < W) & (0 <= pix[:, 1]) & (pix[:, 1] < H)
+            pix = pix[inside]
+
+            img_pts = np.zeros((H, W), dtype=bool)
+            if pix.size:                          # protect distance_transform_edt
+                img_pts[pix[:, 1], pix[:, 0]] = True
+
+            dt_pts = distance_transform_edt(~img_pts)
+            d21 = dt_pts[sk_coords[:, 0], sk_coords[:, 1]]
+
+        # ----------------------------------------------------------------
+        # ASSD   (average symmetric surface distance) --------------------
+        # note: “surface” = mask skeleton, projected points
+        # ----------------------------------------------------------------
+        assd = 0.5 * (np.mean(d12) + np.mean(d21))
+        return assd
+    # -------------------------------------------------------------------
+
+    bounds = [(0.05, 1.0), (-1.0, 1.0)]
+    t0 = time.perf_counter()
+    result = opt.minimize(
+        objective,
+        x0=[0.28, 0.03],
+        bounds=bounds,
+        method="Powell",
+        options=dict(maxiter=1e8, maxfun=1e8, ftol=1e-2, eps=1e-6, disp=True),
+    )
+    print(f"Estimating scale & shift took {time.perf_counter() - t0:.2f} s")
+
+    scale, shift = result.x
+    print(f"Scale: {scale:.3f}   Shift: {shift:.3f}")
+
+    # optional visualisation -------------------------------------------
+    if show:
+        _, proj = project_pointcloud_from_world(
+            transform_pointcloud_to_world(
+                convert_depth_map_to_pointcloud(scale_depth_map(depth, scale, shift),
+                                                camera_parameters),
+                pose_depth),
+            pose_mask, camera_parameters)
+        show_masks_union(mask, proj)
+
+    # return world-space point cloud in the depth view so caller can reuse it
+    depth_world = transform_pointcloud_to_world(
+        convert_depth_map_to_pointcloud(
+            scale_depth_map(depth, scale, shift), camera_parameters
+        ),
+        pose_depth,
+    )
+    return scale, shift, depth_world, None
