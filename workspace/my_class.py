@@ -5,6 +5,7 @@ from ROS_handler_new import ROSHandler
 from camera_handler import ImageSubscriber
 from publisher import *
 from my_utils import *
+from save_data import *
 from geometry_msgs.msg import TransformStamped, Pose, PoseStamped
 from tf.transformations import quaternion_matrix, quaternion_from_matrix
 import numpy as np
@@ -736,6 +737,7 @@ def pipeline_spline():
     path_publisher = PathPublisher("/my_path")
     pointcloud_publisher = PointcloudPublisher(topic="my_pointcloud", frame_id="map")
     grasp_point_publisher = PointStampedPublisher("/grasp_point")
+    save_data_class = save_data()
 
     transform_stamped0 = create_stamped_transform_from_trans_and_rot([0.767, 0.495, 0.712], [0.707, 0.001, 0.707, -0.001])
     transform_stamped1 = create_stamped_transform_from_trans_and_rot([0.839, 0.493, 0.727], [0.774, 0.001, 0.633, -0.001])
@@ -765,6 +767,7 @@ def pipeline_spline():
 
     images = []
     masks = []
+    depths_orig = []
     depths = []
     camera_poses = []
     palm_poses = []
@@ -792,11 +795,15 @@ def pipeline_spline():
             if usr_input == "n": exit()
 
     masks.append(temp_mask)
+    depths_orig.append(image_processing.get_depth_unmasked(image=images[-1], show=False))
     depths.append(image_processing.get_depth_masked(image=images[-1], mask=masks[-1], show=False))
     # show_masks(masks[-1])
 
     usr_input = input("Mask Correct? [y]/n: ")
     if usr_input == "n": exit()
+
+    save_data_class.save_all(images[-1], masks[-1], depths_orig[-1], depths[-1], camera_poses[-1], palm_poses[-1], None, None, None)
+
     # Move arm
     next_pose_stamped = create_pose(x=0.1, z=0.1, pitch=-0.4, reference_frame="hand_palm_link")
     next_pose_publisher.publish(next_pose_stamped)
@@ -817,6 +824,7 @@ def pipeline_spline():
     palm_poses.append(ros_handler.get_current_pose("hand_palm_link", "map")) # <- online
     # Process image
     masks.append(image_processing.get_mask(image=images[-1], prompt=SAM_prompt, show=True))
+    depths_orig.append(image_processing.get_depth_unmasked(image=images[-1], show=False))
     depths.append(image_processing.get_depth_masked(image=images[-1], mask=masks[-1], show=False))
     # show_masks(masks[-1])
     # Estimate scale and shift
@@ -909,8 +917,7 @@ def pipeline_spline():
     #     show_masks([skeleton, projected_spline_cam2_fine], f"Projected B-Spline Cam {index} Fine")
     #endregion optimize control points - new-pre
 
-
-
+    save_data_class.save_all(images[-1], masks[-1], depths_orig[-1], depths[-1], camera_poses[-1], palm_poses[-1], coarse_bspline, fine_bspline, None)
 
     # Get highest Point in pointcloud
     # target_point, target_angle = get_highest_point_and_angle_spline(b_splines[-1])
@@ -1175,6 +1182,8 @@ def pipeline_spline():
         #     projected_spline_cam2_fine = project_bspline(b_splines[-1], camera_pose, camera_parameters)
         #     show_masks([skeleton, projected_spline_cam2_fine], f"Projected B-Spline Cam {index} Fine")
         #endregion optimize control points - new-pre
+
+        save_data_class.save_all(images[-1], masks[-1], None, None, camera_poses[-1], palm_poses[-1], coarse_bspline, fine_bspline, None)
 
         spline_pc = convert_bspline_to_pointcloud(b_splines[-1])
         pointcloud_publisher.publish(spline_pc)

@@ -1,0 +1,415 @@
+#!/usr/bin/env python3.11
+
+import os
+import cv2, numpy as np
+from numpy.typing import NDArray
+from PIL import Image
+import open3d as o3d
+import rospy
+import copy
+
+from geometry_msgs.msg import TransformStamped, Pose, PoseStamped
+from tf.transformations import quaternion_from_euler, quaternion_slerp, quaternion_matrix, quaternion_from_matrix, quaternion_multiply, translation_matrix, quaternion_matrix
+from std_msgs.msg import Header
+from sensor_msgs.msg import PointCloud2
+
+from scipy.interpolate import BSpline
+
+from scipy.spatial.transform import Rotation
+
+from datetime import datetime
+
+from save_load_numpy import *
+
+import pickle
+
+
+class save_data:
+    def __init__(self) -> None:
+        timestamp = datetime.now().strftime("%Y_%m_%d_%H-%M")
+        self.folder_name = f'/root/workspace/images/pipeline_saved/{timestamp}'
+        self.counter = 0
+
+
+    def save_all(self, image, mask, depth_orig, depth_masked, camera_pose, palm_pose, spline_coarse, spline_fine, aruco_pose):
+        folder_name_image = f'{self.folder_name}/image'
+        folder_name_mask_cv2 = f'{self.folder_name}/mask_cv2'
+        folder_name_mask_numpy = f'{self.folder_name}/mask_numpy'
+        folder_name_depth_orig = f'{self.folder_name}/depth_orig'
+        folder_name_depth_masked = f'{self.folder_name}/depth_masked'
+        folder_name_camera_pose = f'{self.folder_name}/camera_pose'
+        folder_name_palm_pose = f'{self.folder_name}/palm_pose'
+        folder_name_spline_coarse = f'{self.folder_name}/spline_coarse'
+        folder_name_spline_fine = f'{self.folder_name}/spline_fine'
+        folder_name_aruco_pose = f'{self.folder_name}/aruco_pose'
+
+        # OpenCV images
+        if image is not None:
+            save_image(image, folder_name_image, f'{self.counter}.png')
+        if mask is not None:
+            save_masks([mask], folder_name_mask_cv2, f'{self.counter}.png')
+            save_numpy_to_file(mask, folder_name_mask_numpy, f'{self.counter}')
+        if depth_orig is not None:
+            save_depth_map(depth_orig, folder_name_depth_orig, f'{self.counter}.png')
+            save_numpy_to_file(depth_orig, folder_name_depth_orig, f'{self.counter}')
+        if depth_masked is not None:
+            save_depth_map(depth_masked, folder_name_depth_masked, f'{self.counter}.png')
+            save_numpy_to_file(depth_masked, folder_name_depth_masked, f'{self.counter}')
+
+        if camera_pose is not None:
+            save_pose_stamped(camera_pose, folder_name_camera_pose, f'{self.counter}')
+        if palm_pose is not None:
+            save_pose_stamped(palm_pose, folder_name_palm_pose, f'{self.counter}')
+
+        if spline_coarse is not None:
+            save_bspline(spline_coarse, folder_name_spline_coarse, f'{self.counter}')
+        if spline_fine is not None:
+            save_bspline(spline_fine, folder_name_spline_fine, f'{self.counter}')
+
+        if aruco_pose is not None:
+            save_pose_stamped(aruco_pose, folder_name_aruco_pose, f'{self.counter}')
+
+        self.counter += 1
+
+
+
+
+def save_image(image, folder: str, filename: str) -> bool:
+    """
+    Saves an OpenCV image to the specified folder and filename.
+    Creates the folder if it does not exist.
+
+    Parameters:
+        image (numpy.ndarray): The image to save.
+        folder (str): Destination folder path.
+        filename (str): Name of the file including extension (e.g., 'snapshot.png').
+
+    Returns:
+        bool: True if saved successfully, False otherwise.
+    """
+    # Ensure the output directory exists
+    os.makedirs(folder, exist_ok=True)
+
+    # Build full path and write
+    path = os.path.join(folder, filename)
+    success = cv2.imwrite(path, image)
+    return success
+        
+
+def save_depth_map(depth_map: np.ndarray,
+                    folder: str,
+                    filename: str,
+                    vmin: float = None,
+                    vmax: float = None,
+                    colormap: int = None) -> None:
+    """
+    Save a depth map to a PNG in the specified folder, using `filename` + ".png".
+
+    Parameters
+    ----------
+    depth_map : np.ndarray
+        2D array of depth values (float or int).
+    folder : str
+        Directory in which to save the image (will be created if needed).
+    filename : str
+        Base name (without extension) for the PNG file.
+    vmin : float, optional
+        Minimum depth for normalization (default = min of depth_map).
+    vmax : float, optional
+        Maximum depth for normalization (default = max of depth_map).
+    colormap : int, optional
+        OpenCV colormap (e.g. cv2.COLORMAP_JET). If None, grayscale is used.
+    """
+    import os
+    import numpy as np
+    import cv2
+
+    # ensure folder exists
+    if not os.path.exists(folder):
+        os.makedirs(folder, exist_ok=True)
+
+    # build path
+    save_path = os.path.join(folder, f"{filename}")
+
+    # normalize to [0,255]
+    dm = depth_map.astype(np.float32)
+    mn = vmin if vmin is not None else np.nanmin(dm)
+    mx = vmax if vmax is not None else np.nanmax(dm)
+    if mx <= mn:
+        img8 = np.zeros(dm.shape, dtype=np.uint8)
+    else:
+        norm = (dm - mn) / (mx - mn)
+        norm = np.clip(norm, 0.0, 1.0)
+        img8 = (norm * 255).astype(np.uint8)
+
+    # apply colormap if requested
+    if colormap is not None:
+        img_color = cv2.applyColorMap(img8, colormap)
+    else:
+        img_color = cv2.cvtColor(img8, cv2.COLOR_GRAY2BGR)
+
+    # write out PNG
+    cv2.imwrite(save_path, img_color)
+
+def save_masks(masks: list[np.ndarray],
+               folder: str,
+               filename: str,
+               colors: list[tuple[int,int,int]] = None) -> None:
+    """
+    Overlay and save multiple binary masks as a single color PNG.
+
+    Parameters
+    ----------
+    masks : list of np.ndarray or np.ndarray (2D or 3D)
+        Binary or uint8 masks to overlay. Can be a single 2D mask, a 3D array
+        of shape (N, H, W), or a list of 2D arrays.
+    folder : str
+        Directory to write the output PNG into (will be created if needed).
+    filename : str
+        Base name (without extension) for the saved file.
+    colors : list of (B, G, R) tuples, optional
+        Colors for each mask in 0–255. If omitted, defaults to:
+        white, red, green, blue, yellow, magenta, cyan, …
+    """
+    import os
+    import numpy as np
+    import cv2
+
+    # Normalize input into a list of 2D masks
+    if isinstance(masks, np.ndarray):
+        if masks.ndim == 2:
+            mask_list = [masks]
+        elif masks.ndim == 3:
+            mask_list = [masks[i] for i in range(masks.shape[0])]
+        else:
+            raise ValueError("If masks is an ndarray it must be 2D or 3D (N,H,W)")
+    elif isinstance(masks, (list, tuple)):
+        mask_list = list(masks)
+    else:
+        raise TypeError("masks must be an ndarray or a list/tuple of ndarrays")
+
+    if not mask_list:
+        raise ValueError("No masks provided")
+
+    # Verify all masks have the same shape
+    H, W = mask_list[0].shape
+    for m in mask_list:
+        if m.shape != (H, W):
+            raise ValueError("All masks must have the same shape")
+
+    # Default color palette (BGR)
+    default_palette = [
+        (255, 255, 255),  # white
+        (0, 0, 255),      # red
+        (0, 255, 0),      # green
+        (255, 0, 0),      # blue
+        (0, 255, 255),    # yellow
+        (255, 0, 255),    # magenta
+        (255, 255, 0),    # cyan
+        (128, 128, 128),  # gray
+    ]
+    palette = colors if colors is not None else default_palette
+
+    # Ensure output folder exists
+    os.makedirs(folder, exist_ok=True)
+
+    # Prepare blank color image
+    out = np.zeros((H, W, 3), dtype=np.uint8)
+    for idx, m in enumerate(mask_list):
+        # Binarize mask
+        mb = (m > 0)
+        color = palette[idx % len(palette)]
+        out[mb] = color
+
+    # Save image
+    path = os.path.join(folder, f"{filename}.png")
+    cv2.imwrite(path, out)
+
+def save_mask_spline(mask: np.ndarray,
+                        ctrl_points: np.ndarray,
+                        order: int,
+                        camera_parameters,
+                        camera_pose: PoseStamped,
+                        folder: str,
+                        filename: str,
+                        num_samples: int = 200,
+                        line_color = (0, 0, 255),
+                        line_thickness: int = 2) -> None:
+    """
+    Overlay a projected 3D B‐spline on top of a binary mask and save as PNG.
+    Projects the spline (in world coords) into the image plane defined by camera_pose.
+
+    Parameters
+    ----------
+    mask : np.ndarray, shape (H, W)
+        Binary mask (0/255 or bool) to serve as the background.
+    ctrl_points : np.ndarray, shape (N,3)
+        Control points of the 3D spline in world coordinates.
+    order : int
+        Degree of the B‐spline.
+    camera_parameters : (fx, fy, cx, cy)
+        Intrinsic parameters.
+    camera_pose : PoseStamped
+        The ROS transform from camera frame to world frame.
+    folder : str
+        Directory to save the output (will be created if needed).
+    filename : str
+        Base name (without extension) for the saved file.
+    num_samples : int
+        How many points to sample along the spline for a smooth curve.
+    line_color : (B, G, R)
+        Color to draw the spline.
+    line_thickness : int
+        Thickness of the polyline segments.
+    """
+    # 1) ensure folder
+    os.makedirs(folder, exist_ok=True)
+    save_path = os.path.join(folder, f"{filename}.png")
+
+    # 2) prepare background
+    H, W = mask.shape[:2]
+    bg = (mask.astype(bool).astype(np.uint8) * 255) if mask.dtype != np.uint8 else mask.copy()
+    img = cv2.cvtColor(bg, cv2.COLOR_GRAY2BGR)
+
+    # 3) build knot vector
+    n_ctrl = ctrl_points.shape[0]
+    m = n_ctrl - order - 1
+    interior = np.linspace(0,1,m+2)[1:-1] if m>0 else np.array([])
+    knots = np.concatenate([np.zeros(order+1), interior, np.ones(order+1)])
+
+    # 4) sample spline in world coords
+    spline = BSpline(knots, ctrl_points, order)
+    t0, t1 = knots[order], knots[-order-1]
+    ts = np.linspace(t0, t1, num_samples)
+    world_pts = spline(ts)  # (num_samples,3)
+
+    # 5) build world→camera transform
+    if not isinstance(camera_pose, PoseStamped):
+        raise TypeError("camera_pose must be a PoseStamped")
+    t = camera_pose.pose.position
+    q = camera_pose.pose.orientation
+    trans = np.array([t.x, t.y, t.z], dtype=np.float64)
+    quat  = np.array([q.x, q.y, q.z, q.w], dtype=np.float64)
+    Tcw = quaternion_matrix(quat)
+    Tcw[:3,3] = trans
+    Twc = np.linalg.inv(Tcw)
+
+    # 6) project each world point into pixel coords
+    fx, fy, cx, cy = camera_parameters
+    pts_h = np.hstack([world_pts, np.ones((world_pts.shape[0],1))])
+    cam_pts = (Twc @ pts_h.T).T
+    x_cam, y_cam, z_cam = cam_pts[:,0], cam_pts[:,1], cam_pts[:,2]
+    u = (x_cam * fx / z_cam + cx).round().astype(int)
+    v = (y_cam * fy / z_cam + cy).round().astype(int)
+
+    # 7) draw polyline
+    for i in range(len(u)-1):
+        u0, v0, u1, v1 = u[i], v[i], u[i+1], v[i+1]
+        if 0 <= u0 < W and 0 <= v0 < H and 0 <= u1 < W and 0 <= v1 < H:
+            cv2.line(img, (u0,v0), (u1,v1), line_color, line_thickness)
+
+    # 8) save
+    cv2.imwrite(save_path, img)
+
+def save_bspline(spline: BSpline, folder: str, filename: str) -> str:
+    """
+    Saves a scipy.interpolate.BSpline to a .npz file.
+
+    Parameters:
+        spline    (BSpline):  The spline object to save.
+        folder    (str)     :  Target folder path.
+        filename  (str)     :  Base filename (with or without '.npz').
+
+    Returns:
+        str: Full path of the written .npz file.
+    """
+    # Ensure folder exists
+    os.makedirs(folder, exist_ok=True)
+
+    # Guarantee .npz extension
+    if not filename.endswith('.npz'):
+        filename = filename + '.npz'
+
+    path = os.path.join(folder, filename)
+    # Save knot vector (t), coefficients (c), and degree (k)
+    np.savez(path, t=spline.t, c=spline.c, k=spline.k)
+    return path
+
+def load_bspline(folder: str, filename: str) -> BSpline:
+    """
+    Loads a scipy.interpolate.BSpline from a .npz file.
+
+    Parameters:
+        folder   (str): Folder where the .npz is stored.
+        filename (str): Filename (with or without '.npz').
+
+    Returns:
+        BSpline: Reconstructed spline object.
+    """
+    # Guarantee .npz extension
+    if not filename.endswith('.npz'):
+        filename = filename + '.npz'
+
+    path = os.path.join(folder, filename)
+    data = np.load(path)
+    # t and c are arrays, k is stored as a scalar
+    t = data['t']
+    c = data['c']
+    k = int(data['k'])
+    return BSpline(t, c, k)
+
+def save_pose_stamped(pose: PoseStamped, folder: str, filename: str) -> str:
+    """
+    Serializes a geometry_msgs/PoseStamped to disk using pickle.
+
+    Parameters:
+        pose     (PoseStamped): The PoseStamped message to save.
+        folder    (str)       : Destination folder path.
+        filename  (str)       : Base filename (with or without '.pkl').
+
+    Returns:
+        str: Full path of the written .pkl file.
+    """
+    # Ensure output directory exists
+    os.makedirs(folder, exist_ok=True)
+
+    # Guarantee .pkl extension
+    if not filename.endswith('.pkl'):
+        filename = filename + '.pkl'
+
+    path = os.path.join(folder, filename)
+    # Serialize with pickle
+    with open(path, 'wb') as f:
+        pickle.dump(pose, f)
+    return path
+
+def load_pose_stamped(folder: str, filename: str) -> PoseStamped:
+    """
+    Loads a geometry_msgs/PoseStamped from a pickle file.
+
+    Parameters:
+        folder   (str): Folder where the .pkl is stored.
+        filename (str): Filename (with or without '.pkl').
+
+    Returns:
+        PoseStamped: The deserialized PoseStamped message.
+    """
+    # Guarantee .pkl extension
+    if not filename.endswith('.pkl'):
+        filename = filename + '.pkl'
+
+    path = os.path.join(folder, filename)
+    with open(path, 'rb') as f:
+        pose = pickle.load(f)
+    return pose
+
+
+
+
+
+
+
+
+
+
+
