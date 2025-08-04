@@ -27,13 +27,14 @@ import pickle
 class save_data:
     def __init__(self) -> None:
         timestamp = datetime.now().strftime("%Y_%m_%d_%H-%M")
-        self.folder_name = f'/root/workspace/images/pipeline_saved/{timestamp}'
+        self.folder_name = f'/root/workspace/images/thesis_images/{timestamp}'
         self.counter = 0
 
 
     def save_all(self, image, mask, depth_orig, depth_masked, camera_pose, palm_pose, spline_coarse, spline_fine, aruco_pose):
         folder_name_image = f'{self.folder_name}/image'
         folder_name_mask_cv2 = f'{self.folder_name}/mask_cv2'
+        folder_name_mask_cv2_inverted = f'{self.folder_name}/mask_cv2_inverted'
         folder_name_mask_numpy = f'{self.folder_name}/mask_numpy'
         folder_name_depth_orig = f'{self.folder_name}/depth_orig'
         folder_name_depth_masked = f'{self.folder_name}/depth_masked'
@@ -47,13 +48,14 @@ class save_data:
         if image is not None:
             save_image(image, folder_name_image, f'{self.counter}.png')
         if mask is not None:
-            save_masks([mask], folder_name_mask_cv2, f'{self.counter}.png')
+            save_masks([mask], folder_name_mask_cv2, f'{self.counter}')
+            save_masks([mask], folder_name_mask_cv2_inverted, f'{self.counter}', invert_color=True)
             save_numpy_to_file(mask, folder_name_mask_numpy, f'{self.counter}')
         if depth_orig is not None:
-            save_depth_map(depth_orig, folder_name_depth_orig, f'{self.counter}.png')
+            save_depth_map(depth_orig, folder_name_depth_orig, f'{self.counter}')
             save_numpy_to_file(depth_orig, folder_name_depth_orig, f'{self.counter}')
         if depth_masked is not None:
-            save_depth_map(depth_masked, folder_name_depth_masked, f'{self.counter}.png')
+            save_depth_map(depth_masked, folder_name_depth_masked, f'{self.counter}')
             save_numpy_to_file(depth_masked, folder_name_depth_masked, f'{self.counter}')
 
         if camera_pose is not None:
@@ -71,7 +73,8 @@ class save_data:
 
         self.counter += 1
 
-
+    def save_initial_spline(self, spline):
+        save_bspline(spline, self.folder_name, 'initial_spline')
 
 
 def save_image(image, folder: str, filename: str) -> bool:
@@ -97,64 +100,76 @@ def save_image(image, folder: str, filename: str) -> bool:
         
 
 def save_depth_map(depth_map: np.ndarray,
-                    folder: str,
-                    filename: str,
-                    vmin: float = None,
-                    vmax: float = None,
-                    colormap: int = None) -> None:
+                   folder: str,
+                   filename: str,
+                   gamma: float = 0.5,
+                   colormap: int = cv2.COLORMAP_PLASMA) -> None:
     """
-    Save a depth map to a PNG in the specified folder, using `filename` + ".png".
+    Save a depth map to PNG for visualization, stretching only the non-zero depths
+    and painting the background white.
 
     Parameters
     ----------
     depth_map : np.ndarray
-        2D array of depth values (float or int).
+        2D array of depth values (float or int), with 0 indicating background.
     folder : str
-        Directory in which to save the image (will be created if needed).
+        Directory to save into (will be created if needed).
     filename : str
-        Base name (without extension) for the PNG file.
-    vmin : float, optional
-        Minimum depth for normalization (default = min of depth_map).
-    vmax : float, optional
-        Maximum depth for normalization (default = max of depth_map).
-    colormap : int, optional
-        OpenCV colormap (e.g. cv2.COLORMAP_JET). If None, grayscale is used.
+        Base name (no extension) for the saved PNG.
+    gamma : float
+        Gamma correction exponent (<1 brightens close depths).
+    colormap : int
+        OpenCV colormap (default = COLORMAP_TURBO).
     """
-    import os
-    import numpy as np
-    import cv2
 
-    # ensure folder exists
-    if not os.path.exists(folder):
-        os.makedirs(folder, exist_ok=True)
+    # ensure output folder exists
+    os.makedirs(folder, exist_ok=True)
+    save_path = os.path.join(folder, f"{filename}.png")
 
-    # build path
-    save_path = os.path.join(folder, f"{filename}")
-
-    # normalize to [0,255]
+    # convert to float32
     dm = depth_map.astype(np.float32)
-    mn = vmin if vmin is not None else np.nanmin(dm)
-    mx = vmax if vmax is not None else np.nanmax(dm)
-    if mx <= mn:
-        img8 = np.zeros(dm.shape, dtype=np.uint8)
-    else:
-        norm = (dm - mn) / (mx - mn)
-        norm = np.clip(norm, 0.0, 1.0)
-        img8 = (norm * 255).astype(np.uint8)
 
-    # apply colormap if requested
-    if colormap is not None:
-        img_color = cv2.applyColorMap(img8, colormap)
-    else:
-        img_color = cv2.cvtColor(img8, cv2.COLOR_GRAY2BGR)
+    # mask of valid (non-background) pixels
+    valid = dm > 0
 
-    # write out PNG
+    # if no valid depths, just write a white image
+    H, W = dm.shape
+    if not valid.any():
+        white = 255 * np.ones((H, W, 3), np.uint8)
+        cv2.imwrite(save_path, white)
+        return
+
+    # compute vmin/vmax over non-zero depths
+    vmin = float(dm[valid].min())
+    vmax = float(dm[valid].max())
+
+    # normalize and gamma-correct only valid pixels
+    norm = np.zeros_like(dm, dtype=np.float32)
+    denom = (vmax - vmin) if (vmax > vmin) else 1.0
+    norm_val = (dm[valid] - vmin) / denom
+    norm_val = np.clip(norm_val, 0.0, 1.0) ** gamma
+    norm[valid] = norm_val
+
+    # scale to 8-bit
+    img8 = (norm * 255).astype(np.uint8)
+
+    # apply Turbo colormap
+    img_color = cv2.applyColorMap(img8, colormap)
+
+    # paint background (zero-depth) white
+    img_color[~valid] = (255, 255, 255)
+
+    # save PNG
     cv2.imwrite(save_path, img_color)
 
-def save_masks(masks: list[np.ndarray],
-               folder: str,
-               filename: str,
-               colors: list[tuple[int,int,int]] = None) -> None:
+
+
+
+def save_masks(masks,
+                folder: str,
+                filename: str,
+                colors: list[tuple[int,int,int]] = None,
+                invert_color: bool = False) -> None:
     """
     Overlay and save multiple binary masks as a single color PNG.
 
@@ -169,7 +184,11 @@ def save_masks(masks: list[np.ndarray],
         Base name (without extension) for the saved file.
     colors : list of (B, G, R) tuples, optional
         Colors for each mask in 0–255. If omitted, defaults to:
-        white, red, green, blue, yellow, magenta, cyan, …
+        white, red, green, blue, yellow, magenta, cyan, gray.
+    invert_color : bool
+        If True, use a white background and draw each mask in a
+        contrasting color (first mask drawn in black).
+        Otherwise background is black and masks drawn in the default palette.
     """
     import os
     import numpy as np
@@ -208,15 +227,29 @@ def save_masks(masks: list[np.ndarray],
         (255, 255, 0),    # cyan
         (128, 128, 128),  # gray
     ]
-    palette = colors if colors is not None else default_palette
+
+    # If invert_color, swap to white background and ensure first mask is black
+    if invert_color:
+        background_color = (255, 255, 255)
+        if colors is None:
+            # first mask black, then use standard palette for rest
+            palette = [(0, 0, 0)] + default_palette[1:]
+        else:
+            # user-provided: force first entry to be black
+            palette = [(0,0,0)] + colors[1:]
+    else:
+        background_color = (0, 0, 0)
+        palette = colors if colors is not None else default_palette
 
     # Ensure output folder exists
     os.makedirs(folder, exist_ok=True)
 
-    # Prepare blank color image
+    # Prepare background
     out = np.zeros((H, W, 3), dtype=np.uint8)
+    out[:] = background_color
+
+    # Overlay each mask
     for idx, m in enumerate(mask_list):
-        # Binarize mask
         mb = (m > 0)
         color = palette[idx % len(palette)]
         out[mb] = color
@@ -224,6 +257,8 @@ def save_masks(masks: list[np.ndarray],
     # Save image
     path = os.path.join(folder, f"{filename}.png")
     cv2.imwrite(path, out)
+
+
 
 def save_mask_spline(mask: np.ndarray,
                         ctrl_points: np.ndarray,

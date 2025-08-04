@@ -128,6 +128,8 @@ class GroundedSamWrapper:
 
         # 3. For frame 2+, run track_sequence over all frames so far
         results = self.track_sequence(self.previous_frames, prompt=prompt)
+        if results is None:
+            return None
         # extract the mask for the **last** frame (index = len–1) and obj_id=1
         last_idx = len(self.previous_frames) - 1
         frame_masks = results[last_idx]
@@ -152,6 +154,8 @@ class GroundedSamWrapper:
         # 1. Ground the object in the first frame to get its mask
         first_frame = frames[0]
         masks = self.get_mask_grounded(first_frame, prompt=prompt)
+        if masks is None:
+            return None
         if masks.size == 0:
             raise RuntimeError("No masks found in the first frame.")
         # ensure we have a 2D mask

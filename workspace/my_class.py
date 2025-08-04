@@ -804,6 +804,7 @@ def pipeline_spline():
 
     save_data_class.save_all(images[-1], masks[-1], depths_orig[-1], depths[-1], camera_poses[-1], palm_poses[-1], None, None, None)
 
+    input("Capture image with smartphone and press Enter when done…")
     # Move arm
     next_pose_stamped = create_pose(x=0.1, z=0.1, pitch=-0.4, reference_frame="hand_palm_link")
     next_pose_publisher.publish(next_pose_stamped)
@@ -858,6 +859,8 @@ def pipeline_spline():
     # Fit B-spline
     b_splines.append(fit_bspline_scipy(centerline_pts_world, degree=degree, smooth=1e-5, nest=20, num_ctrl=20))
 
+    save_data_class.save_initial_spline(b_splines[-1])
+
     spline_pc = convert_bspline_to_pointcloud(b_splines[-1])
     pointcloud_publisher.publish(spline_pc)
 
@@ -881,8 +884,8 @@ def pipeline_spline():
                             masks=masks,
                             camera_poses=camera_poses,
                             decay=1,
-                            reg_weight=0.1,
-                            curvature_weight=1e-2,
+                            reg_weight=0.2,
+                            curvature_weight=0.5e-2,
                             num_samples=50,
                             symmetric=True,
                             translate=False,
@@ -903,8 +906,8 @@ def pipeline_spline():
                             masks=masks,
                             camera_poses=camera_poses,
                             decay=1,
-                            reg_weight=0.1,
-                            curvature_weight=1e-2,
+                            reg_weight=0.2,
+                            curvature_weight=0.5e-2,
                             num_samples=200,
                             symmetric=True,
                             translate=False,
@@ -918,6 +921,8 @@ def pipeline_spline():
     #endregion optimize control points - new-pre
 
     save_data_class.save_all(images[-1], masks[-1], depths_orig[-1], depths[-1], camera_poses[-1], palm_poses[-1], coarse_bspline, fine_bspline, None)
+
+    input("Capture image with smartphone and press Enter when done…")
 
     # Get highest Point in pointcloud
     # target_point, target_angle = get_highest_point_and_angle_spline(b_splines[-1])
@@ -1147,8 +1152,8 @@ def pipeline_spline():
                              masks=masks,
                              camera_poses=camera_poses,
                              decay=1.1,
-                             reg_weight=0.1,
-                             curvature_weight=1e-2,
+                             reg_weight=0.2,
+                             curvature_weight=0.5e-2,
                              num_samples=50,
                              symmetric=True,
                              translate=False,
@@ -1169,8 +1174,8 @@ def pipeline_spline():
                              masks=masks,
                              camera_poses=camera_poses,
                              decay=1.1,
-                             reg_weight=0.1,
-                             curvature_weight=1e-2,
+                             reg_weight=0.2,
+                             curvature_weight=0.5e-2,
                              num_samples=200,
                              symmetric=True,
                              translate=False,
@@ -1194,6 +1199,7 @@ def pipeline_spline():
 
         # visualize_spline_with_pc(best_pc_world, b_splines[-1], degree)
 
+        input("Capture image with smartphone and press Enter when done…")
         # Movement
         # Get highest Point in pointcloud
         # target_point, target_angle = get_highest_point_and_angle_spline(b_splines[-1])

@@ -4121,7 +4121,7 @@ def optimize_bspline_pre_working(
             # cos_t = np.clip(dot/(n1*n2 + 1e-8), -1, 1)
             # angles = np.arccos(cos_t)
             # curvature_penalty = np.mean(angles**2)
-            curvature_penalty = np.mean(curvature_residuals(spline, 1, num_samples)**2)
+            curvature_penalty = np.mean(curvature_residuals(spline, 1, num_samples*2)**2)
         else:
             curvature_penalty = 0.0
 
