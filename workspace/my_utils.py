@@ -4163,7 +4163,7 @@ def optimize_bspline_pre_working(
     end = time.perf_counter()
     # print(f"Optimization took {end - start:.2f} seconds")
     print(f"Optimization cost: {result.fun:.2f}")
-    return make_bspline(result.x)
+    return make_bspline(result.x), result.fun
     # return create_bspline(result.x.reshape(-1, 3))
 
 def optimize_bspline_pre_least_squares_manualy_coded(
@@ -5047,3 +5047,52 @@ def optimize_depth_map_new(depths, masks, camera_poses, camera_parameters, show=
         pose_depth,
     )
     return scale, shift, depth_world, None
+
+
+
+from scipy.spatial.transform import Rotation as R
+
+def transform_pose_intrinsic_xy(
+    pose: PoseStamped, 
+    alpha: float, 
+    beta: float, 
+    x: float, 
+    y: float, 
+    z: float
+) -> PoseStamped:
+    """
+    1. Translate by (x, y, z) in the original local frame.
+    2. Rotate intrinsically: alpha about local X, then beta about *new* local Y.
+    
+    Angles in radians, translation in meters.
+    """
+    q = pose.pose.orientation
+    p = np.array([pose.pose.position.x,
+                  pose.pose.position.y,
+                  pose.pose.position.z])
+
+    # Original orientation
+    R0 = R.from_quat([q.x, q.y, q.z, q.w])
+
+    # --- Step 1: translation in the original local frame ---
+    translation_world = R0.apply([x, y, z])  # convert local offset to world coords
+    p_new = p + translation_world
+
+    # --- Step 2: intrinsic rotations ---
+    Rx = R.from_rotvec(alpha * np.array([1, 0, 0]))   # local X
+    Ry_local = R.from_rotvec(beta * np.array([0, 1, 0]))  # new local Y after Rx
+    R_final = R0 * Rx * Ry_local
+
+    # --- Output ---
+    qn = R_final.as_quat()
+    out = PoseStamped()
+    out.header = pose.header
+    out.header.stamp = rospy.Time.now()
+    out.pose.position.x = p_new[0]
+    out.pose.position.y = p_new[1]
+    out.pose.position.z = p_new[2]
+    out.pose.orientation.x = qn[0]
+    out.pose.orientation.y = qn[1]
+    out.pose.orientation.z = qn[2]
+    out.pose.orientation.w = qn[3]
+    return out

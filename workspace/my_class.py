@@ -779,28 +779,43 @@ def pipeline_spline():
     best_pcs_world = []
     b_splines = []
 
+    optimization_time_translate = []
+    optimization_time_coarse = []
+    optimization_time_fine = []
+    optimization_cost_translate = []
+    optimization_cost_coarse = []
+    optimization_cost_fine = []
+
+    starting_pose = ros_handler.get_current_pose("hand_palm_link", "map")
+
+
+
     # Take image
-    images.append(image_subscriber.get_current_image(show=False)) # <- online
-    # images.append(cv2.imread(f'/root/workspace/images/moves/cable{0}.jpg')) # <- offline
+
     # Get current transform
     camera_poses.append(ros_handler.get_current_pose("hand_camera_frame", "map")) # <- online
     # camera_poses.append(transform_stamped0) # <- offline
     palm_poses.append(ros_handler.get_current_pose("hand_palm_link", "map")) # <- online
     # Process image
-    temp_mask = None
-    while temp_mask is None:
-        temp_mask = image_processing.get_mask(image=images[-1], prompt=SAM_prompt, show=True)
-        if temp_mask is None:
-            usr_input = input("No Object Detected. Repeat? [y]/n: ")
-            if usr_input == "n": exit()
+    usr_input_correct_mask = "n"
+    while usr_input_correct_mask == "n":
+        temp_mask = None
+        while temp_mask is None:
+            images = []
+            images.append(image_subscriber.get_current_image(show=True)) # <- online
+            # images.append(cv2.imread(f'/root/workspace/images/moves/cable{0}.jpg')) # <- offline
+            temp_mask = image_processing.get_mask(image=images[-1], prompt=SAM_prompt, show=True)
+            if temp_mask is None:
+                usr_input = input("No Object Detected. Repeat? [y]/n: ")
+                if usr_input == "n": exit()
 
-    masks.append(temp_mask)
-    depths_orig.append(image_processing.get_depth_unmasked(image=images[-1], show=False))
-    depths.append(image_processing.get_depth_masked(image=images[-1], mask=masks[-1], show=False))
-    # show_masks(masks[-1])
+        masks.append(temp_mask)
+        depths_orig.append(image_processing.get_depth_unmasked(image=images[-1], show=False))
+        depths.append(image_processing.get_depth_masked(image=images[-1], mask=masks[-1], show=False))
+        # show_masks(masks[-1])
 
-    usr_input = input("Mask Correct? [y]/n: ")
-    if usr_input == "n": exit()
+        usr_input_correct_mask = input("Mask Correct? [y]/n: ")
+        if usr_input_correct_mask == "c": exit()
 
     save_data_class.save_all(images[-1], masks[-1], depths_orig[-1], depths[-1], camera_poses[-1], palm_poses[-1], None, None, None)
 
@@ -864,13 +879,13 @@ def pipeline_spline():
     spline_pc = convert_bspline_to_pointcloud(b_splines[-1])
     pointcloud_publisher.publish(spline_pc)
 
-    visualize_spline_with_pc(best_pc_world, b_splines[0], title="Scaled PointCloud & Spline")
+    # visualize_spline_with_pc(best_pc_world, b_splines[0], title="Scaled PointCloud & Spline")
 
     projected_spline_cam1 = project_bspline(b_splines[0], camera_poses[1], camera_parameters)
-    show_masks([masks[1], projected_spline_cam1], "Projected B-Spline Cam1 - 1")
+    # show_masks([masks[1], projected_spline_cam1], "Projected B-Spline Cam1 - 1")
     
     correct_skeleton = skeletonize_mask(masks[-1])
-    show_masks([masks[-1], correct_skeleton], "Correct Skeleton")
+    # show_masks([masks[-1], correct_skeleton], "Correct Skeleton")
 
     # show_masks([correct_skeleton, projected_spline_cam1], "Correct Skeleton and Projected Spline (CAM1)")
 
@@ -879,7 +894,8 @@ def pipeline_spline():
     #region optimize control points - new-pre - funktioniert, arbeite mit dem weiter
     skeletons, interps = precompute_skeletons_and_interps(masks) 
     print("--------------------    Coarse Optimization    --------------------")
-    coarse_bspline = optimize_bspline_pre_working(initial_spline=b_splines[-1],
+    start = time.perf_counter()
+    coarse_bspline, opt_cost = optimize_bspline_pre_working(initial_spline=b_splines[-1],
                             camera_parameters=camera_parameters,
                             masks=masks,
                             camera_poses=camera_poses,
@@ -890,7 +906,13 @@ def pipeline_spline():
                             symmetric=True,
                             translate=False,
                             disp=True)
+    end = time.perf_counter()
+
+    optimization_time_coarse.append(end-start)
+    optimization_cost_coarse.append(opt_cost)
+
     b_splines.append(coarse_bspline)
+
 
     # for index, (skeleton, camera_pose) in enumerate(zip(skeletons, camera_poses)):
     #     projected_spline_cam2_fine = project_bspline(b_splines[-1], camera_pose, camera_parameters)
@@ -901,7 +923,8 @@ def pipeline_spline():
 
 
     print("--------------------    Fine Optimization    --------------------")
-    fine_bspline = optimize_bspline_pre_working(initial_spline=b_splines[-1],
+    start = time.perf_counter()
+    fine_bspline, opt_cost = optimize_bspline_pre_working(initial_spline=b_splines[-1],
                             camera_parameters=camera_parameters,
                             masks=masks,
                             camera_poses=camera_poses,
@@ -912,6 +935,11 @@ def pipeline_spline():
                             symmetric=True,
                             translate=False,
                             disp=True)
+    end = time.perf_counter()
+
+    optimization_time_fine.append(end-start)
+    optimization_cost_fine.append(opt_cost)
+
     b_splines.append(fine_bspline)
     
 
@@ -922,7 +950,7 @@ def pipeline_spline():
 
     save_data_class.save_all(images[-1], masks[-1], depths_orig[-1], depths[-1], camera_poses[-1], palm_poses[-1], coarse_bspline, fine_bspline, None)
 
-    input("Capture image with smartphone and press Enter when done…")
+    # input("Capture image with smartphone and press Enter when done…")
 
     # Get highest Point in pointcloud
     # target_point, target_angle = get_highest_point_and_angle_spline(b_splines[-1])
@@ -958,14 +986,15 @@ def pipeline_spline():
         # show_masks(masks[-1])
 
         projected_spline_cam1 = project_bspline(b_splines[-1], camera_poses[-2], camera_parameters)
-        show_masks([masks[-2], projected_spline_cam1], "Projected B-Spline Cam1")
+        # show_masks([masks[-2], projected_spline_cam1], "Projected B-Spline Cam1")
 
         projected_spline_cam2 = project_bspline(b_splines[-1], camera_poses[-1], camera_parameters)
-        show_masks([masks[-1], projected_spline_cam2], "Projected B-Spline Cam2")
+        # show_masks([masks[-1], projected_spline_cam2], "Projected B-Spline Cam2")
 
         #region Translate b-spline
         start = time.perf_counter()
         bounds = [(-0.3, 0.3), (-0.3, 0.3)] # [(x_min, x_max), (y_min,  y_max)]
+
         result_translation = opt.minimize(
             fun=score_bspline_translation,   # returns –score
             x0=[0, 0],
@@ -981,7 +1010,12 @@ def pipeline_spline():
             options={'maxiter':1e8, 'ftol':1e-2, 'eps':1e-6, 'disp':True, 'maxfun':1e8}
         )
         end = time.perf_counter()
+        optimization_time_translate.append(end - start)
         print(f"B-spline translation took {end - start:.2f} seconds")
+
+        opt_cost = score_bspline_translation(result_translation.x, masks[-1], camera_poses[-1], camera_parameters, degree, b_splines[-1])
+        optimization_cost_translate.append(opt_cost)
+
         bspline_translated = apply_translation_to_ctrl_points(b_splines[-1], result_translation.x, camera_poses[-1])
         #endregion Translate b-spline old
 
@@ -1147,7 +1181,8 @@ def pipeline_spline():
         #region optimize control points - new-pre - funktioniert, arbeite mit dem weiter
         skeletons, interps = precompute_skeletons_and_interps(masks) 
         print("--------------------    Coarse Optimization    --------------------")
-        coarse_bspline = optimize_bspline_pre_working(initial_spline=b_splines[-1],
+        start = time.perf_counter()
+        coarse_bspline, opt_cost = optimize_bspline_pre_working(initial_spline=b_splines[-1],
                              camera_parameters=camera_parameters,
                              masks=masks,
                              camera_poses=camera_poses,
@@ -1158,6 +1193,11 @@ def pipeline_spline():
                              symmetric=True,
                              translate=False,
                              disp=True)
+        end = time.perf_counter()
+
+        optimization_time_coarse.append(end - start)
+        optimization_cost_coarse.append(opt_cost)
+
         b_splines.append(coarse_bspline)
 
         # for index, (skeleton, camera_pose) in enumerate(zip(skeletons, camera_poses)):
@@ -1169,7 +1209,8 @@ def pipeline_spline():
 
 
         print("--------------------    Fine Optimization    --------------------")
-        fine_bspline = optimize_bspline_pre_working(initial_spline=b_splines[-1],
+        start = time.perf_counter()
+        fine_bspline, opt_cost = optimize_bspline_pre_working(initial_spline=b_splines[-1],
                              camera_parameters=camera_parameters,
                              masks=masks,
                              camera_poses=camera_poses,
@@ -1180,6 +1221,11 @@ def pipeline_spline():
                              symmetric=True,
                              translate=False,
                              disp=True)
+        end = time.perf_counter()
+        
+        optimization_time_fine.append(end - start)
+        optimization_cost_fine.append(opt_cost)
+
         b_splines.append(fine_bspline)
         
 
@@ -1199,7 +1245,7 @@ def pipeline_spline():
 
         # visualize_spline_with_pc(best_pc_world, b_splines[-1], degree)
 
-        input("Capture image with smartphone and press Enter when done…")
+        # input("Capture image with smartphone and press Enter when done…")
         # Movement
         # Get highest Point in pointcloud
         # target_point, target_angle = get_highest_point_and_angle_spline(b_splines[-1])
@@ -1231,6 +1277,56 @@ def pipeline_spline():
     next_pose_publisher.publish(rotated_target_pose)
 
     #endregion -------------------- Spline --------------------
+
+    grasp_success = False
+    usr_input = input("Grasp successfull? y/[n]: ").strip().lower()
+    if usr_input == "y":
+        grasp_success = True
+
+    save_data_class.save_misc_params(best_alpha, best_beta, optimization_time_translate, optimization_time_coarse, optimization_time_fine, optimization_cost_translate, optimization_cost_coarse, optimization_cost_fine, grasp_success)
+
+
+    #region -------------------- More Images for Voxel Carving --------------------
+    next_pose_stamped = transform_pose_intrinsic_xy(starting_pose, alpha=-1, beta=-0.4, x=0, y=-0.5, z=0.3)
+    # next_pose_stamped = transform_pose_intrinsic_xy(starting_pose, alpha=-1, beta=-0.4, x=0, y=0, z=0)
+    next_pose_publisher.publish(next_pose_stamped)
+    rospy.sleep(10)
+    images.append(image_subscriber.get_current_image())
+    masks.append(image_processing.get_mask(image=images[-1], prompt=SAM_prompt, show=False))
+    camera_poses.append(ros_handler.get_current_pose("hand_camera_frame", "map")) # <- online
+    palm_poses.append(ros_handler.get_current_pose("hand_palm_link", "map")) # <- online
+    save_data_class.save_all(images[-1], masks[-1], None, None, camera_poses[-1], palm_poses[-1], None, None, None)
+
+    # next_pose_publisher.publish(starting_pose)
+    # rospy.sleep(10)
+
+    next_pose_stamped = transform_pose_intrinsic_xy(starting_pose, alpha=1, beta=-0.4, x=0, y=0.5, z=0.3)
+    next_pose_publisher.publish(next_pose_stamped)
+    rospy.sleep(10)
+    images.append(image_subscriber.get_current_image())
+    masks.append(image_processing.get_mask(image=images[-1], prompt=SAM_prompt, show=False))
+    camera_poses.append(ros_handler.get_current_pose("hand_camera_frame", "map")) # <- online
+    palm_poses.append(ros_handler.get_current_pose("hand_palm_link", "map")) # <- online
+    save_data_class.save_all(images[-1], masks[-1], None, None, camera_poses[-1], palm_poses[-1], None, None, None)
+
+    # # next_pose_stamped = create_pose(x=0, y=-0.4, z=0.1, roll=-np.pi/4, reference_frame="hand_palm_link")
+    # next_pose_stamped = create_pose(y=-0.4, z=0.4, roll=-np.pi/4,reference_frame="hand_palm_link")
+    # next_pose_publisher.publish(next_pose_stamped)
+    # rospy.sleep(5)
+    # next_pose_stamped = create_pose(pitch=-0.4,reference_frame="hand_palm_link")
+    # next_pose_publisher.publish(next_pose_stamped)
+    # rospy.sleep(5)
+
+    # next_pose_publisher.publish(starting_pose)
+    # rospy.sleep(5)
+
+    # next_pose_stamped = create_pose(y=0.4, z=0.4, roll=np.pi/4,reference_frame="hand_palm_link")
+    # next_pose_publisher.publish(next_pose_stamped)
+    # rospy.sleep(5)
+    # next_pose_stamped = create_pose(pitch=-0.4,reference_frame="hand_palm_link")
+    # next_pose_publisher.publish(next_pose_stamped)
+    # rospy.sleep(5)
+    #endregion -------------------- More Images for Voxel Carving --------------------
 
 
 if __name__ == "__main__":

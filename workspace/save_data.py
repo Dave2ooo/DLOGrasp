@@ -23,6 +23,8 @@ from save_load_numpy import *
 
 import pickle
 
+import json
+
 
 class save_data:
     def __init__(self) -> None:
@@ -76,6 +78,8 @@ class save_data:
     def save_initial_spline(self, spline):
         save_bspline(spline, self.folder_name, 'initial_spline')
 
+    def save_misc_params(self, scale, shift, optimization_time_translate, optimization_time_coarse, optimization_time_fine, optimization_cost_translate, optimization_cost_coarse, optimization_cost_fine, grasp_success):
+        save_misc_params(scale, shift, optimization_time_translate, optimization_time_coarse, optimization_time_fine, optimization_cost_translate, optimization_cost_coarse, optimization_cost_fine, grasp_success, self.folder_name, 'misc_params')
 
 def save_image(image, folder: str, filename: str) -> bool:
     """
@@ -369,6 +373,57 @@ def save_bspline(spline: BSpline, folder: str, filename: str) -> str:
     # Save knot vector (t), coefficients (c), and degree (k)
     np.savez(path, t=spline.t, c=spline.c, k=spline.k)
     return path
+
+def save_misc_params(scale: float,
+                     shift: float,
+                     optimization_time_translate: list,
+                     optimization_time_coarse: list,
+                     optimization_time_fine: list,
+                     optimization_cost_translate, optimization_cost_coarse, optimization_cost_fine, 
+                     grasp_success: bool,
+                     folder: str,
+                     filename: str) -> str:
+    """
+    Save run parameters/timings to a JSON file.
+
+    Returns
+    -------
+    str
+        Full path to the saved JSON file.
+    """
+    # Ensure folder exists
+    os.makedirs(folder, exist_ok=True)
+
+    # Normalize filename to end with .json
+    out_name = filename if filename.lower().endswith(".json") else f"{filename}.json"
+    out_path = os.path.join(folder, out_name)
+
+    # Convert lists (possibly numpy types) to plain Python floats
+    def to_float_list(x):
+        return np.asarray(x, dtype=float).tolist()
+
+    payload = {
+        "scale": float(scale),
+        "shift": float(shift),
+        "optimization_time": {
+            "translate": to_float_list(optimization_time_translate),
+            "coarse":    to_float_list(optimization_time_coarse),
+            "fine":      to_float_list(optimization_time_fine),
+        },
+        "optimization_cost": {
+            "translate": to_float_list(optimization_cost_translate),
+            "coarse":    to_float_list(optimization_cost_coarse),
+            "fine":      to_float_list(optimization_cost_fine),
+        },
+        "grasp_success": bool(grasp_success),
+    }
+
+    # Write JSON
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+
+    return out_path
+
 
 def load_bspline(folder: str, filename: str) -> BSpline:
     """
