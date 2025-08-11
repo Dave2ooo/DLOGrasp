@@ -339,7 +339,7 @@ if __name__ == "__main__":
     
     
 
-    num_images = 6
+    num_images = 7
 
     #region Correct Camera Poses
     experiment_folder = '/root/workspace/images/thesis_images/'
@@ -396,8 +396,8 @@ if __name__ == "__main__":
     side_lengths = (0.6, 0.6, 0.6)        # meters
     voxel_size = 0.002                 # 5 mm voxels
 
-    # vg = carve_voxels(masks, camera_poses_in_map_frame_corrected, camera_parameters, center, side_lengths, voxel_size, tolerance_px=0)
-    vg = carve_voxels(masks, camera_poses_in_map_frame_from_experiment, camera_parameters, center, side_lengths, voxel_size, tolerance_px=0)
+    vg = carve_voxels(masks, camera_poses_in_map_frame_corrected, camera_parameters, center, side_lengths, voxel_size, tolerance_px=0)
+    # vg = carve_voxels(masks, camera_poses_in_map_frame_from_experiment, camera_parameters, center, side_lengths, voxel_size, tolerance_px=0)
 
     print(vg.occupancy.shape, vg.origin, vg.voxel_size)
 

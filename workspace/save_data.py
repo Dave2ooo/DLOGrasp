@@ -21,9 +21,13 @@ from datetime import datetime
 
 from save_load_numpy import *
 
+from my_utils import *
+
 import pickle
 
 import json
+
+camera_parameters = (149.09148, 187.64966, 334.87706, 268.23742)
 
 
 class save_data:
@@ -136,11 +140,11 @@ def save_depth_map(depth_map: np.ndarray,
     # mask of valid (non-background) pixels
     valid = dm > 0
 
-    # if no valid depths, just write a white image
+    # if no valid depths, just write a black image
     H, W = dm.shape
     if not valid.any():
-        white = 255 * np.ones((H, W, 3), np.uint8)
-        cv2.imwrite(save_path, white)
+        black = 0 * np.ones((H, W, 3), np.uint8)
+        cv2.imwrite(save_path, black)
         return
 
     # compute vmin/vmax over non-zero depths
@@ -160,8 +164,8 @@ def save_depth_map(depth_map: np.ndarray,
     # apply Turbo colormap
     img_color = cv2.applyColorMap(img8, colormap)
 
-    # paint background (zero-depth) white
-    img_color[~valid] = (255, 255, 255)
+    # paint background (zero-depth) black
+    img_color[~valid] = (0, 0, 0)
 
     # save PNG
     cv2.imwrite(save_path, img_color)
@@ -494,9 +498,24 @@ def load_pose_stamped(folder: str, filename: str) -> PoseStamped:
     return pose
 
 
+if __name__ == "__main__":
+    experiment_timestamp_str = '2025_08_11_15-44'
 
+    experiment_folder = '/root/workspace/images/thesis_images/'
+    b_spline_folder = experiment_folder + experiment_timestamp_str + '/spline_fine'
+    pose_folder = experiment_folder + experiment_timestamp_str + '/camera_pose'
+    depth_folder = experiment_folder + experiment_timestamp_str + '/depth_orig'
 
+    # b_spline = load_bspline(b_spline_folder, '4')
+    b_spline = load_bspline(experiment_folder + experiment_timestamp_str, 'initial_spline')
+    camera_pose = load_pose_stamped(pose_folder, '4')
+    
+    projected_spline_cam2_fine = project_bspline(b_spline, camera_pose, camera_parameters)
+    # show_masks([projected_spline_cam2_fine])
 
+    depth_orig = load_numpy_from_file(depth_folder, '0')
+    
+    show_depth_map(depth_orig)
 
 
 
