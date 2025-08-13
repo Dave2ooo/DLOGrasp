@@ -332,3 +332,286 @@ def show_voxel_grid(vg,
     ax.set_xlabel('X (m)'); ax.set_ylabel('Y (m)'); ax.set_zlabel('Z (m)')
     ax.set_title(f"Occupied voxels: {M}  |  voxel_size={vg.voxel_size:.4f} m")
     plt.show()
+
+def show_voxel_grid_solid_voxels(vg):
+    """
+    Render a solid (cubic) voxel grid in Open3D, compatible with CUDA builds.
+    vg must have: occupancy (Nx,Ny,Nz bool), origin (3,), voxel_size (float)
+    """
+    import open3d as o3d
+
+    occ = np.asarray(vg.occupancy, dtype=bool)
+    occ_idx = np.argwhere(occ)  # (M,3) integer indices (i,j,k)
+    if occ_idx.size == 0:
+        print("Empty grid.")
+        return
+
+    # Voxel centers in map frame
+    centers = np.asarray(vg.origin, float) + (occ_idx + 0.5) * float(vg.voxel_size)
+
+    # Build a point cloud at voxel centers
+    pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(centers))
+    pcd.paint_uniform_color([0.2, 0.6, 1.0])
+
+    # Exact bounds of your grid (so alignment matches your occupancy)
+    min_bound = np.asarray(vg.origin, float)
+    max_bound = min_bound + np.array(occ.shape, float) * float(vg.voxel_size)
+
+    # Create a voxel grid from those points within your bounds
+    grid = o3d.geometry.VoxelGrid.create_from_point_cloud_within_bounds(
+        pcd,
+        voxel_size=float(vg.voxel_size),
+        min_bound=min_bound,
+        max_bound=max_bound,
+    )
+
+    o3d.visualization.draw_geometries([grid])
+
+def show_voxel_grid_with_bspline(
+    vg,
+    spline,                           # scipy.interpolate.BSpline, vector-valued -> R^3
+    num_samples: int = 300,           # samples along the curve
+    line_radius: float = None,        # None -> thin polyline; float (meters) -> tube of this radius
+    voxel_color=(0.75, 0.75, 0.75),   # RGB in [0,1]
+    curve_color=(0.9, 0.2, 0.1)       # RGB in [0,1]
+):
+    """
+    Render a solid voxel grid and a 3D B-spline curve in the SAME 'map' frame.
+
+    Requirements:
+    - Open3D installed
+    - 'spline' is a vector-valued BSpline returning (N,3) for vector inputs.
+      (i.e., coef has last dim 3; evaluating on a 1D array yields shape (N,3))
+
+    Notes:
+    - The curve is sampled uniformly in the spline parameter domain [t[k], t[-k-1]].
+      If you need arc-length uniformity, say so and we can add it.
+    """
+    import open3d as o3d
+    from numpy.linalg import norm
+
+    # --- Build solid voxel grid from occupied centers (CUDA-safe path) ---
+    occ = np.asarray(vg.occupancy, dtype=bool)
+    occ_idx = np.argwhere(occ)
+    if occ_idx.size == 0:
+        print("Empty grid.")
+        return
+
+    centers = np.asarray(vg.origin, float) + (occ_idx + 0.5) * float(vg.voxel_size)
+    pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(centers))
+    pcd.paint_uniform_color(voxel_color)
+
+    min_bound = np.asarray(vg.origin, float)
+    max_bound = min_bound + np.array(occ.shape, float) * float(vg.voxel_size)
+
+    grid = o3d.geometry.VoxelGrid.create_from_point_cloud_within_bounds(
+        pcd, voxel_size=float(vg.voxel_size), min_bound=min_bound, max_bound=max_bound
+    )
+
+    # --- Sample the spline in its valid domain ---
+    # SciPy BSpline valid domain = [t[k], t[-k-1]]
+    t = np.asarray(spline.t, dtype=float)
+    k = int(spline.k)
+    u0, u1 = t[k], t[-k-1]
+    u = np.linspace(u0, u1, int(num_samples))
+    C = spline(u)  # expect shape (num_samples, 3)
+    C = np.asarray(C, dtype=float)
+    if C.ndim != 2 or C.shape[1] != 3:
+        raise ValueError("BSpline must evaluate to Nx3 points. Got shape: %r" % (C.shape,))
+
+    # --- Make curve geometry ---
+    geoms = [grid]
+
+    if line_radius is None or line_radius <= 0.0:
+        # Fast polyline via LineSet
+        lines = np.column_stack([np.arange(len(C)-1), np.arange(1, len(C))]).astype(np.int32)
+        ls = o3d.geometry.LineSet(
+            points=o3d.utility.Vector3dVector(C),
+            lines=o3d.utility.Vector2iVector(lines)
+        )
+        colors = np.tile(curve_color, (lines.shape[0], 1))
+        ls.colors = o3d.utility.Vector3dVector(colors)
+        geoms.append(ls)
+    else:
+        # Pretty tube: chain of short cylinders
+        def _cylinder_between(p0, p1, radius, radial=24):
+            v = p1 - p0
+            L = float(norm(v))
+            if L < 1e-12:
+                return None
+            # Cylinder is along +Z by default
+            cyl = o3d.geometry.TriangleMesh.create_cylinder(radius=radius, height=L, resolution=radial)
+            cyl.compute_vertex_normals()
+            # Rotate +Z to direction v
+            z = np.array([0.0, 0.0, 1.0], dtype=float)
+            d = v / L
+            # Handle parallel/anti-parallel robustly
+            c = float(np.dot(z, d))
+            if c > 0.999999:
+                R = np.eye(3)
+            elif c < -0.999999:
+                # 180° around any axis orthogonal to z; pick x-axis
+                R = o3d.geometry.get_rotation_matrix_from_axis_angle(np.array([1.0, 0.0, 0.0]) * np.pi)
+            else:
+                axis = np.cross(z, d)
+                axis /= norm(axis)
+                angle = float(np.arccos(c))
+                R = o3d.geometry.get_rotation_matrix_from_axis_angle(axis * angle)
+            cyl.rotate(R, center=(0, 0, 0))
+            # Move center to midpoint
+            mid = (p0 + p1) * 0.5
+            cyl.translate(mid)
+            return cyl
+
+        tubes = []
+        for i in range(len(C) - 1):
+            seg = _cylinder_between(C[i], C[i+1], line_radius)
+            if seg is not None:
+                tubes.append(seg)
+        if not tubes:
+            print("Curve collapsed to a point; nothing to draw.")
+        else:
+            mesh = tubes[0]
+            for tmesh in tubes[1:]:
+                mesh += tmesh
+            mesh.paint_uniform_color(curve_color)
+            geoms.append(mesh)
+
+    # --- Show ---
+    o3d.visualization.draw_geometries(geoms)
+
+
+def show_bsplines(
+    splines,
+    num_samples: int = 300,           # samples per curve (uniform in parameter domain)
+    line_radius: float | None = None, # None/<=0 -> thin polyline, else tube radius in scene units
+    colors=None,                      # None -> auto palette; tuple[3] for all; or list[tuple[3]] per spline
+    show_axes: bool = True,           # add a small coordinate frame at the origin
+    tube_resolution: int = 24         # radial resolution for tube segments
+):
+    """
+    Render one or more 3D BSplines in Open3D.
+
+    Parameters
+    ----------
+    splines : Iterable[scipy.interpolate.BSpline]
+        Each spline must be vector-valued (R^3). Evaluating on an array should yield (N, 3).
+    num_samples : int
+        Number of samples per curve (uniform in the spline's valid parameter domain [t[k], t[-k-1]]).
+    line_radius : float | None
+        If None or <= 0: draw polylines (fast). If > 0: draw tubes (pretty; slower).
+    colors : None | (r,g,b) | list[(r,g,b)]
+        RGB in [0,1]. If None, a distinct palette is used. If a single triple is given, it's used for all.
+        If a list is given, it must have at least len(splines) entries (will be cycled if shorter).
+    show_axes : bool
+        If True, shows a coordinate frame at the origin (length=0.1).
+    tube_resolution : int
+        Cylinder radial resolution for tube segments.
+    """
+    import numpy as np
+    import open3d as o3d
+    from numpy.linalg import norm
+
+    # --- Helpers -------------------------------------------------------------
+    def _ensure_color_list(n, colors):
+        default_palette = [
+            (0.90, 0.20, 0.10), (0.10, 0.55, 0.85), (0.10, 0.75, 0.35),
+            (0.95, 0.70, 0.10), (0.60, 0.30, 0.90), (0.20, 0.80, 0.80),
+            (0.80, 0.40, 0.40), (0.40, 0.80, 0.40), (0.40, 0.40, 0.80),
+            (0.70, 0.70, 0.70),
+        ]
+        if colors is None:
+            return [default_palette[i % len(default_palette)] for i in range(n)]
+        colors = list(colors)
+        # single color provided
+        if len(colors) == 3 and all(isinstance(c, (int, float)) for c in colors):
+            return [tuple(float(c) for c in colors)] * n
+        # list provided
+        out = []
+        for i in range(n):
+            out.append(tuple(float(c) for c in colors[i % len(colors)]))
+        return out
+
+    def _sample_points_3d(bs, N):
+        t = np.asarray(bs.t, float)
+        k = int(bs.k)
+        u0, u1 = t[k], t[-k-1]
+        u = np.linspace(u0, u1, int(N))
+        P = np.asarray(bs(u), float)
+        if P.ndim != 2 or P.shape[1] != 3:
+            raise ValueError(f"BSpline must evaluate to (N,3). Got {P.shape=}")
+        return P
+
+    def _tube_segment(p0, p1, radius, radial):
+        v = p1 - p0
+        L = float(norm(v))
+        if L < 1e-12:
+            return None
+        mesh = o3d.geometry.TriangleMesh.create_cylinder(radius=radius, height=L, resolution=radial)
+        mesh.compute_vertex_normals()
+        # rotate +Z to direction v
+        z = np.array([0.0, 0.0, 1.0], float)
+        d = v / L
+        c = float(np.dot(z, d))
+        if c > 0.999999:
+            R = np.eye(3)
+        elif c < -0.999999:
+            # 180°: rotate around any axis orthogonal to z (x-axis)
+            R = o3d.geometry.get_rotation_matrix_from_axis_angle(np.array([1.0, 0.0, 0.0]) * np.pi)
+        else:
+            axis = np.cross(z, d)
+            axis /= norm(axis)
+            angle = float(np.arccos(c))
+            R = o3d.geometry.get_rotation_matrix_from_axis_angle(axis * angle)
+        mesh.rotate(R, center=(0, 0, 0))
+        # center at midpoint
+        mesh.translate((p0 + p1) * 0.5)
+        return mesh
+
+    # --- Build geometry ------------------------------------------------------
+    splines = list(splines)
+    if len(splines) == 0:
+        print("show_bsplines: nothing to draw (no splines).")
+        return
+
+    curve_colors = _ensure_color_list(len(splines), colors)
+    geoms = []
+
+    if show_axes:
+        geoms.append(o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1, origin=[0, 0, 0]))
+
+    for idx, (bs, col) in enumerate(zip(splines, curve_colors)):
+        C = _sample_points_3d(bs, num_samples)
+
+        if not line_radius or line_radius <= 0.0:
+            # LineSet polyline
+            if C.shape[0] < 2:
+                continue
+            lines = np.column_stack([np.arange(len(C)-1), np.arange(1, len(C))]).astype(np.int32)
+            ls = o3d.geometry.LineSet(
+                points=o3d.utility.Vector3dVector(C),
+                lines=o3d.utility.Vector2iVector(lines)
+            )
+            ls.colors = o3d.utility.Vector3dVector(np.tile(col, (lines.shape[0], 1)))
+            geoms.append(ls)
+        else:
+            # Tube mesh (chain of cylinders)
+            seg_meshes = []
+            for i in range(C.shape[0] - 1):
+                m = _tube_segment(C[i], C[i+1], float(line_radius), tube_resolution)
+                if m is not None:
+                    seg_meshes.append(m)
+            if not seg_meshes:
+                continue
+            mesh = seg_meshes[0]
+            for m in seg_meshes[1:]:
+                mesh += m
+            mesh.paint_uniform_color(col)
+            geoms.append(mesh)
+
+    if not geoms:
+        print("show_bsplines: nothing valid to draw.")
+        return
+
+    # --- Display -------------------------------------------------------------
+    o3d.visualization.draw_geometries(geoms)

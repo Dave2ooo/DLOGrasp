@@ -10,6 +10,7 @@ import copy
 from geometry_msgs.msg import Pose, PoseStamped
 from save_data import *
 from my_utils import show_masks
+from bspline_from_voxel import *
 
 import pickle
 
@@ -337,36 +338,43 @@ if __name__ == "__main__":
     # experiment_timestamp_str = '2025_08_11_15-27'
     experiment_timestamp_str = '2025_08_11_15-44'
     
-    
+    # items = (0, 4)
+    items = [0, 1, 2, 3, 4, 5, 6]
+    # items = (6)
+    correct_pose_index = 4
 
-    num_images = 7
 
-    #region Correct Camera Poses
     experiment_folder = '/root/workspace/images/thesis_images/'
     pose_folder = experiment_folder + experiment_timestamp_str + '/camera_pose'
     image_folder = experiment_folder + experiment_timestamp_str + '/image/'
 
+    mask_folder = experiment_folder + experiment_timestamp_str + '/mask_cv2'
+    # mask_folder = experiment_folder + experiment_timestamp_str + '/masks_correct'
+
+    bspline_folder = experiment_folder + experiment_timestamp_str + '/spline_fine'
+
+    #region Correct Camera Poses
     camera_poses_in_map_frame_from_experiment = []
     camera_poses_in_marker_frame = []
     marker_poses_in_camera_frame = []
 
     camera_poses_in_map_frame_corrected = []
 
-    for i in range(num_images):
+    for i in items:
         camera_pose = load_pose_stamped(pose_folder, str(i))
         camera_poses_in_map_frame_from_experiment.append(camera_pose)
         image = cv2.imread(image_folder + str(i) + '.png')
 
-        camera_pose_in_marker_frame = get_camera_pose_from_aruco_marker(image, camera_parameters, marker_length_m=0.199, show=True)
+        camera_pose_in_marker_frame = get_camera_pose_from_aruco_marker(image, camera_parameters, marker_length_m=0.199, show=False)
         camera_poses_in_marker_frame.append(camera_pose_in_marker_frame)
 
         marker_pose_in_camera_frame = invert_pose_stamped(camera_pose_in_marker_frame, 'hand_camera_frame')
         marker_poses_in_camera_frame.append(marker_pose_in_camera_frame)
 
     
-    marker_pose_in_map_frame = compose_pose_stamped(camera_poses_in_map_frame_from_experiment[num_images-1], marker_poses_in_camera_frame[num_images-1])
+    marker_pose_in_map_frame = compose_pose_stamped(camera_poses_in_map_frame_from_experiment[correct_pose_index], marker_poses_in_camera_frame[correct_pose_index])
+    # marker_pose_in_map_frame = compose_pose_stamped(camera_poses_in_map_frame_from_experiment[0], marker_poses_in_camera_frame[0])
     print(f"marker_pose_in_map_frame: {marker_pose_in_map_frame}")
-
 
     for i, camera_pose_in_marker_frame in enumerate(camera_poses_in_marker_frame):
         camera_pose_in_map_frame_corrected = compose_pose_stamped(marker_pose_in_map_frame, camera_pose_in_marker_frame)
@@ -380,12 +388,10 @@ if __name__ == "__main__":
     # All camera poses are corrected: camera_poses_in_map_frame_corrected
 
     #region Load Masks
-    mask_folder = experiment_folder + experiment_timestamp_str + '/mask_cv2'
-    # mask_folder = experiment_folder + experiment_timestamp_str + '/masks_correct'
 
     masks = []
 
-    for i in range(num_images):
+    for i in items:
         mask = load_mask(mask_folder, str(i))
         masks.append(mask)
         # show_masks(mask, title=f"Mask {i}")
@@ -393,7 +399,7 @@ if __name__ == "__main__":
 
     #region Voxel Carving
     center = (0.54, 1.4, 0.4)           # meters, in 'map'
-    side_lengths = (0.6, 0.6, 0.6)        # meters
+    side_lengths = (1, 1, 1)        # meters
     voxel_size = 0.002                 # 5 mm voxels
 
     vg = carve_voxels(masks, camera_poses_in_map_frame_corrected, camera_parameters, center, side_lengths, voxel_size, tolerance_px=0)
@@ -401,5 +407,86 @@ if __name__ == "__main__":
 
     print(vg.occupancy.shape, vg.origin, vg.voxel_size)
 
-    show_voxel_grid(vg, backend="open3d", render="voxels")   # interactive cubes (fast enough up to a few 100k)
+    # show_voxel_grid(vg, backend="open3d", render="voxels")   # interactive cubes (fast enough up to a few 100k)
+    # show_voxel_grid_solid_voxels(vg)
     #endregion Voxel Carving
+
+
+    #region B-spline
+    spline = load_bspline(bspline_folder, '4')
+    # show_voxel_grid_with_bspline(vg, spline, num_samples=400, line_radius=0.006)
+    #endregion B-spline
+
+    L_target_m   = 1 # meter
+    L_target_vox = L_target_m / voxel_size  # 1500 for 2 mm voxels
+
+    params = FitParams(
+        # Field & A*
+        sigma_vox=1.8, dilate_iter=1, use_dt=True,
+        a_star_eps=0.02, a_star_p_floor=0.08,
+        a_star_goal_radius_vox=2.0, a_star_margin_vox=28,
+        a_star_pow=3.0, a_star_w_occ=3.0,
+        # Waypoints
+        n_waypoints=5, waypoint_min_sep_vox=12,
+        # Smoother input polyline
+        resample_step_vox=2.0,          # ← coarser
+        spline_smooth=5e-1,             # ← stronger pre-fit smoothing
+        # Refinement
+        refine=True, refine_u_samples=600, refine_tau_inside=0.06,
+        fix_endpoints=True,
+        refine_weights=RefinementWeights(
+            alpha=0.5,   # rely a bit less on P
+            beta=2.0,    # keep mostly in corridor
+            gamma=5e-3,  # ← stronger smoothness
+            delta=1e-3,  # keep length reasonable
+            eta=300.0,   # keep endpoints pinned
+            zeta=5.0     # moderate voxel pull to avoid zig-zag
+        ),
+        length_prior=L_target_vox
+    )
+    result = fit_with_manual_endpoints(vg, params)  # or fit_bspline_from_numpy_voxel_grid(vg, params, endpoints_zyx=...)
+
+
+
+    # params = FitParams(
+    #     endpoint_strategy="pca",
+    #     sigma_vox=3.0,          # more blur to bridge bigger gaps
+    #     pick_tau=0.05,          # include weaker field for endpoints
+    #     a_star_eps=0.02,        # cheaper to traverse low-P zones
+    #     resample_step_vox=1.0,
+    #     refine=True,
+    #     refine_tau_inside=0.08, # don't over-penalize low P during bridging
+    #     refine_u_samples=500,
+    #     fix_endpoints=False,    # allow curve to grow to meet length
+    #     refine_weights=RefinementWeights(
+    #         alpha=1.0, beta=4.0,   # softer outside penalty
+    #         gamma=5e-3,            # keep it smooth
+    #         delta=1e-3,            # <-- enable length prior
+    #         eta=15.0               # soft pins only (since not fixing endpoints)
+    #     ),
+    #     length_prior=L_target_vox
+    # )
+
+    # result = fit_bspline_from_numpy_voxel_grid(vg, params=params)
+
+    # vg is your NumpyVoxelGrid-like object
+    # result = fit_bspline_from_numpy_voxel_grid(vg, params=FitParams(
+    #     sigma_vox=1.5,         # Gaussian (in voxels), ~ tube radius
+    #     use_dt=True,           # multiply by distance transform (centers the field)
+    #     resample_step_vox=1.5, # path resampling in voxels
+    #     spline_degree=3,
+    #     spline_smooth=1e-3,
+    #     refine=True,           # turn off if you just want the initial fit
+    #     refine_u_samples=300,
+    #     refine_tau_inside=0.15 # treat P<tau as “outside”
+    # ))
+    bs_world = result.bs_world  # SciPy BSpline in (x,y,z)
+    bs_vox = result.bs_vox  # SciPy BSpline in (x,y,z)
+    u0, u1 = result.u_domain
+    pts_xyz = bs_world(np.linspace(u0, u1, 200))  # sample for visualization
+
+    debug_report(vg, result)
+
+    show_voxel_grid_with_bspline(vg, bs_world, num_samples=400, line_radius=0.006)
+
+    show_bsplines([spline, bs_world], num_samples=400, line_radius=0.006, show_axes=True)
