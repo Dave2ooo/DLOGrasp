@@ -15,6 +15,9 @@ import time
 import random
 import scipy.optimize as opt
 
+from save_load_numpy import load_numpy_from_file
+from save_data import load_pose_stamped
+
 camera_parameters = (149.09148, 187.64966, 334.87706, 268.23742)
 
 class ImageProcessing:
@@ -729,23 +732,20 @@ class MyClass:
 def pipeline_spline():
     image_processing = ImageProcessing()
 
-    my_class = MyClass()
-    ros_handler = ROSHandler()
+    # ros_handler = ROSHandler()
     image_subscriber = ImageSubscriber('/hsrb/hand_camera/image_rect_color')
     next_pose_publisher = PosePublisher("/next_pose")
     target_pose_publisher = PosePublisher("/target_pose")
-    path_publisher = PathPublisher("/my_path")
+    # path_publisher = PathPublisher("/my_path")
     pointcloud_publisher = PointcloudPublisher(topic="my_pointcloud", frame_id="map")
     grasp_point_publisher = PointStampedPublisher("/grasp_point")
     save_data_class = save_data()
 
-    transform_stamped0 = create_stamped_transform_from_trans_and_rot([0.767, 0.495, 0.712], [0.707, 0.001, 0.707, -0.001])
-    transform_stamped1 = create_stamped_transform_from_trans_and_rot([0.839, 0.493, 0.727], [0.774, 0.001, 0.633, -0.001])
-    transform_stamped2 = create_stamped_transform_from_trans_and_rot([0.903, 0.493, 0.728], [0.834, 0.001, 0.552, -0.000])
-    transform_stamped3 = create_stamped_transform_from_trans_and_rot([0.953, 0.493, 0.717], [0.885, 0.000, 0.466, -0.000])
-    transform_stamped4 = create_stamped_transform_from_trans_and_rot([0.991, 0.492, 0.698], [0.927, 0.001, 0.376, -0.000])
-    transform_stamped5 = create_stamped_transform_from_trans_and_rot([1.014, 0.493, 0.672], [0.960, 0.001, 0.282, -0.000])
-    transform_stamped6 = create_stamped_transform_from_trans_and_rot([1.025, 0.493, 0.643], [0.983, 0.001, 0.184, -0.000])
+    offline_folder = '/root/workspace/images/thesis_images/' + '2025_08_04_11-17'
+    folder_name_image = f'{offline_folder}/image'
+    folder_name_camera_pose = f'{offline_folder}/camera_pose'
+    folder_name_palm_pose = f'{offline_folder}/palm_pose'
+    offline_counter = 0
 
     optimizer_decay=1
     optimizer_num_samples=20
@@ -786,24 +786,27 @@ def pipeline_spline():
     optimization_cost_coarse = []
     optimization_cost_fine = []
 
-    starting_pose = ros_handler.get_current_pose("hand_palm_link", "map")
+    # starting_pose = ros_handler.get_current_pose("hand_palm_link", "map") # <- online
 
 
 
     # Take image
 
     # Get current transform
-    camera_poses.append(ros_handler.get_current_pose("hand_camera_frame", "map")) # <- online
-    # camera_poses.append(transform_stamped0) # <- offline
-    palm_poses.append(ros_handler.get_current_pose("hand_palm_link", "map")) # <- online
+    # camera_poses.append(ros_handler.get_current_pose("hand_camera_frame", "map")) # <- online
+    camera_poses.append(load_pose_stamped(folder_name_camera_pose, str(offline_counter))) # <- offline
+    # palm_poses.append(ros_handler.get_current_pose("hand_palm_link", "map")) # <- online
+    palm_poses.append(load_pose_stamped(folder_name_palm_pose, str(offline_counter))) # <- offline
     # Process image
+    # online:
     usr_input_correct_mask = "n"
     while usr_input_correct_mask == "n":
         temp_mask = None
         while temp_mask is None:
             images = []
-            images.append(image_subscriber.get_current_image(show=True)) # <- online
-            # images.append(cv2.imread(f'/root/workspace/images/moves/cable{0}.jpg')) # <- offline
+            # images.append(image_subscriber.get_current_image(show=True))  # <- online
+            images.append(cv2.imread(f'{folder_name_image}/{offline_counter}.png')) # <- offline
+            offline_counter += 1 # <- offline
             temp_mask = image_processing.get_mask(image=images[-1], prompt=SAM_prompt, show=True)
             if temp_mask is None:
                 usr_input = input("No Object Detected. Repeat? [y]/n: ")
@@ -817,27 +820,30 @@ def pipeline_spline():
         usr_input_correct_mask = input("Mask Correct? [y]/n: ")
         if usr_input_correct_mask == "c": exit()
 
+
+    
     save_data_class.save_all(images[-1], masks[-1], depths_orig[-1], depths[-1], camera_poses[-1], palm_poses[-1], None, None, None)
 
     input("Capture image with smartphone and press Enter when done…")
     # Move arm
     next_pose_stamped = create_pose(x=0.1, z=0.1, pitch=-0.4, reference_frame="hand_palm_link")
     next_pose_publisher.publish(next_pose_stamped)
-    # input("Press Enter when moves are finished…")
-    rospy.sleep(5)
+
+    # rospy.sleep(5) # <- online
+
     # spline_2d = extract_2d_spline(masks[-1])
     # display_2d_spline_gradient(masks[-1], spline_2d)
     # exit()
 
-    # input("Press Enter when image is correct")
-
     # Take image
-    images.append(image_subscriber.get_current_image()) # <- online
-    # images.append(cv2.imread(f'/root/workspace/images/moves/cable{1}.jpg')) # <- offline
+    # images.append(image_subscriber.get_current_image()) # <- online
+    images.append(cv2.imread(f'{folder_name_image}/{offline_counter}.png')) # <- offline
     # Get current transform
-    camera_poses.append(ros_handler.get_current_pose("hand_camera_frame", "map")) # <- online
-    # camera_poses.append(transform_stamped1) # <- offline
-    palm_poses.append(ros_handler.get_current_pose("hand_palm_link", "map")) # <- online
+    # camera_poses.append(ros_handler.get_current_pose("hand_camera_frame", "map")) # <- online
+    camera_poses.append(load_pose_stamped(folder_name_camera_pose, str(offline_counter))) # <- offline
+    offline_counter += 1 # <- offline
+    # palm_poses.append(ros_handler.get_current_pose("hand_palm_link", "map")) # <- online
+    palm_poses.append(load_pose_stamped(folder_name_palm_pose, str(offline_counter))) # <- offline
     # Process image
     masks.append(image_processing.get_mask(image=images[-1], prompt=SAM_prompt, show=True))
     depths_orig.append(image_processing.get_depth_unmasked(image=images[-1], show=False))
@@ -866,7 +872,7 @@ def pipeline_spline():
     #region -------------------- Spline --------------------
     best_depth = scale_depth_map(depths[-1], best_alpha, best_beta)
     # centerline_pts_cam2 = extract_centerline_from_mask(best_depth, masks[-1], camera_parameters)
-    centerline_pts_cam2_array = extract_centerline_from_mask_individual(best_depth, masks[-1], camera_parameters, show=False)
+    centerline_pts_cam2_array = extract_centerline_from_mask_individual(best_depth, masks[-1], camera_parameters, save_data_class, show=False)
     # print(f"centerline_pts_cam2_array: {len(centerline_pts_cam2_array)}: {centerline_pts_cam2_array}")
     centerline_pts_cam2 = max(centerline_pts_cam2_array, key=lambda s: s.shape[0]) # Extract the longest path
     # print(f"centerline_pts_cam2: {centerline_pts_cam2.shape[0]}: {centerline_pts_cam2}")
@@ -890,6 +896,10 @@ def pipeline_spline():
     # show_masks([correct_skeleton, projected_spline_cam1], "Correct Skeleton and Projected Spline (CAM1)")
 
 
+    best_pointcloud = convert_depth_map_to_pointcloud(best_depth, camera_parameters)
+    best_pointcloud_world = transform_pointcloud_to_world(best_pointcloud, camera_poses[-1])
+    save_data_class.save_pointcloud_and_spline(best_pointcloud_world, b_splines[-1], "best_pointcloud_and_spline")
+    exit()
 
     #region optimize control points - new-pre - funktioniert, arbeite mit dem weiter
     skeletons, interps = precompute_skeletons_and_interps(masks) 
@@ -952,35 +962,40 @@ def pipeline_spline():
 
     # input("Capture image with smartphone and press Enter when done…")
 
-    # Get highest Point in pointcloud
-    # target_point, target_angle = get_highest_point_and_angle_spline(b_splines[-1])
-    target_point, target_angle = get_midpoint_and_angle_spline(b_splines[-1])
-    print(f"target_point: {target_point}", f"target_angle: {target_angle}")
-    tarrget_point_offset = target_point.copy()
-    tarrget_point_offset[2] += 0.098 - 0.015 # Make target Pose hover above actual target pose - tested offset
-    grasp_point_publisher.publish(target_point)
-    # Convert to Pose
-    base_footprint = ros_handler.get_current_pose("base_footprint", map_frame)
-    target_poses.append(get_desired_pose(tarrget_point_offset, base_footprint))
-    # Calculate Path
-    # target_path = interpolate_poses(palm_poses[-1], target_poses[-1], num_steps=4) # <- online
-    next_pose = control_law(current_pose=palm_poses[-1], target_pose=target_poses[-1], step_size=0.25)
-    # target_path = interpolate_poses(camera_poses[-1], target_poses[-1], num_steps=4) # <- offline
-    # Move arm a step
-    target_pose_publisher.publish(target_poses[-1])
-    next_pose_publisher.publish(next_pose)
-    # input("Press Enter when moves are finished…")
+
+    #region Online:
+    # # Get highest Point in pointcloud
+    # # target_point, target_angle = get_highest_point_and_angle_spline(b_splines[-1])
+    # target_point, target_angle = get_midpoint_and_angle_spline(b_splines[-1])
+    # print(f"target_point: {target_point}", f"target_angle: {target_angle}")
+    # tarrget_point_offset = target_point.copy()
+    # tarrget_point_offset[2] += 0.098 - 0.015 # Make target Pose hover above actual target pose - tested offset
+    # grasp_point_publisher.publish(target_point)
+    # # Convert to Pose
+    # base_footprint = ros_handler.get_current_pose("base_footprint", map_frame) # <- online
+    # target_poses.append(get_desired_pose(tarrget_point_offset, base_footprint))
+    # # Calculate Path
+    # # target_path = interpolate_poses(palm_poses[-1], target_poses[-1], num_steps=4) # <- online
+    # next_pose = control_law(current_pose=palm_poses[-1], target_pose=target_poses[-1], step_size=0.25)
+    # # target_path = interpolate_poses(camera_poses[-1], target_poses[-1], num_steps=4) # <- offline
+    # # Move arm a step
+    # target_pose_publisher.publish(target_poses[-1])
+    # next_pose_publisher.publish(next_pose)
+    # # input("Press Enter when moves are finished…")
+    #endregion Online
 
     for loop in range(3):
     # while not rospy.is_shutdown():
         rospy.sleep(5)
         # Take image
-        images.append(image_subscriber.get_current_image()) # <- online
-        # images.append(cv2.imread(f'/root/workspace/images/moves/cable{1}.jpg')) # <- offline
+        # images.append(image_subscriber.get_current_image()) # <- online
+        images.append(cv2.imread(f'{folder_name_image}/{offline_counter}.png')) # <- offline
         # Get current transform
-        camera_poses.append(ros_handler.get_current_pose("hand_camera_frame", "map")) # <- online
-        # camera_poses.append(transform_stamped2) # <- offline
-        palm_poses.append(ros_handler.get_current_pose("hand_palm_link", "map")) # <- online
+        # camera_poses.append(ros_handler.get_current_pose("hand_camera_frame", "map")) # <- online
+        camera_poses.append(load_pose_stamped(folder_name_camera_pose, str(offline_counter))) # <- offline
+        offline_counter += 1 # <- offline
+        # palm_poses.append(ros_handler.get_current_pose("hand_palm_link", "map")) # <- online
+        palm_poses.append(load_pose_stamped(folder_name_palm_pose, str(offline_counter))) # <- offline
         # Process image
         masks.append(image_processing.get_mask(image=images[-1], prompt=SAM_prompt, show=False))
         # show_masks(masks[-1])
@@ -1246,31 +1261,32 @@ def pipeline_spline():
         # visualize_spline_with_pc(best_pc_world, b_splines[-1], degree)
 
         # input("Capture image with smartphone and press Enter when done…")
-        # Movement
-        # Get highest Point in pointcloud
-        # target_point, target_angle = get_highest_point_and_angle_spline(b_splines[-1])
-        target_point, target_angle = get_midpoint_and_angle_spline(b_splines[-1])
-        tarrget_point_offset = target_point.copy()
-        tarrget_point_offset[2] += 0.098 - 0.015 # Make target Pose hover above actual target pose - tested offset
-        # Convert to Pose
-        base_footprint = ros_handler.get_current_pose("base_footprint", map_frame)
-        target_poses.append(get_desired_pose(tarrget_point_offset, base_footprint))
-        # Calculate Path
-        # target_path = interpolate_poses(palm_poses[-1], target_poses[-1], num_steps=4) # <- online
-        next_pose = control_law(current_pose=palm_poses[-1], target_pose=target_poses[-1], step_size=0.25)
-        # target_path = interpolate_poses(camera_poses[-1], target_poses[-1], num_steps=4) # <- offline
-        grasp_point_publisher.publish(target_point)
-        # Move arm a step
-        target_pose_publisher.publish(target_poses[-1])
-        # usr_input = input("Go to final Pose? y/[n] or enter pose index: ").strip().lower()
-        # if usr_input == "c": exit()
-        # if usr_input == "y":
-        #     rotated_target_pose = rotate_pose_around_z(target_poses[-1], target_angle)
-        #     next_pose_publisher.publish(rotated_target_pose)
-        #     break
+        #region Online
+        # # Get highest Point in pointcloud
+        # # target_point, target_angle = get_highest_point_and_angle_spline(b_splines[-1])
+        # target_point, target_angle = get_midpoint_and_angle_spline(b_splines[-1])
+        # tarrget_point_offset = target_point.copy()
+        # tarrget_point_offset[2] += 0.098 - 0.015 # Make target Pose hover above actual target pose - tested offset
+        # # Convert to Pose
+        # base_footprint = ros_handler.get_current_pose("base_footprint", map_frame)
+        # target_poses.append(get_desired_pose(tarrget_point_offset, base_footprint))
+        # # Calculate Path
+        # # target_path = interpolate_poses(palm_poses[-1], target_poses[-1], num_steps=4) # <- online
+        # next_pose = control_law(current_pose=palm_poses[-1], target_pose=target_poses[-1], step_size=0.25)
+        # # target_path = interpolate_poses(camera_poses[-1], target_poses[-1], num_steps=4) # <- offline
+        # grasp_point_publisher.publish(target_point)
+        # # Move arm a step
+        # target_pose_publisher.publish(target_poses[-1])
+        # # usr_input = input("Go to final Pose? y/[n] or enter pose index: ").strip().lower()
+        # # if usr_input == "c": exit()
+        # # if usr_input == "y":
+        # #     rotated_target_pose = rotate_pose_around_z(target_poses[-1], target_angle)
+        # #     next_pose_publisher.publish(rotated_target_pose)
+        # #     break
 
-        next_pose_publisher.publish(next_pose)
-        # input("Press Enter when moves are finished…")
+        # next_pose_publisher.publish(next_pose)
+        # # input("Press Enter when moves are finished…")
+        # #endregion Online
         rospy.sleep(5)
 
     rotated_target_pose = rotate_pose_around_z(target_poses[-1], target_angle)
@@ -1285,6 +1301,7 @@ def pipeline_spline():
 
     save_data_class.save_misc_params(best_alpha, best_beta, optimization_time_translate, optimization_time_coarse, optimization_time_fine, optimization_cost_translate, optimization_cost_coarse, optimization_cost_fine, grasp_success)
 
+    exit() # <- offline
 
     #region -------------------- More Images for Voxel Carving --------------------
     next_pose_stamped = transform_pose_intrinsic_xy(starting_pose, alpha=-1, beta=-0.4, x=0, y=-0.5, z=0.3)

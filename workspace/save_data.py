@@ -85,6 +85,16 @@ class save_data:
     def save_misc_params(self, scale, shift, optimization_time_translate, optimization_time_coarse, optimization_time_fine, optimization_cost_translate, optimization_cost_coarse, optimization_cost_fine, grasp_success):
         save_misc_params(scale, shift, optimization_time_translate, optimization_time_coarse, optimization_time_fine, optimization_cost_translate, optimization_cost_coarse, optimization_cost_fine, grasp_success, self.folder_name, 'misc_params')
 
+    def save_skeleton(self, skeleton, name: str, invert_color: bool = False):
+        folder_name_skeleton = f'{self.folder_name}/skeleton'
+
+        save_masks(skeleton, folder_name_skeleton, name, invert_color=invert_color)
+
+    def save_pointcloud_and_spline(self, pointcloud, spline,  name: str):
+        folder_name_skeleton = f'{self.folder_name}/pointcloud'
+
+        save_pointcloud_snapshots(pointcloud, folder_name_skeleton, name, spline=spline)
+
 def save_image(image, folder: str, filename: str) -> bool:
     """
     Saves an OpenCV image to the specified folder and filename.
@@ -106,7 +116,6 @@ def save_image(image, folder: str, filename: str) -> bool:
     success = cv2.imwrite(path, image)
     return success
         
-
 def save_depth_map(depth_map: np.ndarray,
                    folder: str,
                    filename: str,
@@ -140,10 +149,10 @@ def save_depth_map(depth_map: np.ndarray,
     # mask of valid (non-background) pixels
     valid = dm > 0
 
-    # if no valid depths, just write a black image
+    # if no valid depths, just write a white image
     H, W = dm.shape
     if not valid.any():
-        black = 0 * np.ones((H, W, 3), np.uint8)
+        black = 255 * np.ones((H, W, 3), np.uint8)
         cv2.imwrite(save_path, black)
         return
 
@@ -164,14 +173,11 @@ def save_depth_map(depth_map: np.ndarray,
     # apply Turbo colormap
     img_color = cv2.applyColorMap(img8, colormap)
 
-    # paint background (zero-depth) black
-    img_color[~valid] = (0, 0, 0)
+    # paint background (zero-depth) white
+    img_color[~valid] = (255, 255, 255)
 
     # save PNG
     cv2.imwrite(save_path, img_color)
-
-
-
 
 def save_masks(masks,
                 folder: str,
@@ -265,8 +271,6 @@ def save_masks(masks,
     # Save image
     path = os.path.join(folder, f"{filename}.png")
     cv2.imwrite(path, out)
-
-
 
 def save_mask_spline(mask: np.ndarray,
                         ctrl_points: np.ndarray,
@@ -428,7 +432,6 @@ def save_misc_params(scale: float,
 
     return out_path
 
-
 def load_bspline(folder: str, filename: str) -> BSpline:
     """
     Loads a scipy.interpolate.BSpline from a .npz file.
@@ -496,6 +499,104 @@ def load_pose_stamped(folder: str, filename: str) -> PoseStamped:
     with open(path, 'rb') as f:
         pose = pickle.load(f)
     return pose
+
+import open3d as o3d
+import numpy as np
+import os
+from scipy.interpolate import BSpline
+
+import open3d as o3d
+import numpy as np
+import os
+from scipy.interpolate import BSpline
+
+def save_pointcloud_snapshots(pcd: o3d.geometry.PointCloud, folder: str, filename: str,
+                               width: int = 800, height: int = 600,
+                               point_size: float = 3.0,
+                               spline: BSpline = None,
+                               spline_color: tuple = (1.0, 0.0, 0.0),
+                               spline_line_width: float = 10.0):
+    """
+    Saves snapshots of a 3D point cloud (and optional B-spline) from multiple views as PNG images.
+
+    Args:
+        pcd (o3d.geometry.PointCloud): The point cloud to render.
+        folder (str): Directory where images will be saved.
+        filename (str): Base filename (without extension).
+        width (int): Image width.
+        height (int): Image height.
+        point_size (float): Point size used for rendering.
+        spline (BSpline, optional): Optional 3D BSpline (scipy).
+        spline_color (tuple): RGB color for the spline.
+        spline_line_width (float): Width of the rendered spline line.
+    """
+    os.makedirs(folder, exist_ok=True)
+
+    renderer = o3d.visualization.rendering.OffscreenRenderer(width, height)
+    scene = renderer.scene
+    scene.set_background([1, 1, 1, 1])  # white background
+
+    # Point cloud material
+    pc_mat = o3d.visualization.rendering.MaterialRecord()
+    pc_mat.shader = "defaultUnlit"
+    pc_mat.point_size = point_size
+
+    scene.clear_geometry()
+    scene.add_geometry("pcd", pcd, pc_mat)
+
+    # Add spline if provided
+    if spline is not None:
+        u_samples = np.linspace(spline.t[spline.k], spline.t[-spline.k-1], 200)
+
+        points = spline(u_samples)
+
+        # Ensure shape is (N, 3) for Open3D
+        if points.shape[0] == 3:
+            points = points.T  # convert from (3, N) to (N, 3)
+
+        points = np.ascontiguousarray(points, dtype=np.float64)
+
+        spline_line = o3d.geometry.LineSet()
+        spline_line.points = o3d.utility.Vector3dVector(points)
+        lines = [[i, i+1] for i in range(len(points)-1)]
+        spline_line.lines = o3d.utility.Vector2iVector(lines)
+
+        # Color all segments the same
+        spline_line.colors = o3d.utility.Vector3dVector([spline_color] * len(lines))
+
+        spline_mat = o3d.visualization.rendering.MaterialRecord()
+        spline_mat.shader = "unlitLine"
+        spline_mat.line_width = spline_line_width
+        scene.add_geometry("spline", spline_line, spline_mat)
+
+    center = pcd.get_center()
+    bbox = pcd.get_axis_aligned_bounding_box()
+    diameter = np.linalg.norm(bbox.get_extent())
+    distance = 1.5 * diameter
+
+    camera_views = {
+        "front": [0, 0, 1],
+        "top": [0, 1, 0],
+        "side": [1, 0, 0],
+        "iso": [1, 1, 1],
+    }
+
+    for view_name, eye in camera_views.items():
+        eye_vector = np.array(eye, dtype=float)
+        eye_vector = eye_vector / np.linalg.norm(eye_vector) * distance
+        eye_position = center + eye_vector
+
+        renderer.setup_camera(60.0, center, eye_position, [0, 1, 0])
+        image = renderer.render_to_image()
+        save_path = os.path.join(folder, f"{filename}_{view_name}.png")
+        o3d.io.write_image(save_path, image)
+        print(f"Saved: {save_path}")
+
+
+
+
+
+
 
 
 if __name__ == "__main__":
