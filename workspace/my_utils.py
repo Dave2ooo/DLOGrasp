@@ -1699,6 +1699,7 @@ def rotate_pose_around_z(pose: PoseStamped, angle:float) -> PoseStamped:
     # construct the new PoseStamped
     new_pose = PoseStamped()
     new_pose.header = copy.deepcopy(pose.header)
+    new_pose.header.stamp = rospy.Time.now()
     new_pose.pose.position.x = pose.pose.position.x
     new_pose.pose.position.y = pose.pose.position.y
     new_pose.pose.position.z = pose.pose.position.z
@@ -3303,7 +3304,7 @@ def get_highest_point_and_angle_spline(spline: BSpline,
 
 #     return pcd
 
-def convert_bspline_to_pointcloud(spline: BSpline, samples: int = 60) -> o3d.geometry.PointCloud:
+def convert_bspline_to_pointcloud(spline: BSpline, samples: int = 1000) -> o3d.geometry.PointCloud:
     """
     Converts a SciPy BSpline into an Open3D PointCloud by sampling points along the curve.
 
@@ -3935,6 +3936,12 @@ def extract_centerline_from_mask_individual(depth_image: np.ndarray, mask: np.nd
         comp = (labels==lbl)
         if comp.sum() < min_length:
             skeleton_exc[comp] = False
+    
+    if show:
+        show_masks([skeleton_bool], title="Skeleton")
+        show_masks([to_remove], title="To Remove")
+        show_masks([skeleton_bool, to_remove], title="Both")
+        show_masks([skeleton_exc], title="skeleton_exc")
 
     # 2. Extract each segment
     num_labels2, labels2 = cv2.connectedComponents(skeleton_exc.astype(np.uint8), connectivity)
@@ -3960,10 +3967,6 @@ def extract_centerline_from_mask_individual(depth_image: np.ndarray, mask: np.nd
             prev, curr = curr, nxt[0]
         coords = np.array(ordered)
         if show:
-            show_masks([skeleton_bool], title="Skeleton")
-            show_masks([to_remove], title="To Remove")
-            show_masks([skeleton_bool, to_remove], title="Both")
-            show_masks([skeleton_exc], title="skeleton_exc")
             show_spline_gradient(binary, coords, title=f"Segment {lbl}")
 
         # 3. Convert to 3D and drop invalid
@@ -3977,6 +3980,7 @@ def extract_centerline_from_mask_individual(depth_image: np.ndarray, mask: np.nd
             pts3d.append((X, Y, z))
         segments.append(np.array(pts3d, dtype=float))
 
+    print(f"Found {len(segments)} segments")
     return segments
 
 import numpy as np
