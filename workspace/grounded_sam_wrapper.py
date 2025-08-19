@@ -1,109 +1,127 @@
-import os
-import sys
-import cv2
-import torch
-import numpy as np
-from numpy.typing import NDArray
-import supervision as sv
-from PIL import Image
-import rospy
-
-grounded_sam_directory = '/root/grounded_sam2'
-# sys.path.insert(1, grounded_sam_directory)
-sys.path.append(grounded_sam_directory)
-from sam2.build_sam import build_sam2_video_predictor, build_sam2
-from sam2.sam2_image_predictor import SAM2ImagePredictor
-from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection 
-from utils.track_utils import sample_points_from_masks
-from utils.video_utils import create_video_from_images
-
-import tempfile
-import time
 
 default_prompt = "tube.cable.wire."
 
+"""
+Grounded-SAM wrapper – tuner‑aligned, *highest‑confidence mask only*
+===================================================================
+This version keeps **all** Grounding‑DINO detections visible (green boxes +
+label:score) but generates and displays a mask **only for the single box with
+highest confidence**. Behaviour now matches the updated tuning script.
+
+Edit the global parameters at the top as before.
+"""
+
+import os, sys, cv2, torch, numpy as np, rospy, tempfile, time
+from numpy.typing import NDArray
+from PIL import Image
+from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
+
+# ───────── Params (same knobs as tuner) ──────────────────────────────────────
+BOX_THRESHOLD      = 0.25
+TEXT_THRESHOLD     = 0.25
+MASK_THRESHOLD     = 1.0
+BOX_SHRINK_PCT     = 0.10
+MULTIMASK_OUTPUT   = True
+
+# ───────── Paths / imports ───────────────────────────────────────────────────
+grounded_sam_directory = '/root/grounded_sam2'
+sys.path.append(grounded_sam_directory)
+from sam2.build_sam import build_sam2_video_predictor, build_sam2
+from sam2.sam2_image_predictor import SAM2ImagePredictor
+
+
+def _shrink(b, pct):
+    x1, y1, x2, y2 = b
+    dx, dy = (x2 - x1) * pct, (y2 - y1) * pct
+    return [x1 + dx, y1 + dy, x2 - dx, y2 - dy]
+
+
+def _viz(img_bgr, boxes, labels, scores, mask):
+    vis = img_bgr.copy()
+    for (x1, y1, x2, y2), lab, sc in zip(boxes.astype(int), labels, scores):
+        cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.putText(vis, f"{lab}:{sc:.2f}", (x1, max(0, y1 - 4)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+    if mask is not None:
+        if mask.ndim == 3:
+            mask = mask[0]
+        mag = np.zeros_like(vis)
+        mag[:, :, 0] = 255; mag[:, :, 2] = 255  # magenta
+        vis = np.where(mask[..., None].astype(bool),
+                       cv2.addWeighted(vis, 0.4, mag, 0.6, 0), vis)
+    cv2.namedWindow("dino+mask", cv2.WINDOW_NORMAL)
+    cv2.imshow("dino+mask", vis)
+    cv2.waitKey(1)
+
+
 class GroundedSamWrapper:
     def __init__(self):
-        self.previous_frames = [] 
-        """
-        Step 1: Environment settings and model initialization
-        """
-        # use bfloat16 for the entire notebook
         torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
-
         if torch.cuda.get_device_properties(0).major >= 8:
-            # turn on tfloat32 for Ampere GPUs (https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices)
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
 
-        # init sam image predictor and video predictor model
-        self.sam2_checkpoint = f'{grounded_sam_directory}/checkpoints/sam2_hiera_large.pt'
-        self.model_cfg = "sam2_hiera_l.yaml"
+        ckpt = f"{grounded_sam_directory}/checkpoints/sam2_hiera_large.pt"
+        cfg  = "sam2_hiera_l.yaml"
+        sam2 = build_sam2(cfg, ckpt).to("cuda")
+        self.image_predictor = SAM2ImagePredictor(sam2, mask_threshold=MASK_THRESHOLD)
 
-        # self.video_predictor = build_sam2_video_predictor(self.model_cfg, self.sam2_checkpoint)
-        sam2_image_model = build_sam2(self.model_cfg, self.sam2_checkpoint)
-        self.image_predictor = SAM2ImagePredictor(sam2_image_model)
+        self.processor = AutoProcessor.from_pretrained("IDEA-Research/grounding-dino-base")
+        self.dino      = AutoModelForZeroShotObjectDetection.from_pretrained("IDEA-Research/grounding-dino-base").to("cuda")
 
-        # init grounding dino model from huggingface
-        # model_id = "IDEA-Research/grounding-dino-tiny"
-        self.model_id = "IDEA-Research/grounding-dino-base"
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.processor = AutoProcessor.from_pretrained(self.model_id)
-        self.grounding_model = AutoModelForZeroShotObjectDetection.from_pretrained(self.model_id).to(self.device)
+        self.video_predictor = build_sam2_video_predictor(config_file=cfg, ckpt_path=ckpt)
+        self.device = "cuda"
+        self.previous_frames = []
+        self.previous_masks = []
 
-        # **new**: video predictor
-        self.video_predictor = build_sam2_video_predictor(
-            config_file=self.model_cfg,
-            ckpt_path=self.sam2_checkpoint
-        )  # :contentReference[oaicite:4]{index=4}
-
-    def get_mask_grounded(self, image: NDArray[np.uint8], prompt=default_prompt):
-        image_pil = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
-        text = prompt
-
-        # run Grounding DINO on the image
-        inputs = self.processor(images=image_pil, text=text, return_tensors="pt").to(self.device)
+    # ────────────────────────────────────────────────────────────────────
+    def get_mask_grounded(self, image: NDArray[np.uint8], prompt="tube.cable.wire."):
+        print(f"[Grounded SAM] Looking for {prompt}")
+        pil = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+        inputs = self.processor(images=pil, text=prompt, return_tensors="pt").to(self.device)
         with torch.no_grad():
-            outputs = self.grounding_model(**inputs)
-
-        results = self.processor.post_process_grounded_object_detection(
+            outputs = self.dino(**inputs)
+        res = self.processor.post_process_grounded_object_detection(
             outputs,
             inputs.input_ids,
-            box_threshold=0.25,
-            text_threshold=0.3,
-            target_sizes=[image_pil.size[::-1]]
+            box_threshold=BOX_THRESHOLD,
+            text_threshold=TEXT_THRESHOLD,
+            target_sizes=[pil.size[::-1]],
         )
-
-        # prompt SAM image predictor to get the mask for the object
-        self.image_predictor.set_image(np.array(image_pil.convert("RGB")))
-
-        # process the detection results
-        input_boxes = results[0]["boxes"].cpu().numpy()
-        OBJECTS = results[0]["labels"]
-
-        if input_boxes.size == 0:
-            H, W = image.shape[:2]
+        boxes  = res[0]["boxes"].cpu().numpy()
+        labels = res[0]["labels"]
+        scores = res[0]["scores"].cpu().numpy()
+        if boxes.size == 0:
             rospy.logerr("Object cannot be found.")
             return None
 
-        # prompt SAM 2 image predictor to get the mask for the object
-        masks, scores, logits = self.image_predictor.predict(
-            point_coords=None,
-            point_labels=None,
-            box=input_boxes,
-            multimask_output=False,
-        )
-        # print(f'masks.shape = {masks.shape}')
-        # convert the mask shape to (n, H, W)
-        if masks.ndim == 3:
-            masks = masks[None]
-            scores = scores[None]
-            logits = logits[None]
-        # elif masks.ndim == 4:
-            # masks = masks.squeeze(1)
+        # ── keep only the highest‑confidence box ───────────────────────
+        idx_max  = int(np.argmax(scores))
+        boxes_one  = boxes[idx_max:idx_max+1]
+        labels_one = [labels[idx_max]]
+        scores_one = scores[idx_max:idx_max+1]
 
-        # print(f'masks.shape = {masks.shape}')
-        return masks
+        # optional shrink
+        if BOX_SHRINK_PCT > 0:
+            boxes_one = np.vstack([_shrink(b, BOX_SHRINK_PCT) for b in boxes_one])
+
+        img_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB).copy()
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            self.image_predictor.set_image(img_rgb)
+            masks, sm_scores, _ = self.image_predictor.predict(
+                box=boxes_one,
+                multimask_output=MULTIMASK_OUTPUT,
+            )
+        # choose best variant per tuner rule
+        mask_final = masks[0]
+        if MULTIMASK_OUTPUT and masks.ndim == 4:
+            best = max(range(3), key=lambda j: sm_scores[0][j] / masks[0, j].sum())
+            mask_final = masks[0, best]
+
+        _viz(image, boxes, labels, scores, mask_final)
+
+        return mask_final[None]  # shape (1,H,W)
+
 
     def get_mask(self, image: NDArray[np.uint8], prompt=default_prompt):
         """
@@ -117,6 +135,7 @@ class GroundedSamWrapper:
         # 2. If this is the very first frame, just ground it directly
         if len(self.previous_frames) == 0:
             # run the original grounded SAM on this single image
+            print("[Grounded SAM] First frame, falling back to grounded SAM")
             masks = self.get_mask_grounded(image, prompt=prompt)
             if masks is None:
                 self.previous_frames = []
@@ -137,6 +156,7 @@ class GroundedSamWrapper:
         mask = frame_masks.get(1)  
         if mask is None:
             # if tracking lost the object, fall back
+            print("[Grounded SAM] Tracking lost, falling back to grounded SAM")
             mask = self.get_mask_grounded(image, prompt=prompt)[0]
 
         # update _last_mask so that future logic could reuse it if needed
@@ -199,6 +219,48 @@ class GroundedSamWrapper:
                     }
 
         return results
+
+    # 5) ─----- Visualisation helper -----
+    def _show_boxes_and_mask(self, image_bgr, boxes, labels, scores, mask):
+        """
+        One window that shows:
+        • Grounding-DINO boxes  (green)  +   <label>:<score>
+        • Final SAM-2 mask      (magenta, 40 % alpha)
+
+        Parameters
+        ----------
+        image_bgr : np.ndarray   original image (BGR)
+        boxes     : np.ndarray   (N,4) xyxy in absolute pixels
+        labels    : list[str]    text labels from DINO
+        scores    : np.ndarray   (N,) confidence 0-1
+        mask      : np.ndarray   (H,W) or (1,H,W) binary/float
+        """
+        vis = image_bgr.copy()
+
+        # ── 1. draw detector boxes + text ───────────────────────────────────────
+        for (x1, y1, x2, y2), lab, sc in zip(boxes.astype(int), labels, scores):
+            cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            txt = f"{lab}:{sc:.2f}"
+            cv2.putText(vis, txt, (x1, max(0, y1 - 4)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+
+        # ── 2. overlay mask in magenta ──────────────────────────────────────────
+        if mask.ndim == 3:          # (1,H,W) → (H,W)
+            mask = mask[0]
+        mask_bool = mask.astype(bool)
+
+        magenta = np.zeros_like(vis)
+        magenta[:, :, 0] = 255      # B
+        magenta[:, :, 2] = 255      # R
+
+        vis = np.where(mask_bool[..., None],      # broadcast (H,W,1)
+                    cv2.addWeighted(vis, 0.4, magenta, 0.6, 0),
+                    vis)
+
+        # ── 3. show ─────────────────────────────────────────────────────────────
+        cv2.namedWindow("dino+mask", cv2.WINDOW_NORMAL)
+        cv2.imshow("dino+mask", vis)
+        cv2.waitKey(1)              # non-blocking
 
 
     #region Misc/obsolete
