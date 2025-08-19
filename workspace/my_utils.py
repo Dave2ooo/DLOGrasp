@@ -3990,24 +3990,17 @@ import heapq
 
 def longest_skeleton_path_mask(skeleton_exc: np.ndarray, connectivity: int = 8) -> np.ndarray:
     """
-    Find the longest continuous path on a skeleton (junctions already removed).
-
-    Args:
-        skeleton_exc: boolean array where True indicates skeleton pixels AFTER
-                      removing junctions (same shape as skeleton_bool).
-        connectivity: 4 or 8 neighbor connectivity for graph construction.
-
-    Returns:
-        longest_mask: boolean array of same shape, True along the single longest path.
+    Return a boolean mask (same shape) with only the single longest continuous path on the
+    skeleton (after junction removal) kept. Uses 4- or 8-neighborhood.
     """
     assert connectivity in (4, 8), "connectivity must be 4 or 8"
     h, w = skeleton_exc.shape
     if not skeleton_exc.any():
         return np.zeros_like(skeleton_exc, dtype=bool)
 
-    # Connected components on the (junction-free) skeleton
-    structure = np.array([[1,1,1],[1,1,1],[1,1,1]], dtype=int) if connectivity == 8 else \
-                np.array([[0,1,0],[1,1,1],[0,1,0]], dtype=int)
+    # Connected components on the junction-free skeleton
+    structure = np.array([[1,1,1],[1,1,1],[1,1,1]], dtype=bool) if connectivity == 8 else \
+                np.array([[0,1,0],[1,1,1],[0,1,0]], dtype=bool)
     labeled, ncc = ndi.label(skeleton_exc, structure=structure)
 
     # Neighbor offsets
@@ -4017,23 +4010,20 @@ def longest_skeleton_path_mask(skeleton_exc: np.ndarray, connectivity: int = 8) 
         nbrs = [(-1,0), (1,0), (0,-1), (0,1)]
 
     def build_graph(coords):
-        """Build adjacency lists and degree from list of (r,c) coordinates."""
         index_of = {rc: i for i, rc in enumerate(coords)}
         adj = [[] for _ in coords]
         deg = np.zeros(len(coords), dtype=int)
         for i, (r, c) in enumerate(coords):
             for dr, dc in nbrs:
                 nr, nc = r + dr, c + dc
-                if (nr, nc) in index_of:
-                    j = index_of[(nr, nc)]
-                    # edge weight: 1 for axial, sqrt(2) for diagonal
+                j = index_of.get((nr, nc), None)
+                if j is not None:
                     w = 1.0 if (dr == 0 or dc == 0) else math.sqrt(2.0)
                     adj[i].append((j, w))
                     deg[i] += 1
-        return adj, deg, index_of
+        return adj, deg
 
     def dijkstra(adj, start):
-        """Dijkstra on sparse adjacency list; returns distances and parents."""
         n = len(adj)
         dist = np.full(n, np.inf, dtype=float)
         parent = np.full(n, -1, dtype=int)
@@ -4053,25 +4043,29 @@ def longest_skeleton_path_mask(skeleton_exc: np.ndarray, connectivity: int = 8) 
 
     def longest_path_component(coords):
         """
-        For one connected component (list of (r,c)), compute the longest
-        shortest path (approx. geodesic diameter) and return the list of nodes.
+        For one connected component (list of (r,c)), compute the longest shortest path
+        and return (node_index_path_list, path_length_float).
         """
-        adj, deg, _ = build_graph(coords)
-        if len(coords) == 1:
-            return [0]  # single pixel
-        # Prefer starting from an endpoint if any (degree==1), otherwise any node
+        n = len(coords)
+        if n == 1:
+            return [0], 0.0  # <-- FIX: consistent 2-value return
+
+        adj, deg = build_graph(coords)
+
+        # prefer an endpoint (deg==1); fallback to node 0
         endpoints = np.where(deg == 1)[0]
         start = int(endpoints[0]) if endpoints.size > 0 else 0
 
-        # First pass: from start to farthest
+        # First pass: from start to farthest u
         dist1, _ = dijkstra(adj, start)
-        u = int(np.nanargmax(dist1))  # one farthest node
+        u = int(np.argmax(dist1))  # all finite in a connected component
 
-        # Second pass: from u to farthest v; track parents to recover path
+        # Second pass: from u to farthest v; track parents
         dist2, parent2 = dijkstra(adj, u)
-        v = int(np.nanargmax(dist2))
+        v = int(np.argmax(dist2))
+        length = float(dist2[v])
 
-        # Reconstruct path u -> v using parents
+        # Reconstruct u -> v
         path = []
         cur = v
         while cur != -1:
@@ -4080,9 +4074,8 @@ def longest_skeleton_path_mask(skeleton_exc: np.ndarray, connectivity: int = 8) 
                 break
             cur = parent2[cur]
         path.reverse()
-        return path, dist2[v]
+        return path, length
 
-    # Iterate all components, keep the longest path
     best_len = -1.0
     best_coords = None
     best_path_nodes = None
@@ -4097,14 +4090,13 @@ def longest_skeleton_path_mask(skeleton_exc: np.ndarray, connectivity: int = 8) 
             best_coords = coords
             best_path_nodes = path_nodes
 
-    # Render the best path nodes to a boolean mask
     longest_mask = np.zeros((h, w), dtype=bool)
     if best_coords is not None and best_path_nodes is not None:
         for idx in best_path_nodes:
             r, c = best_coords[idx]
             longest_mask[r, c] = True
-
     return longest_mask
+
 
 
 def show_spline_gradient(mask: np.ndarray, centerline: np.ndarray, title: str = "Gradient"):

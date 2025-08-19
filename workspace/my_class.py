@@ -30,6 +30,7 @@ class ImageProcessing:
         if mask is None:
             return None
         
+        print(f"[Grounded SAM] mask.shape: {mask.shape}")
         mask = mask[0][0]
         print(f"mask.shape: {mask.shape}")
         if show:
@@ -730,7 +731,7 @@ class MyClass:
     
 
 def pipeline_spline():
-    image_processing = None #ImageProcessing()
+    image_processing = ImageProcessing()
 
     ros_handler = ROSHandler()
     image_subscriber = ImageSubscriber('/hsrb/hand_camera/image_rect_color')
@@ -757,7 +758,11 @@ def pipeline_spline():
     num_interpolate_poses = 5
 
     camera_parameters = (149.09148, 187.64966, 334.87706, 268.23742)
-    SAM_prompt = "wire.cable.tube."
+    # SAM_prompt = "wire . cable . tube . hose . "
+    # SAM_prompt = "transparent IV tube."
+    # SAM_prompt = "clear iv tube . transparent intravenous line . infusion tubing . drip line . medical plastic hose ."
+    SAM_prompt = "transparent intravenous line . medical plastic hose ."
+
 
     hand_camera_frame = "hand_camera_frame"
     map_frame = "map"
@@ -807,7 +812,7 @@ def pipeline_spline():
             images.append(image_subscriber.get_current_image(show=True))  # <- online
             # images.append(cv2.imread(f'{folder_name_image}/{offline_counter}.png')) # <- offline
             # offline_counter += 1 # <- offline
-            image_processing = ImageProcessing()
+            # image_processing = ImageProcessing()
             temp_mask = image_processing.get_mask(image=images[-1], prompt=SAM_prompt, show=True)
             if temp_mask is None:
                 usr_input = input("No Object Detected. Repeat? [y]/n: ")
@@ -1329,6 +1334,10 @@ def pipeline_spline():
     camera_poses.append(ros_handler.get_current_pose("hand_camera_frame", "map")) # <- online
     palm_poses.append(ros_handler.get_current_pose("hand_palm_link", "map")) # <- online
     save_data_class.save_all(images[-1], masks[-1], None, None, camera_poses[-1], palm_poses[-1], None, None, None)
+    rospy.sleep(10)
+
+    starting_pose.header.stamp = rospy.Time.now()
+    next_pose_publisher.publish(starting_pose)
 
     # # next_pose_stamped = create_pose(x=0, y=-0.4, z=0.1, roll=-np.pi/4, reference_frame="hand_palm_link")
     # next_pose_stamped = create_pose(y=-0.4, z=0.4, roll=-np.pi/4,reference_frame="hand_palm_link")
