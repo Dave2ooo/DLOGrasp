@@ -120,8 +120,24 @@ def viz_mask(mask):
 
 # ───────────── USER SETTINGS ──────────────────────────────────────────────────
 if __name__ == "__main__":
-    FOLDER_PATH = "/root/workspace/images/tube_images/only_ceiling_lights"  # folder with images
-    PROMPT      = "medical plastic hose ."
+    # FOLDER_PATH = "/root/workspace/images/tube_images/only_ceiling_lights"  # folder with images
+    # FOLDER_PATH = "/root/workspace/images/cable_images/only_ceiling_lights"  # folder with images
+    # FOLDER_PATH = "/root/workspace/images/cable_images/only_ceiling_lights_wood"  # folder with images
+    FOLDER_PATH = "/root/workspace/images/cable_images/only_ceiling_lights_tablecloth"  # folder with images
+    # PROMPT      = "medical plastic hose ."
+    # PROMPT = "white electrical cable ."
+    # PROMPT = "grey electrical cable ."
+    # PROMPT = "in-wall wiring ." # NO!
+    # PROMPT = "installation cable ." # NO
+    # PROMPT = "white cable on table."
+    # PROMPT = "white bent string." # okay
+    # PROMPT = "white bent cable."
+    # PROMPT = "white bent wire."
+    # PROMPT = "white cable."
+    # PROMPT = "white pvc power cord on table."
+    # PROMPT = "white pvc power cord."
+    PROMPT = "cable."
+    # PROMPT = "white cable."
 
     exts = {".jpg", ".jpeg", ".png"}
     img_files = [os.path.join(FOLDER_PATH, f) for f in sorted(os.listdir(FOLDER_PATH))

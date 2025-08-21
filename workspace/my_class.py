@@ -758,10 +758,9 @@ def pipeline_spline():
     num_interpolate_poses = 5
 
     camera_parameters = (149.09148, 187.64966, 334.87706, 268.23742)
-    # SAM_prompt = "wire . cable . tube . hose . "
-    # SAM_prompt = "transparent IV tube."
-    # SAM_prompt = "clear iv tube . transparent intravenous line . infusion tubing . drip line . medical plastic hose ."
-    SAM_prompt = "transparent intravenous line . medical plastic hose ."
+    # SAM_prompt = "transparent intravenous line . medical plastic hose ."
+    SAM_prompt = "white bent string." # for cable
+    # SAM_prompt = "cable." # for cable on tablecloth
 
 
     hand_camera_frame = "hand_camera_frame"
@@ -915,8 +914,8 @@ def pipeline_spline():
                             masks=masks,
                             camera_poses=camera_poses,
                             decay=1,
-                            reg_weight=0.2,
-                             curvature_weight=0.5e-1, # 0.5e-2,
+                            reg_weight=1, # 0.2,
+                            curvature_weight=0.5e-1, # 0.5e-2,
                             num_samples=50,
                             symmetric=True,
                             translate=False,
@@ -929,9 +928,9 @@ def pipeline_spline():
     b_splines.append(coarse_bspline)
 
 
-    for index, (skeleton, camera_pose) in enumerate(zip(skeletons, camera_poses)):
-        projected_spline_cam2_fine = project_bspline(b_splines[-1], camera_pose, camera_parameters)
-        show_masks([skeleton, projected_spline_cam2_fine], f"Projected B-Spline Cam {index} Coarse")
+    # for index, (skeleton, camera_pose) in enumerate(zip(skeletons, camera_poses)):
+    #     projected_spline_cam2_fine = project_bspline(b_splines[-1], camera_pose, camera_parameters)
+    #     show_masks([skeleton, projected_spline_cam2_fine], f"Projected B-Spline Cam {index} Coarse")
 
     spline_pc = convert_bspline_to_pointcloud(b_splines[-1])
     pointcloud_publisher.publish(spline_pc)
@@ -944,8 +943,8 @@ def pipeline_spline():
                             masks=masks,
                             camera_poses=camera_poses,
                             decay=1,
-                            reg_weight=0.2,
-                             curvature_weight=0.5e-1, # 0.5e-2,
+                            reg_weight=1, # 0.2,
+                            curvature_weight=0.5e-1, # 0.5e-2,
                             num_samples=200,
                             symmetric=True,
                             translate=False,
@@ -958,9 +957,9 @@ def pipeline_spline():
     b_splines.append(fine_bspline)
     
 
-    for index, (skeleton, camera_pose) in enumerate(zip(skeletons, camera_poses)):
-        projected_spline_cam2_fine = project_bspline(b_splines[-1], camera_pose, camera_parameters)
-        show_masks([skeleton, projected_spline_cam2_fine], f"Projected B-Spline Cam {index} Fine")
+    # for index, (skeleton, camera_pose) in enumerate(zip(skeletons, camera_poses)):
+    #     projected_spline_cam2_fine = project_bspline(b_splines[-1], camera_pose, camera_parameters)
+    #     show_masks([skeleton, projected_spline_cam2_fine], f"Projected B-Spline Cam {index} Fine")
     #endregion optimize control points - new-pre
 
     save_data_class.save_all(images[-1], masks[-1], depths_orig[-1], depths[-1], camera_poses[-1], palm_poses[-1], coarse_bspline, fine_bspline, None)
@@ -1203,16 +1202,16 @@ def pipeline_spline():
         print("--------------------    Coarse Optimization    --------------------")
         start = time.perf_counter()
         coarse_bspline, opt_cost = optimize_bspline_pre_working(initial_spline=b_splines[-1],
-                             camera_parameters=camera_parameters,
-                             masks=masks,
-                             camera_poses=camera_poses,
-                             decay=1.1,
-                             reg_weight=0.2,
-                             curvature_weight=0.5e-1, # 0.5e-2,
-                             num_samples=50,
-                             symmetric=True,
-                             translate=False,
-                             disp=True)
+                            camera_parameters=camera_parameters,
+                            masks=masks,
+                            camera_poses=camera_poses,
+                            decay=1.1,
+                            reg_weight=1, # 0.2,
+                            curvature_weight=0.5e-1, # 0.5e-2,
+                            num_samples=50,
+                            symmetric=True,
+                            translate=False,
+                            disp=True)
         end = time.perf_counter()
 
         optimization_time_coarse.append(end - start)
@@ -1220,9 +1219,9 @@ def pipeline_spline():
 
         b_splines.append(coarse_bspline)
 
-        for index, (skeleton, camera_pose) in enumerate(zip(skeletons, camera_poses)):
-            projected_spline_cam2_fine = project_bspline(b_splines[-1], camera_pose, camera_parameters)
-            show_masks([skeleton, projected_spline_cam2_fine], f"Projected B-Spline Cam {index} Coarse")
+        # for index, (skeleton, camera_pose) in enumerate(zip(skeletons, camera_poses)):
+        #     projected_spline_cam2_fine = project_bspline(b_splines[-1], camera_pose, camera_parameters)
+        #     show_masks([skeleton, projected_spline_cam2_fine], f"Projected B-Spline Cam {index} Coarse")
 
         spline_pc = convert_bspline_to_pointcloud(b_splines[-1])
         pointcloud_publisher.publish(spline_pc)
@@ -1231,16 +1230,16 @@ def pipeline_spline():
         print("--------------------    Fine Optimization    --------------------")
         start = time.perf_counter()
         fine_bspline, opt_cost = optimize_bspline_pre_working(initial_spline=b_splines[-1],
-                             camera_parameters=camera_parameters,
-                             masks=masks,
-                             camera_poses=camera_poses,
-                             decay=1.1,
-                             reg_weight=0.2,
-                             curvature_weight=0.5e-1, # 0.5e-2,
-                             num_samples=200,
-                             symmetric=True,
-                             translate=False,
-                             disp=True)
+                            camera_parameters=camera_parameters,
+                            masks=masks,
+                            camera_poses=camera_poses,
+                            decay=1.1,
+                            reg_weight=1, # 0.2,
+                            curvature_weight=0.5e-1, # 0.5e-2,
+                            num_samples=200,
+                            symmetric=True, 
+                            translate=False,
+                            disp=True)
         end = time.perf_counter()
         
         optimization_time_fine.append(end - start)
@@ -1249,9 +1248,9 @@ def pipeline_spline():
         b_splines.append(fine_bspline)
         
 
-        for index, (skeleton, camera_pose) in enumerate(zip(skeletons, camera_poses)):
-            projected_spline_cam2_fine = project_bspline(b_splines[-1], camera_pose, camera_parameters)
-            show_masks([skeleton, projected_spline_cam2_fine], f"Projected B-Spline Cam {index} Fine")
+        # for index, (skeleton, camera_pose) in enumerate(zip(skeletons, camera_poses)):
+        #     projected_spline_cam2_fine = project_bspline(b_splines[-1], camera_pose, camera_parameters)
+        #     show_masks([skeleton, projected_spline_cam2_fine], f"Projected B-Spline Cam {index} Fine")
         #endregion optimize control points - new-pre
 
         save_data_class.save_all(images[-1], masks[-1], None, None, camera_poses[-1], palm_poses[-1], coarse_bspline, fine_bspline, None)
@@ -1267,7 +1266,7 @@ def pipeline_spline():
 
         # input("Capture image with smartphone and press Enter when done…")
         #region Online
-        input("Go to next pose…")
+        # input("Go to next pose…")
         # Get highest Point in pointcloud
         # target_point, target_angle = get_highest_point_and_angle_spline(b_splines[-1])
         target_point, target_angle = get_midpoint_and_angle_spline(b_splines[-1])
@@ -1307,7 +1306,7 @@ def pipeline_spline():
     if usr_input == "y":
         grasp_success = True
 
-    save_data_class.save_misc_params(best_alpha, best_beta, optimization_time_translate, optimization_time_coarse, optimization_time_fine, optimization_cost_translate, optimization_cost_coarse, optimization_cost_fine, grasp_success)
+    save_data_class.save_misc_params(target_poses[-1], best_alpha, best_beta, optimization_time_translate, optimization_time_coarse, optimization_time_fine, optimization_cost_translate, optimization_cost_coarse, optimization_cost_fine, grasp_success)
 
     # exit() # <- offline
 

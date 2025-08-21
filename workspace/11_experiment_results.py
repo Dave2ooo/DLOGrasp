@@ -18,6 +18,8 @@ import pickle
 import json
 
 from voxel_carving import *
+from scipy.interpolate import BSpline, interp1d
+from scipy.spatial import cKDTree
 
 from guided_bspline_from_voxels import (
     pick_guides_open3d, fit_bspline_guided, GuidedParams, GuideWeights
@@ -330,6 +332,68 @@ def load_mask(folder: str, filename: str) -> list[np.ndarray]:
 
     return mask_bin
 
+def distances_to_reference(rec_spline: BSpline,
+                           ref_spline: BSpline,
+                           n_samples: int = 200,
+                           ref_grid_size: int = 5000) -> np.ndarray:
+    """
+    Sample the *reconstructed* spline at `n_samples` points that are
+    (approximately) equidistant in **arc-length**, then return the
+    Euclidean distance from each sampled point to the *closest* point
+    on the *reference* spline.
+
+    Parameters
+    ----------
+    rec_spline : scipy.interpolate.BSpline
+        The shorter, reconstructed spline.
+    ref_spline : scipy.interpolate.BSpline
+        The correct/reference spline.
+    n_samples : int, optional
+        How many arc-length-equidistant samples to take on the
+        reconstructed spline.  Default is 200.
+    ref_grid_size : int, optional
+        How finely to pre-sample the reference spline for the
+        nearest-neighbour search (KD-tree).  Larger → more accurate
+        but slower. Default is 5000.
+
+    Returns
+    -------
+    np.ndarray
+        A 1-D array of length `n_samples` containing the distances
+        (in the same units as the spline coordinates).
+    """
+    # ---------- helper: cumulative arc length for a spline ----------
+    def _arc_length_parameterisation(spl: BSpline, n: int = 4000):
+        # sample the parameter uniformly over its valid range
+        t_min = spl.t[spl.k]
+        t_max = spl.t[-spl.k-1]
+        t_dense = np.linspace(t_min, t_max, n)
+        pts = spl(t_dense)
+        dists = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+        s = np.concatenate(([0.0], np.cumsum(dists)))   # cumulative arc-length
+        return s, interp1d(s, t_dense, kind='linear')
+
+    # ---------- 1. build arc-length ↔ parameter map for rec_spline ----------
+    s_rec,  s_to_u = _arc_length_parameterisation(rec_spline)
+    total_len_rec = s_rec[-1]
+
+    # equidistant arc-length positions along the *reconstructed* curve
+    s_target = np.linspace(0.0, total_len_rec, n_samples)
+    u_samples = s_to_u(s_target)          # parameter values on rec_spline
+    rec_pts   = rec_spline(u_samples)     # (n_samples, dim)
+
+    # ---------- 2. pre-sample the reference spline & build KD-tree ----------
+    t_min_ref = ref_spline.t[ref_spline.k]
+    t_max_ref = ref_spline.t[-ref_spline.k-1]
+    t_ref_grid = np.linspace(t_min_ref, t_max_ref, ref_grid_size)
+    ref_pts = ref_spline(t_ref_grid)      # (ref_grid_size, dim)
+
+    tree = cKDTree(ref_pts)
+
+    # ---------- 3. query distances ----------
+    dists, _ = tree.query(rec_pts, k=1)   # nearest neighbour distances
+
+    return dists
 
 
 
@@ -339,7 +403,9 @@ if __name__ == "__main__":
     # experiment_timestamp_str = '2025_08_11_11-00'
     # experiment_timestamp_str = '2025_08_11_15-27'
     # experiment_timestamp_str = '2025_08_11_15-44'
-    experiment_timestamp_str = '2025_08_16_08-35'
+    # experiment_timestamp_str = '2025_08_16_08-35'
+    # experiment_timestamp_str = '2025_08_19_13-24'
+    experiment_timestamp_str = '2025_08_21_10-50'
 
     
     
@@ -408,7 +474,7 @@ if __name__ == "__main__":
     side_lengths = (1, 1, 1)        # meters
     voxel_size = 0.002                 # 5 mm voxels
 
-    vg = carve_voxels(masks, camera_poses_in_map_frame_corrected, camera_parameters, center, side_lengths, voxel_size, tolerance_px=0)
+    vg = carve_voxels(masks, camera_poses_in_map_frame_corrected, camera_parameters, center, side_lengths, voxel_size, tolerance_px=1)
     # vg = carve_voxels(masks, camera_poses_in_map_frame_from_experiment, camera_parameters, center, side_lengths, voxel_size, tolerance_px=0)
 
     print(vg.occupancy.shape, vg.origin, vg.voxel_size)
@@ -504,9 +570,9 @@ if __name__ == "__main__":
         sigma_vox=2.0, dilate_iter=1, use_dt=True,
         a_star_eps=0.02, a_star_p_floor=0.08, a_star_goal_radius_vox=2.0,
         a_star_margin_vox=28, a_star_pow=3.0, a_star_w_occ=4.0,
-        resample_step_vox=1.2, spline_degree=3, spline_smooth=1e1,
-        refine_u_samples=600, refine_tau_inside=0.05,
-        weights=GuideWeights(alpha=0.6, beta=2.0, gamma=5e-3, zeta=5.0, kappa=2.0, delta=1e-3, eta=200.0),
+        resample_step_vox=2, spline_degree=3, spline_smooth=1e1, # 1e1,
+        refine_u_samples=900, refine_tau_inside=0.1,
+        weights=GuideWeights(alpha=0.4, beta=2.0, gamma=5e-1, zeta=5.0, kappa=20.0, delta=1e-3, eta=200.0),
         fix_endpoints=True,
         length_prior=None  # or set to expected length in voxels
     )
@@ -514,6 +580,9 @@ if __name__ == "__main__":
     res = fit_bspline_guided(vg, guides_idx, params)
     bs_world = res.bs_world
     #endregion Fit B-spline new
+
+    distances = distances_to_reference(spline, bs_world, n_samples=50)
+    print(f"distances: {distances}")
 
     show_voxel_grid_with_bspline(vg, bs_world, num_samples=400, line_radius=0.002)
 

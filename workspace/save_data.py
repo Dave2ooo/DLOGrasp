@@ -82,8 +82,8 @@ class save_data:
     def save_initial_spline(self, spline):
         save_bspline(spline, self.folder_name, 'initial_spline')
 
-    def save_misc_params(self, scale, shift, optimization_time_translate, optimization_time_coarse, optimization_time_fine, optimization_cost_translate, optimization_cost_coarse, optimization_cost_fine, grasp_success):
-        save_misc_params(scale, shift, optimization_time_translate, optimization_time_coarse, optimization_time_fine, optimization_cost_translate, optimization_cost_coarse, optimization_cost_fine, grasp_success, self.folder_name, 'misc_params')
+    def save_misc_params(self, target_pose ,scale, shift, optimization_time_translate, optimization_time_coarse, optimization_time_fine, optimization_cost_translate, optimization_cost_coarse, optimization_cost_fine, grasp_success):
+        save_misc_params(target_pose, scale, shift, optimization_time_translate, optimization_time_coarse, optimization_time_fine, optimization_cost_translate, optimization_cost_coarse, optimization_cost_fine, grasp_success, self.folder_name, 'misc_params')
 
     def save_skeleton(self, skeleton, name: str, invert_color: bool = False):
         folder_name_skeleton = f'{self.folder_name}/skeleton'
@@ -382,7 +382,8 @@ def save_bspline(spline: BSpline, folder: str, filename: str) -> str:
     np.savez(path, t=spline.t, c=spline.c, k=spline.k)
     return path
 
-def save_misc_params(scale: float,
+def save_misc_params(target_pose,
+                     scale: float,
                      shift: float,
                      optimization_time_translate: list,
                      optimization_time_coarse: list,
@@ -410,6 +411,7 @@ def save_misc_params(scale: float,
     def to_float_list(x):
         return np.asarray(x, dtype=float).tolist()
 
+    grasp_point = target_pose.pose.position
     payload = {
         "scale": float(scale),
         "shift": float(shift),
@@ -424,6 +426,7 @@ def save_misc_params(scale: float,
             "fine":      to_float_list(optimization_cost_fine),
         },
         "grasp_success": bool(grasp_success),
+        "grasp_point": f"({grasp_point.x}, {grasp_point.y}, {grasp_point.z})"
     }
 
     # Write JSON
