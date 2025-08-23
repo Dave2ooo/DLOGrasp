@@ -1356,7 +1356,7 @@ def show_pointclouds(pointclouds: 'o3d.geometry.PointCloud', max_points: int = 2
         mesh_show_back_face=False)
 
 def show_pointclouds_with_frames(pointclouds: list[o3d.geometry.PointCloud],
-                                    frames: list[TransformStamped],
+                                    frames: list[PoseStamped],
                                     title: str = 'Point Clouds with Frames') -> None:
     """
     Display multiple point clouds (each colored differently) together with coordinate frames.
@@ -1377,10 +1377,10 @@ def show_pointclouds_with_frames(pointclouds: list[o3d.geometry.PointCloud],
 
     # draw each frame
     for tf in frames:
-        if not isinstance(tf, TransformStamped):
+        if not isinstance(tf, PoseStamped):
             raise TypeError("Each frame must be a geometry_msgs.msg.TransformStamped")
-        t = tf.transform.translation
-        q = tf.transform.rotation
+        t = tf.pose.position
+        q = tf.pose.orientation
         T = quaternion_matrix([q.x, q.y, q.z, q.w])
         T[:3,3] = [t.x, t.y, t.z]
         frame_mesh = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
@@ -1420,7 +1420,7 @@ def show_pointclouds_with_frames(pointclouds: list[o3d.geometry.PointCloud],
     )
 
 def show_pointclouds_with_frames_and_grid(pointclouds: list[o3d.geometry.PointCloud],
-                                            frames: list[TransformStamped] = None,
+                                            frames: list[PoseStamped] = None,
                                             grid_size: float = 5.0,
                                             grid_step: float = 0.5,
                                             title: str = 'Point Clouds (Z-up)'):
@@ -1436,7 +1436,7 @@ def show_pointclouds_with_frames_and_grid(pointclouds: list[o3d.geometry.PointCl
     # camera frames
     if frames is not None:
         for tf in frames:
-            t = tf.transform.translation; q = tf.transform.rotation
+            t = tf.pose.position; q = tf.pose.orientation
             T = quaternion_matrix((q.x, q.y, q.z, q.w))
             T[:3,3] = (t.x, t.y, t.z)
             mesh = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
@@ -1489,6 +1489,283 @@ def show_pointclouds_with_frames_and_grid(pointclouds: list[o3d.geometry.PointCl
         vis.update_renderer()
 
     vis.destroy_window()
+
+
+
+
+
+# -----------------------------------------------------------------------------
+# Helper geometry builders
+# -----------------------------------------------------------------------------
+
+def _cylinder_between(p0: np.ndarray, p1: np.ndarray,
+                      radius: float = 0.02, resolution: int = 20) -> o3d.geometry.TriangleMesh | None:
+    """Build a cylinder mesh whose axis runs p0 → p1."""
+    v = p1 - p0
+    h = np.linalg.norm(v)
+    if h <= 1e-9:
+        return None
+
+    cyl = o3d.geometry.TriangleMesh.create_cylinder(radius, h, resolution)
+    cyl.compute_vertex_normals()
+
+    # orient +Z of the cylinder to match v
+    z = np.array([0.0, 0.0, 1.0])
+    axis = np.cross(z, v)
+    angle = np.arccos(np.dot(z, v) / h)
+    if np.linalg.norm(axis) > 1e-8:
+        R_align = o3d.geometry.get_rotation_matrix_from_axis_angle(axis / np.linalg.norm(axis) * angle)
+        cyl.rotate(R_align, center=np.zeros(3))
+
+    cyl.translate(p0 + 0.5 * v)
+    return cyl
+
+
+def _sphere_at(p: np.ndarray, radius: float = 0.05, resolution: int = 10) -> o3d.geometry.TriangleMesh:
+    """Return a sphere mesh centred at *p*."""
+    sph = o3d.geometry.TriangleMesh.create_sphere(radius, resolution)
+    sph.compute_vertex_normals()
+    sph.translate(p)
+    return sph
+
+
+# -----------------------------------------------------------------------------
+# Main visualiser
+# -----------------------------------------------------------------------------
+
+def show_bspline_with_frames_and_grid(
+    spline: BSpline,
+    frames: list | None = None,
+    *,
+    num_samples: int = 200,
+    curve_color: tuple[float, float, float] = (1.0, 0.0, 0.0),
+    # Rendering style ----------------------------------------------------------
+    tube_radius: float | None = None,
+    show_dots: bool = True,
+    # dot_radius: float = 0.005,
+    line_width_px: int = 3,
+    # Scene settings -----------------------------------------------------------
+    grid_size: float = 5.0,
+    grid_step: float = 0.5,
+    show_grid: bool = True,
+    background_color: tuple[float, float, float] = (1.0, 1.0, 1.0),
+    # Window -------------------------------------------------------------------
+    title: str = "B-spline & Frames (Z-up)"
+) -> None:
+    """Visualise a 3‑D **BSpline** curve with many display options.
+
+    Parameters
+    ----------
+    spline : BSpline
+        The 3‑D vector spline to render.
+    frames : list | None
+        Optional camera / robot poses (PoseStamped‑like objects).
+    num_samples : int, default 200
+        Number of points sampled uniformly along the spline.
+    curve_color : (R, G, B)
+        RGB colour in [0,1] for curve + dots.
+
+    Rendering style
+    ~~~~~~~~~~~~~~~
+    tube_radius : float | None, default None
+        If set, draw the curve as cylinders of this radius.
+    show_dots : bool, default False
+        Show spheres at each sampled point. Takes precedence over *tube_radius*.
+    dot_radius : float, default 0.05
+        Sphere radius when *show_dots* is True.
+    line_width_px : int, default 3
+        Pixel width for *LineSet* when neither *show_dots* nor *tube_radius*.
+
+    Scene settings
+    ~~~~~~~~~~~~~~
+    grid_size, grid_step : float
+        Size (half‑extent) and spacing of ground grid.
+    show_grid : bool, default True
+        Toggle the ground‑plane grid.
+    background_color : (R, G, B), default black
+        OpenGL clear colour.
+
+    Window
+    ~~~~~~
+    title : str
+        Window title.
+    """
+
+    # ---- sample the spline ----
+    t_min, t_max = spline.t[spline.k], spline.t[-spline.k - 1]
+    ts = np.linspace(t_min, t_max, num_samples)
+    pts = np.asarray(spline(ts), dtype=np.float64, order="C")
+    if pts.shape[0] == 3 and pts.shape[1] != 3:  # transpose if 3×N
+        pts = pts.T
+    if pts.ndim != 2 or pts.shape[1] != 3:
+        raise ValueError(f"Spline must evaluate to (N,3) points, got {pts.shape}")
+
+    geoms: list[o3d.geometry.Geometry] = []
+
+    # world origin frame
+    geoms.append(o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.2))
+
+    # optional frames
+    if frames:
+        for tf in frames:
+            t = tf.pose.position
+            q = tf.pose.orientation  # x, y, z, w
+            T = np.eye(4)
+            T[:3, :3] = R.from_quat([q.x, q.y, q.z, q.w]).as_matrix()
+            T[:3, 3] = (t.x, t.y, t.z)
+            fmesh = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
+            fmesh.transform(T)
+            geoms.append(fmesh)
+
+    # curve representation (dots > tube > line)
+    if show_dots:
+        for p in pts:
+            sph = _sphere_at(p, radius=dot_radius)
+            sph.paint_uniform_color(curve_color)
+            geoms.append(sph)
+    elif tube_radius is not None:
+        for i in range(len(pts) - 1):
+            cyl = _cylinder_between(pts[i], pts[i + 1], radius=tube_radius)
+            if cyl is not None:
+                cyl.paint_uniform_color(curve_color)
+                geoms.append(cyl)
+    else:
+        lines = [[i, i + 1] for i in range(len(pts) - 1)]
+        curve_ls = o3d.geometry.LineSet(
+            points=o3d.utility.Vector3dVector(pts),
+            lines=o3d.utility.Vector2iVector(lines),
+        )
+        curve_ls.colors = o3d.utility.Vector3dVector([curve_color] * len(lines))
+        geoms.append(curve_ls)
+
+    # ground grid
+    if show_grid:
+        g_pts, g_lines = [], []
+        idx = 0
+        for x in np.arange(-grid_size, grid_size + 1e-6, grid_step):
+            g_pts += [[x, -grid_size, 0], [x, grid_size, 0]]
+            g_lines += [[idx, idx + 1]]; idx += 2
+        for y in np.arange(-grid_size, grid_size + 1e-6, grid_step):
+            g_pts += [[-grid_size, y, 0], [grid_size, y, 0]]
+            g_lines += [[idx, idx + 1]]; idx += 2
+        grid_ls = o3d.geometry.LineSet(
+            points=o3d.utility.Vector3dVector(g_pts),
+            lines=o3d.utility.Vector2iVector(g_lines),
+        )
+        grid_ls.colors = o3d.utility.Vector3dVector([[0.5, 0.5, 0.5]] * len(g_lines))
+        geoms.append(grid_ls)
+
+    # ---- Open3D visualiser ----
+    vis = o3d.visualization.Visualizer()
+    vis.create_window(window_name=title, width=1024, height=768)
+    for g in geoms:
+        vis.add_geometry(g)
+
+    opt = vis.get_render_option()
+    opt.line_width = float(line_width_px)
+    opt.background_color = np.asarray(background_color, dtype=float)
+
+    ctr = vis.get_view_control()
+    ctr.set_front((0, -0.5, -0.5))
+    ctr.set_lookat((0, 0, 0))
+    ctr.set_up((0, 0, 1))
+
+    while vis.poll_events():
+        ctr.set_up((0, 0, 1))  # re‑enforce Z‑up
+        vis.update_renderer()
+
+    vis.destroy_window()
+
+
+
+
+
+def _process_single(mask: np.ndarray) -> np.ndarray:
+    """Compute distance transform of a single mask's skeleton."""
+    if mask.ndim != 2:
+        raise ValueError("Each mask must be 2‑D (H×W)")
+
+    # Boolean mask – non‑zero / True = foreground
+    sk = skeletonize(mask.astype(bool))
+    dt = distance_transform_edt(~sk)  # distance to nearest skeleton pixel
+    return dt.astype(np.float32)
+
+
+def skeleton_distance_transform(masks):
+    """Distance‑transform of **mask skeletons**.
+
+    Parameters
+    ----------
+    masks : ndarray or sequence of ndarray
+        * **Single H×W array** → returns one H×W float array.
+        * **(N, H, W) array**  → returns list of N H×W arrays.
+        * **list/tuple of arrays** → returns list of same length.
+
+    Returns
+    -------
+    ndarray or list[ndarray]
+        The distance‑transform(s) (dtype `float32`).  Shape mirrors the input
+        pattern so you can drop the result straight into `show_masks()`.
+    """
+    # normalise input to list of 2‑D arrays
+    if isinstance(masks, np.ndarray):
+        if masks.ndim == 2:
+            return _process_single(masks)
+        elif masks.ndim == 3:
+            return [_process_single(masks[i]) for i in range(masks.shape[0])]
+        else:
+            raise ValueError("masks array must have 2 or 3 dimensions")
+    elif isinstance(masks, (list, tuple)):
+        return [_process_single(m) for m in masks]
+    else:
+        raise TypeError("masks must be a numpy array or a list/tuple of arrays")
+
+from matplotlib import cm       # ← add this near the other imports
+
+def dt_to_color(dt: np.ndarray,
+                *,
+                cmap: str = 'viridis',
+                normalize: bool = True,
+                bgr: bool = True) -> np.ndarray:
+    """Map a float **distance-transform** to a false-colour `uint8` image.
+
+    Parameters
+    ----------
+    dt : ndarray (H×W)
+        Input scalar field (float).
+    cmap : str, default 'viridis'
+        Any Matplotlib colormap name.
+    normalize : bool, default True
+        If *True*, linearly rescale `dt` so min → 0 and max → 1 before
+        applying the colormap.  If *False*, values are assumed already in
+        [0, 1].
+    bgr : bool, default True
+        Return image in BGR order (OpenCV convention).  Set to *False* for RGB.
+
+    Returns
+    -------
+    ndarray (H×W×3, uint8)
+        Colour image ready for `cv2.imshow` / `cv2.imwrite`.
+    """
+    if dt.ndim != 2:
+        raise ValueError('dt must be 2-D')
+
+    data = dt.astype(np.float32, copy=False)
+    if normalize:
+        vmin, vmax = data.min(), data.max()
+        rng = vmax - vmin if vmax > vmin else 1.0
+        data = (data - vmin) / rng
+        data = np.clip(data, 0.0, 1.0)
+
+    cmap_func = cm.get_cmap(cmap)
+    rgba = cmap_func(data, bytes=True)          # H×W×4 uint8 RGBA
+    rgb = rgba[..., :3]                        # drop alpha
+
+    if bgr:
+        rgb = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+
+    return rgb
+
 
 def interactive_scale_shift(depth1: np.ndarray,
                             mask2: np.ndarray,
@@ -2354,7 +2631,7 @@ def extract_centerline_from_mask(depth_image: np.ndarray, mask: np.ndarray, came
 
     return np.array(centerline_pts)
 
-def project_bspline(spline: BSpline, camera_pose: PoseStamped, camera_parameters: tuple, width: int = 640, height: int = 480, num_samples: int = None) -> np.ndarray:
+def project_bspline(spline: BSpline, camera_pose: PoseStamped, camera_parameters: tuple, width: int = 640, height: int = 480, num_samples: int = 50) -> np.ndarray:
     """
     Projects a 3D BSpline into the camera image plane,
     rendering a continuous curve into a binary mask.
@@ -2379,7 +2656,7 @@ def project_bspline(spline: BSpline, camera_pose: PoseStamped, camera_parameters
     k = spline.k
     t = spline.t
     u0, u1 = t[k], t[-k-1]
-    N = num_samples or max(width, height)
+    N = num_samples
     u = np.linspace(u0, u1, N)
     pts = spline(u)  # could be (N,3) or (3,N)
     if pts.ndim == 2 and pts.shape[0] == 3:
@@ -2428,6 +2705,77 @@ def project_bspline(spline: BSpline, camera_pose: PoseStamped, camera_parameters
         mask[rr[inside], cc[inside]] = 255
 
     return mask
+
+from skimage.draw import disk          # optional if you want >1-px markers
+
+def project_bspline_points(
+    spline: BSpline,
+    camera_pose: PoseStamped,
+    camera_parameters: tuple,
+    width: int = 640,
+    height: int = 480,
+    num_samples: int = 50,
+    radius_px: int = 0,                # 0 → single pixel, >0 → filled disk
+) -> np.ndarray:
+    """
+    Same signature and return type as the original function but
+    only the sampled points are drawn – no interpolation between them.
+    """
+    fx, fy, cx, cy = camera_parameters
+
+    # ------------------------------------------------------------------ #
+    # 1) sample the spline
+    k = spline.k
+    t = spline.t
+    u0, u1 = t[k], t[-k - 1]
+    u = np.linspace(u0, u1, num_samples)
+    pts = spline(u)
+    if pts.ndim == 2 and pts.shape[0] == 3:
+        pts = pts.T                                             # (N, 3)
+    # ------------------------------------------------------------------ #
+    # 2) camera pose → rotation R and translation t
+    tx, ty, tz = (camera_pose.pose.position.x,
+                  camera_pose.pose.position.y,
+                  camera_pose.pose.position.z)
+    qx, qy, qz, qw = (camera_pose.pose.orientation.x,
+                      camera_pose.pose.orientation.y,
+                      camera_pose.pose.orientation.z,
+                      camera_pose.pose.orientation.w)
+
+    xx, yy, zz = qx*qx, qy*qy, qz*qz
+    xy, xz, yz = qx*qy, qx*qz, qy*qz
+    wx, wy, wz = qw*qx, qw*qy, qw*qz
+    R = np.array([
+        [1 - 2*(yy + zz),   2*(xy - wz),     2*(xz + wy)],
+        [2*(xy + wz),       1 - 2*(xx + zz), 2*(yz - wx)],
+        [2*(xz - wy),       2*(yz + wx),     1 - 2*(xx + yy)]
+    ])
+    # ------------------------------------------------------------------ #
+    # 3) world → camera, then pinhole projection
+    pts_cam = (pts - np.array([tx, ty, tz])) @ R            # Rᵀ (p - t)
+    x, y, z = pts_cam[:, 0], pts_cam[:, 1], pts_cam[:, 2]
+    valid = z > 0
+    u_pix = np.round(fx * x[valid] / z[valid] + cx).astype(int)
+    v_pix = np.round(fy * y[valid] / z[valid] + cy).astype(int)
+
+    # ------------------------------------------------------------------ #
+    # 4) rasterise *only* the sampled pixels
+    mask = np.zeros((height, width), dtype=np.uint8)
+    in_bounds = (0 <= u_pix) & (u_pix < width) & (0 <= v_pix) & (v_pix < height)
+    u_pix, v_pix = u_pix[in_bounds], v_pix[in_bounds]
+
+    if radius_px == 0:
+        mask[v_pix, u_pix] = 255
+    else:
+        for u_, v_ in zip(u_pix, v_pix):
+            rr, cc = disk((v_, u_), radius_px, shape=mask.shape)
+            mask[rr, cc] = 255
+
+    return mask
+
+
+
+
 
 def project_bspline_pts(ctrl_points, camera_pose, camera_parameters, degree=3, num_samples=200,  width=640, height=480):
     """
@@ -4268,6 +4616,7 @@ def optimize_bspline_pre_working(
         assd_sum = 0.0
         for i, ((sk, coords), dt, cam_pose) in enumerate(zip(skeleton_coords, dts, camera_poses)):
             pts2d = project_3d_points(sampled_pts_3d, cam_pose, camera_parameters)
+            print(f"num_samples: {num_samples}, pts2d.shape: {pts2d.shape}")
             # guard against empty projection
             if pts2d.size == 0:
                 # no points visible → huge penalty

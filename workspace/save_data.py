@@ -95,6 +95,11 @@ class save_data:
 
         save_pointcloud_snapshots(pointcloud, folder_name_skeleton, name, spline=spline)
 
+    def save_masks(self, masks, name: str, invert_color: bool = True):
+        folder_name_projections = f'{self.folder_name}/projections'
+
+        save_masks(masks, folder_name_projections, name, invert_color=invert_color)
+
 def save_image(image, folder: str, filename: str) -> bool:
     """
     Saves an OpenCV image to the specified folder and filename.
