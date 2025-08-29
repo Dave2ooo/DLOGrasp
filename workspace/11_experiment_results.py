@@ -614,6 +614,8 @@ if __name__ == "__main__":
 
     bspline_folder = experiment_folder + '/spline_fine'
 
+    voxel_folder = experiment_folder + '/voxel'
+
     #region Correct Camera Poses
     camera_poses_in_map_frame_from_experiment = []
     camera_poses_in_marker_frame = []
@@ -669,8 +671,8 @@ if __name__ == "__main__":
     vg = carve_voxels(masks, camera_poses_in_map_frame_corrected, camera_parameters, center, side_lengths, voxel_size, tolerance_px=0)
     # vg = carve_voxels(masks, camera_poses_in_map_frame_from_experiment, camera_parameters, center, side_lengths, voxel_size, tolerance_px=0)
 
+    save_voxel_grid(vg, voxel_folder, 'orig')
     print(vg.occupancy.shape, vg.origin, vg.voxel_size)
-
 
 
 

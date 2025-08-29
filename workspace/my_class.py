@@ -845,6 +845,7 @@ def pipeline_spline():
     # display_2d_spline_gradient(masks[-1], spline_2d)
     # exit()
 
+    input("Press Enter correct pose...")
     # Take image
     images.append(image_subscriber.get_current_image()) # <- online
     # images.append(cv2.imread(f'{folder_name_image}/{offline_counter}.png')) # <- offline
@@ -1013,6 +1014,7 @@ def pipeline_spline():
     for loop in range(3):
     # while not rospy.is_shutdown():
         rospy.sleep(5)
+        input("Press Enter correct pose...")
         # Take image
         images.append(image_subscriber.get_current_image()) # <- online
         # images.append(cv2.imread(f'{folder_name_image}/{offline_counter}.png')) # <- offline

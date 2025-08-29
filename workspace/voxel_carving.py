@@ -2,6 +2,11 @@ import numpy as np
 from typing import List, Tuple, Optional
 from dataclasses import dataclass
 
+
+import os
+import json
+import struct
+
 try:
     # For optional mask dilation/erosion
     import cv2
@@ -615,3 +620,131 @@ def show_bsplines(
 
     # --- Display -------------------------------------------------------------
     o3d.visualization.draw_geometries(geoms)
+
+
+
+
+import os, json, numpy as np, struct
+from dataclasses import dataclass
+from typing import Tuple
+
+# ---------------------------------------------------------------------
+# Low-level Binvox RLE helpers
+# ---------------------------------------------------------------------
+
+def _write_binvox(occ: np.ndarray,
+                  path: str,
+                  translate: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+                  scale: float = 1.0):
+    """
+    Save a boolean (Nx,Ny,Nz) array to `path` in Binvox 1 format.
+    translate, scale follow the Binvox spec (they’re optional for most viewers).
+    """
+    Nx, Ny, Nz = occ.shape
+    if max(Nx, Ny, Nz) > 1024:
+        raise ValueError("Binvox spec limits each dimension to 1024.")
+
+    header = (
+        "#binvox 1\n"
+        f"dim {Nx} {Ny} {Nz}\n"
+        f"translate {translate[0]} {translate[1]} {translate[2]}\n"
+        f"scale {scale}\n"
+        "data\n"
+    ).encode()
+
+    flat = occ.flatten(order="C").astype(np.uint8)  # x-fastest, then y, then z
+    # Run-length encode (value,count) pairs, each a single byte
+    with open(path, "wb") as f:
+        f.write(header)
+        val = flat[0]
+        count = 0
+        for v in flat:
+            if v == val and count < 255:
+                count += 1
+            else:
+                f.write(bytes([val, count]))
+                val, count = v, 1
+        f.write(bytes([val, count]))  # final run
+
+
+def _read_binvox(path: str):
+    """Return (occ ndarray bool, translate tuple3, scale float)."""
+    with open(path, "rb") as f:
+        # --- header ---
+        if f.readline().strip() != b"#binvox 1":
+            raise ValueError("Not a binvox v1 file")
+        dims = list(map(int, f.readline().split()[1:]))
+        Nx, Ny, Nz = dims
+        translate = tuple(map(float, f.readline().split()[1:]))
+        scale = float(f.readline().split()[1])
+        assert f.readline().strip() == b"data"
+
+        # --- data ---
+        data = np.frombuffer(f.read(), dtype=np.uint8)
+        assert data.size % 2 == 0
+        values = data[0::2]
+        counts = data[1::2]
+
+        flat = np.repeat(values, counts).astype(bool)
+        if flat.size != Nx * Ny * Nz:
+            raise ValueError("Size mismatch in binvox data")
+        occ = flat.reshape((Nx, Ny, Nz), order="C")
+        return occ, translate, scale
+
+
+# ---------------------------------------------------------------------
+# Public helpers (match your carve_voxels() grid type)
+# ---------------------------------------------------------------------
+
+def save_voxel_grid(vg, folder: str, name: str):
+    """
+    Save `vg` (from carve_voxels) as  `folder/name.binvox`
+    plus `folder/name_meta.json` (origin, voxel_size).
+    """
+    os.makedirs(folder, exist_ok=True)
+    base = os.path.join(folder, name)
+
+    _write_binvox(
+        np.asarray(vg.occupancy, bool),
+        base + ".binvox",
+        translate=(0, 0, 0),            # Binvox viewers ignore these for editing
+        scale=1.0
+    )
+    meta = {
+        "origin": list(map(float, vg.origin)),
+        "voxel_size": float(vg.voxel_size)
+    }
+    with open(base + "_meta.json", "w") as jf:
+        json.dump(meta, jf, indent=2)
+
+    print(f"Saved {base+'.binvox'}   dims={vg.occupancy.shape}  occ={int(vg.occupancy.sum())}")
+
+
+def load_voxel_grid(folder: str, name: str):
+    """
+    Load `folder/name.binvox` (and optional _meta.json) → NumpyVoxelGrid
+    identical in spirit to carve_voxels() output.
+    """
+    @dataclass(eq=False, slots=True)
+    class NumpyVoxelGrid:
+        occupancy: np.ndarray
+        origin: np.ndarray
+        voxel_size: float
+        def indices_to_points(self, idx):
+            return self.origin + (np.asarray(idx)+0.5)*self.voxel_size
+
+    base = os.path.join(folder, name)
+    occ, _, _ = _read_binvox(base + ".binvox")
+
+    meta_path = base + "_meta.json"
+    if os.path.exists(meta_path):
+        with open(meta_path) as jf:
+            meta = json.load(jf)
+        origin = np.asarray(meta["origin"], float)
+        voxel_size = float(meta["voxel_size"])
+    else:
+        origin = np.zeros(3, float)
+        voxel_size = 1.0
+        print("Meta file missing – using origin=0, voxel_size=1 m")
+
+    return NumpyVoxelGrid(occ, origin, voxel_size)
