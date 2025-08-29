@@ -17,6 +17,8 @@ import pickle
 
 import json
 
+from pathlib import Path
+
 from voxel_carving import *
 from scipy.interpolate import BSpline, interp1d
 from scipy.spatial import cKDTree
@@ -396,6 +398,183 @@ def distances_to_reference(rec_spline: BSpline,
     return dists
 
 
+def save_array(array, folder, save_name, delimiter=","):
+    """
+    Save a 1-D or 2-D NumPy array as <folder>/<save_name>.csv.
+
+    Parameters
+    ----------
+    array : array-like
+        Data to save (e.g. the distances returned by `distances_to_reference`).
+    folder : str or Path
+        Target directory. It is created if it does not already exist.
+    save_name : str
+        Desired base-name *without* extension. “distances” → distances.csv
+    delimiter : str, optional
+        Field separator written to the file. Default is ','.
+    """
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+
+    file_path = folder / f"{save_name}.csv"
+    # savetxt writes plain text, one row per line
+    np.savetxt(file_path, np.asarray(array), delimiter=delimiter)
+    # (Optional) return the full path for convenience
+    return file_path
+
+
+def load_array(folder, file_name, delimiter=","):
+    """
+    Load the array saved by `save_array`.
+
+    Parameters
+    ----------
+    folder : str or Path
+        Directory that contains the file.
+    file_name : str
+        Base-name *without* extension (same string you passed as `save_name`).
+    delimiter : str, optional
+        Field separator used when the file was written. Default is ','.
+
+    Returns
+    -------
+    np.ndarray
+        The array stored in <folder>/<file_name>.csv.
+    """
+    folder = Path(folder)
+    file_path = folder / f"{file_name}.csv"
+    return np.loadtxt(file_path, delimiter=delimiter)
+
+
+def calculate_statistics(distances, ignore_nan=True):
+    """
+    Return the five-number summary (Q0–Q4) of a 1-D array.
+
+    Parameters
+    ----------
+    distances : array-like
+        The sample of distances.
+    ignore_nan : bool, default True
+        If True, NaNs are ignored.  If False and NaNs are present,
+        the result will contain NaN.
+
+    Returns
+    -------
+    q0, q1, q2, q3, q4 : float
+        Minimum, 25th-percentile (Q1), median (Q2),
+        75th-percentile (Q3), maximum.
+    """
+    dist = np.asarray(distances).ravel()
+    if ignore_nan:
+        dist = dist[~np.isnan(dist)]
+
+    q0 = np.min(dist)
+    q1 = np.percentile(dist, 25)
+    q2 = np.median(dist)
+    q3 = np.percentile(dist, 75)
+    q4 = np.max(dist)
+    return q0, q1, q2, q3, q4
+
+
+import numpy as np
+from scipy.interpolate import make_lsq_spline, BSpline
+
+def fit_guided_bspline_to_voxels(
+    occupancy: np.ndarray,
+    guides_world: np.ndarray,
+    voxel_size: float,
+    origin: np.ndarray,
+    num_ctrl_pts: int = 10,
+    degree: int = 3,
+    smoothing: float = 1e-2,
+    guide_weight: float = 10.0,
+    sample_frac: float = 0.1,
+    random_seed: int = 42
+) -> BSpline:
+    """
+    Fit a cubic B-spline to a set of occupied voxels, guided by user-selected world points.
+    Endpoints are clamped to first and last guide.
+    """
+    # --- 1. Sample points from occupancy ---
+    occ_idx = np.argwhere(occupancy)
+    n_vox = occ_idx.shape[0]
+    # Subsample voxels for efficiency
+    n_samples = max(int(n_vox * sample_frac), 1)
+    rng = np.random.default_rng(random_seed)
+    sampled_idx = occ_idx[rng.choice(n_vox, size=n_samples, replace=n_samples>n_vox)]
+    sampled_world = sampled_idx * voxel_size + origin[None,:]  # (n_samples, 3)
+    
+    # --- 2. Combine with guides ---
+    X = np.vstack([sampled_world, guides_world])
+    N = X.shape[0]
+    # Guides go at the end (for weighting, easier logic)
+
+    # --- 3. Parametrize all points with t in [0,1] (arc-length) ---
+    # We'll sort by closest-point assignment to the polyline defined by guides.
+    from scipy.spatial import cKDTree
+
+    # Assign each point in X to the nearest segment on the guides polyline
+    def project_onto_polyline(points, polyline):
+        # For each point, find closest point on piecewise-linear path
+        segs = np.stack([polyline[:-1], polyline[1:]], axis=1)  # (M-1,2,3)
+        seg_vec = segs[:,1] - segs[:,0]  # (M-1,3)
+        seg_len = np.linalg.norm(seg_vec, axis=1)
+        seg_vec_norm = seg_vec / (seg_len[:,None] + 1e-10)
+        # Compute projections
+        closest_t = np.zeros(len(points))
+        for i, p in enumerate(points):
+            proj = []
+            for j, (a,b) in enumerate(segs):
+                v = b-a
+                t = np.dot(p-a, v) / (np.dot(v,v) + 1e-12)
+                t_clamped = np.clip(t, 0, 1)
+                closest = a + t_clamped*v
+                d = np.linalg.norm(p-closest)
+                proj.append((d, j, t_clamped))
+            dmin, jmin, tmin = min(proj, key=lambda tup: tup[0])
+            # Compute normalized u along [0,1]
+            seg_start = np.sum(seg_len[:jmin])
+            u = (seg_start + tmin*seg_len[jmin]) / np.sum(seg_len)
+            closest_t[i] = u
+        return closest_t
+
+    t_X = project_onto_polyline(X, guides_world)
+
+    # --- 4. Prepare knot vector ---
+    # Clamped at ends, evenly spaced in [0,1]
+    k = degree
+    n = num_ctrl_pts
+    # knots: (n + k + 1,)
+    knots = np.concatenate((
+        np.zeros(k), 
+        np.linspace(0, 1, n - k + 1),
+        np.ones(k)
+    ))
+
+    # --- 5. Weights ---
+    weights = np.ones(N)
+    weights[-len(guides_world):] = guide_weight
+    # Clamp endpoints with huge weight
+    weights[-len(guides_world)] = 1e8  # First guide = start
+    weights[-1] = 1e8                  # Last guide = end
+
+    # --- 6. Least-squares fit ---
+    # Add smoothing by augmenting weights (not exact, but common hack)
+    weights = weights / (1 + smoothing)
+
+    # Must sort t_X, X, weights by t_X for make_lsq_spline!
+    idx_sort = np.argsort(t_X)
+    t_X_sorted = t_X[idx_sort]
+    X_sorted = X[idx_sort]
+    weights_sorted = weights[idx_sort]
+
+    # Fit separately for x,y,z (vector-valued spline)
+    spl = make_lsq_spline(
+        t_X_sorted, X_sorted, t=knots, k=k, w=weights_sorted
+    )
+    return spl
+
+
 
 if __name__ == "__main__":
     # rospy.init_node("experiment_results", anonymous=True)
@@ -405,24 +584,35 @@ if __name__ == "__main__":
     # experiment_timestamp_str = '2025_08_11_15-44'
     # experiment_timestamp_str = '2025_08_16_08-35'
     # experiment_timestamp_str = '2025_08_19_13-24'
-    experiment_timestamp_str = '2025_08_21_10-50'
+    # experiment_timestamp_str = '2025_08_21_10-50'
+    # experiment_timestamp_str = '2025_08_25_09-56'
+    # experiment_timestamp_str = '2025_08_27_11-39'
+    # experiment_timestamp_str = '2025_08_27_12-29'
+    # experiment_timestamp_str = '2025_08_27_13-03'
+    # experiment_timestamp_str = '2025_08_27_13-10'
+    # experiment_timestamp_str = '2025_08_27_13-35'
+    # experiment_timestamp_str = '2025_08_27_13-40'
+    # experiment_timestamp_str = '2025_08_27_13-47'
+    # experiment_timestamp_str = '2025_08_27_14-05'
+    # experiment_timestamp_str = '2025_08_27_14-37'
+    experiment_timestamp_str = '2025_08_27_14-44'
 
     
     
     # items = (0, 4)
-    items = [0, 1, 2, 3, 4, 6]
+    items = [0, 1, 2, 3, 4, 5, 6]
     # items = (6)
     correct_pose_index = 4
 
 
-    experiment_folder = '/root/workspace/images/thesis_images/'
-    pose_folder = experiment_folder + experiment_timestamp_str + '/camera_pose'
-    image_folder = experiment_folder + experiment_timestamp_str + '/image/'
+    experiment_folder = '/root/workspace/images/thesis_images/' + experiment_timestamp_str
+    pose_folder = experiment_folder + '/camera_pose'
+    image_folder = experiment_folder + '/image/'
 
-    # mask_folder = experiment_folder + experiment_timestamp_str + '/mask_cv2'
-    mask_folder = experiment_folder + experiment_timestamp_str + '/mask_correct'
+    mask_folder = experiment_folder + '/mask_cv2'
+    # mask_folder = experiment_folder + '/mask_correct'
 
-    bspline_folder = experiment_folder + experiment_timestamp_str + '/spline_fine'
+    bspline_folder = experiment_folder + '/spline_fine'
 
     #region Correct Camera Poses
     camera_poses_in_map_frame_from_experiment = []
@@ -437,7 +627,8 @@ if __name__ == "__main__":
         camera_poses_in_map_frame_from_experiment.append(camera_pose)
         image = cv2.imread(image_folder + str(i) + '.png')
 
-        camera_pose_in_marker_frame = get_camera_pose_from_aruco_marker(image, camera_parameters, marker_length_m=0.199, show=False)
+        camera_pose_in_marker_frame = get_camera_pose_from_aruco_marker(image, camera_parameters, marker_length_m=0.150, show=True, dict="DICT_4X4_1000")
+        # camera_pose_in_marker_frame = get_camera_pose_from_aruco_marker(image, camera_parameters, marker_length_m=0.199, show=False, dict="DICT_5X5_1000")
         camera_poses_in_marker_frame.append(camera_pose_in_marker_frame)
 
         marker_pose_in_camera_frame = invert_pose_stamped(camera_pose_in_marker_frame, 'hand_camera_frame')
@@ -470,14 +661,19 @@ if __name__ == "__main__":
     #endregion Load Masks
 
     #region Voxel Carving
-    center = (0.54, 1.4, 0.4)           # meters, in 'map'
+    # center = (0.54, 1.4, 0.4)           # meters, in 'map'
+    center = (10.54, 1.4, 0.4)           # meters, in 'map'
     side_lengths = (1, 1, 1)        # meters
     voxel_size = 0.002                 # 5 mm voxels
 
-    vg = carve_voxels(masks, camera_poses_in_map_frame_corrected, camera_parameters, center, side_lengths, voxel_size, tolerance_px=1)
+    vg = carve_voxels(masks, camera_poses_in_map_frame_corrected, camera_parameters, center, side_lengths, voxel_size, tolerance_px=0)
     # vg = carve_voxels(masks, camera_poses_in_map_frame_from_experiment, camera_parameters, center, side_lengths, voxel_size, tolerance_px=0)
 
     print(vg.occupancy.shape, vg.origin, vg.voxel_size)
+
+
+
+
 
     # show_voxel_grid(vg, backend="open3d", render="voxels")   # interactive cubes (fast enough up to a few 100k)
     # show_voxel_grid_solid_voxels(vg)
@@ -486,7 +682,8 @@ if __name__ == "__main__":
 
     #region B-spline
     spline = load_bspline(bspline_folder, '4')
-    # show_voxel_grid_with_bspline(vg, spline, num_samples=400, line_radius=0.006)
+    show_voxel_grid_with_bspline(vg, spline, num_samples=400, line_radius=0.007)
+    # show_voxel_grid_with_bspline(vg, spline, num_samples=400, line_radius=0.007)
     #endregion B-spline
 
     #region Fti B-spline
@@ -566,24 +763,73 @@ if __name__ == "__main__":
     guides_idx, guides_world = pick_guides_open3d(vg)
 
     # 2) Fit a guided spline
-    params = GuidedParams(
-        sigma_vox=2.0, dilate_iter=1, use_dt=True,
-        a_star_eps=0.02, a_star_p_floor=0.08, a_star_goal_radius_vox=2.0,
-        a_star_margin_vox=28, a_star_pow=3.0, a_star_w_occ=4.0,
-        resample_step_vox=2, spline_degree=3, spline_smooth=1e1, # 1e1,
-        refine_u_samples=900, refine_tau_inside=0.1,
-        weights=GuideWeights(alpha=0.4, beta=2.0, gamma=5e-1, zeta=5.0, kappa=20.0, delta=1e-3, eta=200.0),
-        fix_endpoints=True,
-        length_prior=None  # or set to expected length in voxels
+    # Work sometimes and very shooth
+    # params = GuidedParams(
+    #     sigma_vox=2.0, dilate_iter=1, use_dt=True,
+    #     a_star_eps=0.02, a_star_p_floor=0.08, a_star_goal_radius_vox=2.0,
+    #     a_star_margin_vox=28, a_star_pow=3.0, a_star_w_occ=4.0,
+    #     resample_step_vox=2, spline_degree=3, spline_smooth=1e1, # 1e1,
+    #     refine_u_samples=900, refine_tau_inside=0.1,
+    #     weights=GuideWeights(alpha=0.4, beta=2.0, gamma=5e-1, zeta=5.0, kappa=30.0, delta=1e-3, eta=200.0),
+    #     fix_endpoints=True,
+    #     length_prior=None  # or set to expected length in voxels
+    # )
+
+
+
+
+
+
+    # params = GuidedParams(
+    #     sigma_vox=2.0,
+    #     dilate_iter=1, 
+    #     use_dt=True,
+    #     a_star_eps=0.02, 
+    #     a_star_p_floor=0.08, 
+    #     a_star_goal_radius_vox=2.0, 
+    #     a_star_margin_vox=28, 
+    #     a_star_pow=3.0, 
+    #     a_star_w_occ=4.0, 
+    #     resample_step_vox=1.2, 
+    #     spline_degree=3, 
+    #     spline_smooth=1e0, # 1e1, 
+    #     refine_u_samples=600, 
+    #     refine_tau_inside=0.05, 
+    #     weights=GuideWeights(alpha=0.6, beta=2.0, gamma=5e-3, zeta=5.0, kappa=20.0, delta=1e-3, eta=200.0), 
+    #     fix_endpoints=True, 
+    #     length_prior=None # or set to expected length in voxels
+    # )
+
+    # res = fit_bspline_guided(vg, guides_idx, params)
+    # bs_world = res.bs_world
+
+
+
+
+    bs_world = fit_guided_bspline_to_voxels(
+        occupancy=vg.occupancy,
+        guides_world=guides_world,
+        voxel_size=vg.voxel_size,
+        origin=vg.origin,
+        num_ctrl_pts=10,
+        degree=3,
+        smoothing=1e-2,
+        guide_weight=10.0,
     )
 
-    res = fit_bspline_guided(vg, guides_idx, params)
-    bs_world = res.bs_world
+
+    save_bspline(bs_world, experiment_folder, "spline_reference")
     #endregion Fit B-spline new
 
     distances = distances_to_reference(spline, bs_world, n_samples=50)
     print(f"distances: {distances}")
 
-    show_voxel_grid_with_bspline(vg, bs_world, num_samples=400, line_radius=0.002)
+    show_voxel_grid_with_bspline(vg, bs_world, num_samples=400, line_radius=0.007)
 
-    show_bsplines([spline, bs_world], num_samples=400, line_radius=0.006, show_axes=True)
+    show_bsplines([spline, bs_world], num_samples=400, line_radius=0.007, show_axes=True)
+
+
+    save_array(distances, experiment_folder, "distances")
+
+    statistics = calculate_statistics(distances)
+    print(f"min: {statistics[0]:.3f}, q1: {statistics[1]:.3f}, median: {statistics[2]:.3f}, q3: {statistics[3]:.3f}, max: {statistics[4]:.3f}")

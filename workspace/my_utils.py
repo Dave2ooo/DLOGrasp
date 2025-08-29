@@ -4616,7 +4616,7 @@ def optimize_bspline_pre_working(
         assd_sum = 0.0
         for i, ((sk, coords), dt, cam_pose) in enumerate(zip(skeleton_coords, dts, camera_poses)):
             pts2d = project_3d_points(sampled_pts_3d, cam_pose, camera_parameters)
-            print(f"num_samples: {num_samples}, pts2d.shape: {pts2d.shape}")
+            # print(f"num_samples: {num_samples}, pts2d.shape: {pts2d.shape}")
             # guard against empty projection
             if pts2d.size == 0:
                 # no points visible → huge penalty

@@ -100,6 +100,20 @@ class save_data:
 
         save_masks(masks, folder_name_projections, name, invert_color=invert_color)
 
+    def save_image_and_mask(self, image, mask, name):
+        folder_name_image = f'{self.folder_name}/image'
+        folder_name_mask_cv2 = f'{self.folder_name}/mask_cv2'
+        folder_name_mask_cv2_inverted = f'{self.folder_name}/mask_cv2_inverted'
+        folder_name_mask_numpy = f'{self.folder_name}/mask_numpy'
+
+        if image is not None:
+            save_image(image, folder_name_image, f'{name}.png')
+        if mask is not None:
+            save_masks([mask], folder_name_mask_cv2, f'{name}')
+            save_masks([mask], folder_name_mask_cv2_inverted, f'{name}', invert_color=True)
+            save_numpy_to_file(mask, folder_name_mask_numpy, f'{name}')
+
+
 def save_image(image, folder: str, filename: str) -> bool:
     """
     Saves an OpenCV image to the specified folder and filename.

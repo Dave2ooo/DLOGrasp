@@ -123,7 +123,7 @@ class GroundedSamWrapper:
         return mask_final[None]  # shape (1,H,W)
 
 
-    def get_mask(self, image: NDArray[np.uint8], prompt=default_prompt):
+    def get_mask(self, image: NDArray[np.uint8], prompt=default_prompt, show: bool = False):
         """
         Accumulates frames and—once we have at least one prior frame—
         uses track_sequence to propagate the mask forward.
