@@ -109,7 +109,8 @@ def get_camera_pose_from_aruco_marker(
         raise RuntimeError("This OpenCV build lacks both ArUco detection APIs.")
 
     if ids is None or len(ids) == 0:
-        raise RuntimeError("No ArUco markers detected in the image.")
+        # raise RuntimeError("No ArUco markers detected in the image.")
+        return None
 
     # Pick the largest marker by image area
     areas = [cv2.contourArea(c.reshape(-1, 1, 2)) for c in corners]
@@ -575,54 +576,17 @@ def fit_guided_bspline_to_voxels(
     return spl
 
 
-
-if __name__ == "__main__":
-    # rospy.init_node("experiment_results", anonymous=True)
-
-    # experiment_timestamp_str = '2025_08_11_11-00'
-    # experiment_timestamp_str = '2025_08_11_15-27'
-    # experiment_timestamp_str = '2025_08_11_15-44'
-    # experiment_timestamp_str = '2025_08_16_08-35'
-    # experiment_timestamp_str = '2025_08_19_13-24'
-    # experiment_timestamp_str = '2025_08_21_10-50'
-    # experiment_timestamp_str = '2025_08_25_09-56'
-    # experiment_timestamp_str = '2025_08_27_11-39'
-    # experiment_timestamp_str = '2025_08_27_12-29'
-    # experiment_timestamp_str = '2025_08_27_13-03'
-    # experiment_timestamp_str = '2025_08_27_13-10'
-    # experiment_timestamp_str = '2025_08_27_13-35'
-    # experiment_timestamp_str = '2025_08_27_13-40'
-    # experiment_timestamp_str = '2025_08_27_13-47'
-    # experiment_timestamp_str = '2025_08_27_14-05'
-    # experiment_timestamp_str = '2025_08_27_14-37'
-    # experiment_timestamp_str = '2025_08_27_14-44'
-
-
-
-    # experiment_timestamp_str = '2025_08_27_11-39'
-    experiment_timestamp_str = '2025_08_27_12-29'
-    
-    
-    # items = (0, 4)
-    items = [0, 1, 2, 3, 4, 6]
-    # items = [0, 1, 2, 3, 4, 5, 6]
-    # items = (6)
-    correct_pose_index = 4
-
-
-    experiment_folder = '/root/workspace/images/thesis_images/' + experiment_timestamp_str
-    experiment_folder = '/root/workspace/images/experiment_images/' + experiment_timestamp_str
-    pose_folder = experiment_folder + '/camera_pose'
-    image_folder = experiment_folder + '/image/'
-
-    mask_folder = experiment_folder + '/mask_cv2'
-    # mask_folder = experiment_folder + '/mask_correct'
-
-    bspline_folder = experiment_folder + '/spline_fine'
-
-    voxel_folder = experiment_folder
-
-
+def carve_bspline(image_folder,
+                mask_folder,
+                pose_folder,
+                voxel_folder,
+                correct_pose_index,
+                bspline_folder,
+                center = (10.54, 1.4, 0.4),      # meters, in 'map'
+                side_lengths = (1, 1, 1),        # meters
+                voxel_size = 0.002,               # 2 mm voxels
+                tolerance_px = 0
+                ):
     #region Correct Camera Poses
     camera_poses_in_map_frame_from_experiment = []
     camera_poses_in_marker_frame = []
@@ -630,18 +594,28 @@ if __name__ == "__main__":
 
     camera_poses_in_map_frame_corrected = []
 
-    for i in items:
+    masks = []
+
+
+    for i in range(7):
         print(f"i: {i}")
         camera_pose = load_pose_stamped(pose_folder, str(i))
         camera_poses_in_map_frame_from_experiment.append(camera_pose)
         image = cv2.imread(image_folder + str(i) + '.png')
 
-        camera_pose_in_marker_frame = get_camera_pose_from_aruco_marker(image, camera_parameters, marker_length_m=0.150, show=True, dict="DICT_4X4_1000")
+        camera_pose_in_marker_frame = get_camera_pose_from_aruco_marker(image, camera_parameters, marker_length_m=0.150, show=False, dict="DICT_4X4_1000")
+        if camera_pose_in_marker_frame is None:
+            print(f"No marker detected in image {i}, skipping...")
+            continue
         # camera_pose_in_marker_frame = get_camera_pose_from_aruco_marker(image, camera_parameters, marker_length_m=0.199, show=False, dict="DICT_5X5_1000")
         camera_poses_in_marker_frame.append(camera_pose_in_marker_frame)
 
         marker_pose_in_camera_frame = invert_pose_stamped(camera_pose_in_marker_frame, 'hand_camera_frame')
         marker_poses_in_camera_frame.append(marker_pose_in_camera_frame)
+        
+        mask = load_mask(mask_folder, str(i))
+        masks.append(mask)
+        # show_masks(mask, title=f"Mask {i}")
 
     
     marker_pose_in_map_frame = compose_pose_stamped(camera_poses_in_map_frame_from_experiment[correct_pose_index], marker_poses_in_camera_frame[correct_pose_index])
@@ -655,165 +629,26 @@ if __name__ == "__main__":
         # print("-------------------------------------------------------------")
         # print(f"camera_pose_in_map_frame_from_experiment: {camera_poses_in_map_frame_from_experiment[i]}")
         # print(f"camera_pose_in_map_frame_corrected: {camera_pose_in_map_frame_corrected}")
-    #endregion Correct Camera Poses
-
-    # All camera poses are corrected: camera_poses_in_map_frame_corrected
 
 
-    #region Load Masks
-    masks = []
-
-    for i in items:
-        mask = load_mask(mask_folder, str(i))
-        masks.append(mask)
-        # show_masks(mask, title=f"Mask {i}")
-    #endregion Load Masks
 
     #region Voxel Carving
-    # center = (0.54, 1.4, 0.4)           # meters, in 'map'
-    center = (10.54, 1.4, 0.4)           # meters, in 'map'
-    side_lengths = (1, 1, 1)        # meters
-    voxel_size = 0.002                 # 5 mm voxels
-
-    vg = carve_voxels(masks, camera_poses_in_map_frame_corrected, camera_parameters, center, side_lengths, voxel_size, tolerance_px=0)
+    vg = carve_voxels(masks, camera_poses_in_map_frame_corrected, camera_parameters, center, side_lengths, voxel_size, tolerance_px=tolerance_px)
     # vg = carve_voxels(masks, camera_poses_in_map_frame_from_experiment, camera_parameters, center, side_lengths, voxel_size, tolerance_px=0)
 
     save_voxel_grid(vg, voxel_folder, 'vox_ref_orig')
     print(vg.occupancy.shape, vg.origin, vg.voxel_size)
 
-    # exit()
-
-
-    # show_voxel_grid(vg, backend="open3d", render="voxels")   # interactive cubes (fast enough up to a few 100k)
-    # show_voxel_grid_solid_voxels(vg)
+    # experiment_spline = load_bspline(bspline_folder, '4')
+    # show_voxel_grid_with_bspline(vg, experiment_spline, num_samples=400, line_radius=0.007)
     #endregion Voxel Carving
 
-
-    #region B-spline
-    spline = load_bspline(bspline_folder, '4')
-    show_voxel_grid_with_bspline(vg, spline, num_samples=400, line_radius=0.007)
-    # show_voxel_grid_with_bspline(vg, spline, num_samples=400, line_radius=0.007)
-    #endregion B-spline
-
-    #region Fti B-spline
-    # L_target_m   = 1 # meter
-    # L_target_vox = L_target_m / voxel_size  # 1500 for 2 mm voxels
-
-    # params = FitParams(
-    #     # Field & A*
-    #     sigma_vox=1.8, dilate_iter=1, use_dt=True,
-    #     a_star_eps=0.02, a_star_p_floor=0.08,
-    #     a_star_goal_radius_vox=2.0, a_star_margin_vox=28,
-    #     a_star_pow=3.0, a_star_w_occ=3.0,
-    #     # Waypoints
-    #     n_waypoints=5, waypoint_min_sep_vox=12,
-    #     # Smoother input polyline
-    #     resample_step_vox=2.0,          # ← coarser
-    #     spline_smooth=5e-1,             # ← stronger pre-fit smoothing
-    #     # Refinement
-    #     refine=True, refine_u_samples=600, refine_tau_inside=0.06,
-    #     fix_endpoints=True,
-    #     refine_weights=RefinementWeights(
-    #         alpha=0.5,   # rely a bit less on P
-    #         beta=2.0,    # keep mostly in corridor
-    #         gamma=5e-3,  # ← stronger smoothness
-    #         delta=1e-3,  # keep length reasonable
-    #         eta=300.0,   # keep endpoints pinned
-    #         zeta=5.0     # moderate voxel pull to avoid zig-zag
-    #     ),
-    #     length_prior=L_target_vox
-    # )
-    # result = fit_with_manual_endpoints(vg, params)  # or fit_bspline_from_numpy_voxel_grid(vg, params, endpoints_zyx=...)
-
-
-
-    # # params = FitParams(
-    # #     endpoint_strategy="pca",
-    # #     sigma_vox=3.0,          # more blur to bridge bigger gaps
-    # #     pick_tau=0.05,          # include weaker field for endpoints
-    # #     a_star_eps=0.02,        # cheaper to traverse low-P zones
-    # #     resample_step_vox=1.0,
-    # #     refine=True,
-    # #     refine_tau_inside=0.08, # don't over-penalize low P during bridging
-    # #     refine_u_samples=500,
-    # #     fix_endpoints=False,    # allow curve to grow to meet length
-    # #     refine_weights=RefinementWeights(
-    # #         alpha=1.0, beta=4.0,   # softer outside penalty
-    # #         gamma=5e-3,            # keep it smooth
-    # #         delta=1e-3,            # <-- enable length prior
-    # #         eta=15.0               # soft pins only (since not fixing endpoints)
-    # #     ),
-    # #     length_prior=L_target_vox
-    # # )
-
-    # # result = fit_bspline_from_numpy_voxel_grid(vg, params=params)
-
-    # # vg is your NumpyVoxelGrid-like object
-    # # result = fit_bspline_from_numpy_voxel_grid(vg, params=FitParams(
-    # #     sigma_vox=1.5,         # Gaussian (in voxels), ~ tube radius
-    # #     use_dt=True,           # multiply by distance transform (centers the field)
-    # #     resample_step_vox=1.5, # path resampling in voxels
-    # #     spline_degree=3,
-    # #     spline_smooth=1e-3,
-    # #     refine=True,           # turn off if you just want the initial fit
-    # #     refine_u_samples=300,
-    # #     refine_tau_inside=0.15 # treat P<tau as “outside”
-    # # ))
-    # bs_world = result.bs_world  # SciPy BSpline in (x,y,z)
-    # bs_vox = result.bs_vox  # SciPy BSpline in (x,y,z)
-    # u0, u1 = result.u_domain
-    # pts_xyz = bs_world(np.linspace(u0, u1, 200))  # sample for visualization
-
-    # debug_report(vg, result)
-    #endregion Fit B-spline
+def fit_bspline_wrapper(voxel_folder, bspline_folder):
+    vg = load_voxel_grid(voxel_folder, 'vox_ref_mod', 'vox_ref_orig')
+    experiment_spline = load_bspline(bspline_folder, '4')
 
     #region Fit B-spline new
-    # 1) Click an ordered set of guide points (Shift+LMB, then Q)
     guides_idx, guides_world = pick_guides_open3d(vg)
-
-    # 2) Fit a guided spline
-    # Work sometimes and very shooth
-    # params = GuidedParams(
-    #     sigma_vox=2.0, dilate_iter=1, use_dt=True,
-    #     a_star_eps=0.02, a_star_p_floor=0.08, a_star_goal_radius_vox=2.0,
-    #     a_star_margin_vox=28, a_star_pow=3.0, a_star_w_occ=4.0,
-    #     resample_step_vox=2, spline_degree=3, spline_smooth=1e1, # 1e1,
-    #     refine_u_samples=900, refine_tau_inside=0.1,
-    #     weights=GuideWeights(alpha=0.4, beta=2.0, gamma=5e-1, zeta=5.0, kappa=30.0, delta=1e-3, eta=200.0),
-    #     fix_endpoints=True,
-    #     length_prior=None  # or set to expected length in voxels
-    # )
-
-
-
-
-
-
-    # params = GuidedParams(
-    #     sigma_vox=2.0,
-    #     dilate_iter=1, 
-    #     use_dt=True,
-    #     a_star_eps=0.02, 
-    #     a_star_p_floor=0.08, 
-    #     a_star_goal_radius_vox=2.0, 
-    #     a_star_margin_vox=28, 
-    #     a_star_pow=3.0, 
-    #     a_star_w_occ=4.0, 
-    #     resample_step_vox=1.2, 
-    #     spline_degree=3, 
-    #     spline_smooth=1e0, # 1e1, 
-    #     refine_u_samples=600, 
-    #     refine_tau_inside=0.05, 
-    #     weights=GuideWeights(alpha=0.6, beta=2.0, gamma=5e-3, zeta=5.0, kappa=20.0, delta=1e-3, eta=200.0), 
-    #     fix_endpoints=True, 
-    #     length_prior=None # or set to expected length in voxels
-    # )
-
-    # res = fit_bspline_guided(vg, guides_idx, params)
-    # bs_world = res.bs_world
-
-
-
 
     bs_world = fit_guided_bspline_to_voxels(
         occupancy=vg.occupancy,
@@ -826,19 +661,69 @@ if __name__ == "__main__":
         guide_weight=10.0,
     )
 
-
-    save_bspline(bs_world, experiment_folder, "spline_reference")
+    save_bspline(bs_world, experiment_folder, "spline_ref_final")
     #endregion Fit B-spline new
 
-    distances = distances_to_reference(spline, bs_world, n_samples=50)
-    print(f"distances: {distances}")
-
     show_voxel_grid_with_bspline(vg, bs_world, num_samples=400, line_radius=0.007)
+    show_bsplines([experiment_spline, bs_world], num_samples=400, line_radius=0.007, show_axes=True)
 
-    show_bsplines([spline, bs_world], num_samples=400, line_radius=0.007, show_axes=True)
+def calculate_distances(experiment_folder, bspline_folder):
+    experiment_spline = load_bspline(bspline_folder, '4')
+    bs_world = load_bspline(experiment_folder, 'spline_ref_final')  # bs_world
 
-
+    distances = distances_to_reference(experiment_spline, bs_world, n_samples=50)
     save_array(distances, experiment_folder, "distances")
+    print(f"distances: {distances}")
 
     statistics = calculate_statistics(distances)
     print(f"min: {statistics[0]:.3f}, q1: {statistics[1]:.3f}, median: {statistics[2]:.3f}, q3: {statistics[3]:.3f}, max: {statistics[4]:.3f}")
+
+def show_carved_bspline(voxel_folder, bspline_folder):
+    # vg = load_voxel_grid(voxel_folder, 'vox_ref_orig', 'vox_ref_orig')
+    vg = load_voxel_grid(voxel_folder, 'vox_ref_mod', 'vox_ref_orig')
+    experiment_spline = load_bspline(bspline_folder, '4')  
+    bs_world = load_bspline(experiment_folder, 'spline_ref_final')  # bs_world 
+
+    show_voxel_grid_with_bspline(vg, bs_world, curve_color=(0, 0, 1), num_samples=400, line_radius=0.007)
+    show_voxel_grid_with_bspline(vg, experiment_spline, num_samples=400, line_radius=0.007)
+
+def show_both_splines(experiment_folder, bspline_folder):
+    experiment_spline = load_bspline(bspline_folder, '4')
+    bs_world = load_bspline(experiment_folder, 'spline_ref_final')  # bs_world 
+    show_bsplines([experiment_spline, bs_world], num_samples=400, line_radius=0.007, show_axes=True)
+
+if __name__ == "__main__":
+    # rospy.init_node("experiment_results", anonymous=True)
+
+    # experiment_timestamp_str = '2025_08_27_11-39'
+    # experiment_timestamp_str = '2025_08_27_12-29'
+    # experiment_timestamp_str = '2025_08_27_13-03'
+    # experiment_timestamp_str = '2025_08_27_13-10'
+    experiment_timestamp_str = '2025_08_27_13-35'
+
+
+    # experiment_folder = '/root/workspace/images/thesis_images/' + experiment_timestamp_str
+    experiment_folder = '/root/workspace/images/experiment_images/' + experiment_timestamp_str
+    pose_folder = experiment_folder + '/camera_pose'
+    image_folder = experiment_folder + '/image/'
+
+    mask_folder = experiment_folder + '/mask_cv2'
+    # mask_folder = experiment_folder + '/mask_correct'
+
+    bspline_folder = experiment_folder + '/spline_fine'
+
+    voxel_folder = experiment_folder
+
+
+
+
+    
+    # carve_bspline(image_folder, mask_folder, pose_folder, voxel_folder, 4, bspline_folder, tolerance_px=2)
+    show_carved_bspline(voxel_folder, bspline_folder)
+
+    # fit_bspline_wrapper(voxel_folder, bspline_folder)
+    # calculate_distances(experiment_folder, bspline_folder)
+
+    show_both_splines(experiment_folder, bspline_folder)
+
+    

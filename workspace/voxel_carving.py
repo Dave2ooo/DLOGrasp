@@ -378,7 +378,7 @@ def show_voxel_grid_with_bspline(
     num_samples: int = 300,           # samples along the curve
     line_radius: float = None,        # None -> thin polyline; float (meters) -> tube of this radius
     voxel_color=(0.75, 0.75, 0.75),   # RGB in [0,1]
-    curve_color=(0.9, 0.2, 0.1)       # RGB in [0,1]
+    curve_color=(1, 0, 0)       # RGB in [0,1]
 ):
     """
     Render a solid voxel grid and a 3D B-spline curve in the SAME 'map' frame.
@@ -488,39 +488,19 @@ def show_voxel_grid_with_bspline(
 
 def show_bsplines(
     splines,
-    num_samples: int = 300,           # samples per curve (uniform in parameter domain)
-    line_radius: float | None = None, # None/<=0 -> thin polyline, else tube radius in scene units
-    colors=None,                      # None -> auto palette; tuple[3] for all; or list[tuple[3]] per spline
-    show_axes: bool = True,           # add a small coordinate frame at the origin
-    tube_resolution: int = 24         # radial resolution for tube segments
+    num_samples: int = 300,
+    line_radius: float | None = None,
+    colors=None,
+    show_axes: bool = True,
+    tube_resolution: int = 24
 ):
-    """
-    Render one or more 3D BSplines in Open3D.
-
-    Parameters
-    ----------
-    splines : Iterable[scipy.interpolate.BSpline]
-        Each spline must be vector-valued (R^3). Evaluating on an array should yield (N, 3).
-    num_samples : int
-        Number of samples per curve (uniform in the spline's valid parameter domain [t[k], t[-k-1]]).
-    line_radius : float | None
-        If None or <= 0: draw polylines (fast). If > 0: draw tubes (pretty; slower).
-    colors : None | (r,g,b) | list[(r,g,b)]
-        RGB in [0,1]. If None, a distinct palette is used. If a single triple is given, it's used for all.
-        If a list is given, it must have at least len(splines) entries (will be cycled if shorter).
-    show_axes : bool
-        If True, shows a coordinate frame at the origin (length=0.1).
-    tube_resolution : int
-        Cylinder radial resolution for tube segments.
-    """
     import numpy as np
     import open3d as o3d
     from numpy.linalg import norm
 
-    # --- Helpers -------------------------------------------------------------
     def _ensure_color_list(n, colors):
-        default_palette = [
-            (0.90, 0.20, 0.10), (0.10, 0.55, 0.85), (0.10, 0.75, 0.35),
+        default_palette = [ # (0.10, 0.55, 0.85)
+            (0.90, 0.20, 0.10), (0.0, 0.0, 1.0), (0.10, 0.75, 0.35),
             (0.95, 0.70, 0.10), (0.60, 0.30, 0.90), (0.20, 0.80, 0.80),
             (0.80, 0.40, 0.40), (0.40, 0.80, 0.40), (0.40, 0.40, 0.80),
             (0.70, 0.70, 0.70),
@@ -528,18 +508,12 @@ def show_bsplines(
         if colors is None:
             return [default_palette[i % len(default_palette)] for i in range(n)]
         colors = list(colors)
-        # single color provided
         if len(colors) == 3 and all(isinstance(c, (int, float)) for c in colors):
             return [tuple(float(c) for c in colors)] * n
-        # list provided
-        out = []
-        for i in range(n):
-            out.append(tuple(float(c) for c in colors[i % len(colors)]))
-        return out
+        return [tuple(float(c) for c in colors[i % len(colors)]) for i in range(n)]
 
     def _sample_points_3d(bs, N):
-        t = np.asarray(bs.t, float)
-        k = int(bs.k)
+        t = np.asarray(bs.t, float); k = int(bs.k)
         u0, u1 = t[k], t[-k-1]
         u = np.linspace(u0, u1, int(N))
         P = np.asarray(bs(u), float)
@@ -548,78 +522,112 @@ def show_bsplines(
         return P
 
     def _tube_segment(p0, p1, radius, radial):
-        v = p1 - p0
-        L = float(norm(v))
-        if L < 1e-12:
-            return None
+        v = p1 - p0; L = float(norm(v))
+        if L < 1e-12: return None
         mesh = o3d.geometry.TriangleMesh.create_cylinder(radius=radius, height=L, resolution=radial)
         mesh.compute_vertex_normals()
-        # rotate +Z to direction v
-        z = np.array([0.0, 0.0, 1.0], float)
-        d = v / L
+        z = np.array([0.0, 0.0, 1.0], float); d = v / L
         c = float(np.dot(z, d))
         if c > 0.999999:
             R = np.eye(3)
         elif c < -0.999999:
-            # 180°: rotate around any axis orthogonal to z (x-axis)
             R = o3d.geometry.get_rotation_matrix_from_axis_angle(np.array([1.0, 0.0, 0.0]) * np.pi)
         else:
-            axis = np.cross(z, d)
-            axis /= norm(axis)
-            angle = float(np.arccos(c))
+            axis = np.cross(z, d); axis /= norm(axis); angle = float(np.arccos(c))
             R = o3d.geometry.get_rotation_matrix_from_axis_angle(axis * angle)
         mesh.rotate(R, center=(0, 0, 0))
-        # center at midpoint
         mesh.translate((p0 + p1) * 0.5)
         return mesh
 
-    # --- Build geometry ------------------------------------------------------
     splines = list(splines)
-    if len(splines) == 0:
-        print("show_bsplines: nothing to draw (no splines).")
+    if not splines:
+        print("show_bsplines: nothing to draw.")
         return
 
     curve_colors = _ensure_color_list(len(splines), colors)
     geoms = []
+    all_sampled_points = []
 
     if show_axes:
-        geoms.append(o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1, origin=[0, 0, 0]))
+        # Scale the axes later once we know the scene size
+        axes = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1, origin=[0, 0, 0])
+        geoms.append(axes)
 
-    for idx, (bs, col) in enumerate(zip(splines, curve_colors)):
+    # Build geometry + collect points for centering
+    for bs, col in zip(splines, curve_colors):
         C = _sample_points_3d(bs, num_samples)
+        all_sampled_points.append(C)
 
         if not line_radius or line_radius <= 0.0:
-            # LineSet polyline
-            if C.shape[0] < 2:
-                continue
-            lines = np.column_stack([np.arange(len(C)-1), np.arange(1, len(C))]).astype(np.int32)
-            ls = o3d.geometry.LineSet(
-                points=o3d.utility.Vector3dVector(C),
-                lines=o3d.utility.Vector2iVector(lines)
-            )
-            ls.colors = o3d.utility.Vector3dVector(np.tile(col, (lines.shape[0], 1)))
-            geoms.append(ls)
+            if C.shape[0] >= 2:
+                lines = np.column_stack([np.arange(len(C)-1), np.arange(1, len(C))]).astype(np.int32)
+                ls = o3d.geometry.LineSet(
+                    points=o3d.utility.Vector3dVector(C),
+                    lines=o3d.utility.Vector2iVector(lines)
+                )
+                ls.colors = o3d.utility.Vector3dVector(np.tile(col, (lines.shape[0], 1)))
+                geoms.append(ls)
         else:
-            # Tube mesh (chain of cylinders)
-            seg_meshes = []
+            segs = []
             for i in range(C.shape[0] - 1):
                 m = _tube_segment(C[i], C[i+1], float(line_radius), tube_resolution)
-                if m is not None:
-                    seg_meshes.append(m)
-            if not seg_meshes:
-                continue
-            mesh = seg_meshes[0]
-            for m in seg_meshes[1:]:
-                mesh += m
-            mesh.paint_uniform_color(col)
-            geoms.append(mesh)
+                if m is not None: segs.append(m)
+            if segs:
+                mesh = segs[0]
+                for m in segs[1:]: mesh += m
+                mesh.paint_uniform_color(col)
+                geoms.append(mesh)
 
     if not geoms:
         print("show_bsplines: nothing valid to draw.")
         return
 
-    # --- Display -------------------------------------------------------------
-    o3d.visualization.draw_geometries(geoms)
+    # ---- Auto-center (and heuristic auto-zoom) ------------------------------
+    import numpy as np
+    pts = np.vstack(all_sampled_points) if all_sampled_points else np.zeros((1, 3))
+    min_xyz = pts.min(axis=0); max_xyz = pts.max(axis=0)
+    center = 0.5 * (min_xyz + max_xyz)
+    extent = max(max_xyz - min_xyz)  # scalar “scene size”
+    extent = float(extent if extent > 1e-9 else 1.0)
+
+    # Scale the axes to ~10% of the scene size (if present)
+    if show_axes:
+        geoms[0].scale(extent * 0.1 / 0.1, center=[0, 0, 0])  # original size=0.1
+
+    # Choose a stable view: look from a diagonal above, Z-up
+    up = [0.0, 0.0, 1.0]
+    front = np.array([0.6, -0.5, -1.0], float)
+    front = (front / np.linalg.norm(front)).tolist()
+
+    # Heuristic zoom based on scene size (works well across scales)
+    if extent > 10.0:
+        zoom = 0.15
+    elif extent > 5.0:
+        zoom = 0.22
+    elif extent > 2.0:
+        zoom = 0.30
+    elif extent > 1.0:
+        zoom = 0.45
+    else:
+        zoom = 0.70
+
+    # ---- Render with explicit camera parameters -----------------------------
+    vis = o3d.visualization.Visualizer()
+    vis.create_window(window_name="BSplines", width=1280, height=800, visible=True)
+    for g in geoms:
+        vis.add_geometry(g)
+    vis.poll_events(); vis.update_renderer()
+
+    ctr = vis.get_view_control()
+    # If your Open3D version supports it, set a field of view (optional):
+    # try: ctr.change_field_of_view(step=-5.0) except: pass
+    ctr.set_lookat(center.tolist())
+    ctr.set_up(up)
+    ctr.set_front(front)
+    ctr.set_zoom(zoom)
+
+    vis.run()
+    vis.destroy_window()
 
 
 # ---------------------------------------------------------------------------
@@ -948,7 +956,7 @@ def save_voxel_grid(vg, folder: str, name: str,
 
 # ───────────────────────────────────────────────────────────
 
-def load_voxel_grid(folder: str, name: str):
+def load_voxel_grid(folder: str, name: str, name_orig: str):
     """
     Read folder/name.txt  (+ optional _meta.json) → fresh NumpyVoxelGrid.
     """
@@ -964,6 +972,7 @@ def load_voxel_grid(folder: str, name: str):
             return self.origin + (idx + 0.5) * self.voxel_size
 
     base = os.path.join(folder, name)
+    base_orig = os.path.join(folder, name_orig)
 
     # read only the first 4 columns; comments (‘# …’) are ignored by np.loadtxt
     coords = np.loadtxt(base + ".txt",
@@ -977,7 +986,7 @@ def load_voxel_grid(folder: str, name: str):
     occ[coords[:, 0], coords[:, 1], coords[:, 2]] = True
 
     # spatial metadata (if present)
-    meta_path = base + "_meta.json"
+    meta_path = base_orig + "_meta.json"
     if os.path.exists(meta_path):
         with open(meta_path) as jf:
             meta = json.load(jf)
