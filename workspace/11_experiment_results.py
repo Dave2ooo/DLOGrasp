@@ -595,17 +595,23 @@ if __name__ == "__main__":
     # experiment_timestamp_str = '2025_08_27_13-47'
     # experiment_timestamp_str = '2025_08_27_14-05'
     # experiment_timestamp_str = '2025_08_27_14-37'
-    experiment_timestamp_str = '2025_08_27_14-44'
+    # experiment_timestamp_str = '2025_08_27_14-44'
 
+
+
+    # experiment_timestamp_str = '2025_08_27_11-39'
+    experiment_timestamp_str = '2025_08_27_12-29'
     
     
     # items = (0, 4)
-    items = [0, 1, 2, 3, 4, 5, 6]
+    items = [0, 1, 2, 3, 4, 6]
+    # items = [0, 1, 2, 3, 4, 5, 6]
     # items = (6)
     correct_pose_index = 4
 
 
     experiment_folder = '/root/workspace/images/thesis_images/' + experiment_timestamp_str
+    experiment_folder = '/root/workspace/images/experiment_images/' + experiment_timestamp_str
     pose_folder = experiment_folder + '/camera_pose'
     image_folder = experiment_folder + '/image/'
 
@@ -614,7 +620,8 @@ if __name__ == "__main__":
 
     bspline_folder = experiment_folder + '/spline_fine'
 
-    voxel_folder = experiment_folder + '/voxel'
+    voxel_folder = experiment_folder
+
 
     #region Correct Camera Poses
     camera_poses_in_map_frame_from_experiment = []
@@ -671,10 +678,10 @@ if __name__ == "__main__":
     vg = carve_voxels(masks, camera_poses_in_map_frame_corrected, camera_parameters, center, side_lengths, voxel_size, tolerance_px=0)
     # vg = carve_voxels(masks, camera_poses_in_map_frame_from_experiment, camera_parameters, center, side_lengths, voxel_size, tolerance_px=0)
 
-    save_voxel_grid(vg, voxel_folder, 'orig')
+    save_voxel_grid(vg, voxel_folder, 'vox_ref_orig')
     print(vg.occupancy.shape, vg.origin, vg.voxel_size)
 
-
+    # exit()
 
 
     # show_voxel_grid(vg, backend="open3d", render="voxels")   # interactive cubes (fast enough up to a few 100k)
