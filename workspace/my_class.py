@@ -761,6 +761,8 @@ def pipeline_spline():
 
     camera_parameters = (149.09148, 187.64966, 334.87706, 268.23742)
     # SAM_prompt = "transparent intravenous line . medical plastic hose ."
+    # SAM_prompt = "transparent intravenous line ."
+    # SAM_prompt = "medical plastic hose ." # <-----------------------------
     SAM_prompt = "white bent string." # for cable
     # SAM_prompt = "cable." # for cable on tablecloth
 
@@ -845,7 +847,7 @@ def pipeline_spline():
     # display_2d_spline_gradient(masks[-1], spline_2d)
     # exit()
 
-    input("Press Enter correct pose...")
+    # input("Press Enter correct pose...")
     # Take image
     images.append(image_subscriber.get_current_image()) # <- online
     # images.append(cv2.imread(f'{folder_name_image}/{offline_counter}.png')) # <- offline
@@ -1013,8 +1015,8 @@ def pipeline_spline():
 
     for loop in range(3):
     # while not rospy.is_shutdown():
-        rospy.sleep(5)
-        input("Press Enter correct pose...")
+        # rospy.sleep(5)
+        # input("Press Enter correct pose...")
         # Take image
         images.append(image_subscriber.get_current_image()) # <- online
         # images.append(cv2.imread(f'{folder_name_image}/{offline_counter}.png')) # <- offline
@@ -1352,6 +1354,7 @@ def pipeline_spline():
 
     save_data_class.save_misc_params(target_poses[-1], best_alpha, best_beta, optimization_time_translate, optimization_time_coarse, optimization_time_fine, optimization_cost_translate, optimization_cost_coarse, optimization_cost_fine, grasp_success)
 
+    exit()
 
     command_publisher.publish("pose1")
     usr_input = input("Press when correct pose")

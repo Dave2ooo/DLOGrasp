@@ -19,7 +19,7 @@ from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
 # ───────── Params (same knobs as tuner) ──────────────────────────────────────
 BOX_THRESHOLD      = 0.25
 TEXT_THRESHOLD     = 0.25
-MASK_THRESHOLD     = 1.0
+MASK_THRESHOLD     = 1 # 0.05 # 1.0
 BOX_SHRINK_PCT     = 0.10
 MULTIMASK_OUTPUT   = True
 
