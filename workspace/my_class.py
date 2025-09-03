@@ -813,22 +813,23 @@ def pipeline_spline():
         temp_mask = None
         while temp_mask is None:
             images = []
-            images.append(image_subscriber.get_current_image(show=True))  # <- online
+            images.append(image_subscriber.get_current_image(show=False))  # <- online
             # images.append(cv2.imread(f'{folder_name_image}/{offline_counter}.png')) # <- offline
             offline_counter += 1 # <- offline
             # image_processing = ImageProcessing()
-            temp_mask = image_processing.get_mask(image=images[-1], prompt=SAM_prompt, show=True)
-            if temp_mask is None:
-                usr_input = input("No Object Detected. Repeat? [y]/n: ")
-                if usr_input == "n": exit()
+            temp_mask = image_processing.get_mask(image=images[-1], prompt=SAM_prompt, show=False)
+            # if temp_mask is None:
+            #     usr_input = input("No Object Detected. Repeat? [y]/n: ")
+            #     if usr_input == "n": exit()
 
         masks.append(temp_mask)
         depths_orig.append(image_processing.get_depth_unmasked(image=images[-1], show=False))
         depths.append(image_processing.get_depth_masked(image=images[-1], mask=masks[-1], show=False))
         # show_masks(masks[-1])
 
-        usr_input_correct_mask = input("Mask Correct? [y]/n: ")
-        if usr_input_correct_mask == "c": exit()
+        usr_input_correct_mask = "y"
+        # usr_input_correct_mask = input("Mask Correct? [y]/n: ")
+        # if usr_input_correct_mask == "c": exit()
 
 
     
@@ -836,7 +837,7 @@ def pipeline_spline():
 
 
 
-    input("Capture image with smartphone and press Enter when done…")
+    # input("Capture image with smartphone and press Enter when done…")
     # Move arm online
     next_pose_stamped = create_pose(x=0.1, z=0.1, pitch=-0.4, reference_frame="hand_palm_link")
     next_pose_publisher.publish(next_pose_stamped)
@@ -903,7 +904,7 @@ def pipeline_spline():
     spline_pc = convert_bspline_to_pointcloud(b_splines[-1])
     pointcloud_publisher.publish(spline_pc) # <- online
 
-    visualize_spline_with_pc(best_pc_world, b_splines[0], title="Scaled PointCloud & Spline")
+    # visualize_spline_with_pc(best_pc_world, b_splines[0], title="Scaled PointCloud & Spline")
 
     projected_spline_cam1 = project_bspline(b_splines[0], camera_poses[1], camera_parameters)
     # show_masks([masks[1], projected_spline_cam1], "Projected B-Spline Cam1 - 1")

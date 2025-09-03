@@ -4276,7 +4276,8 @@ def extract_centerline_from_mask_individual(depth_image: np.ndarray, mask: np.nd
 
     longest_skeleton = longest_skeleton_path_mask(skeleton_exc)
 
-    show_masks([longest_skeleton], title="longest_skeleton")
+    if show:
+        show_masks([longest_skeleton], title="longest_skeleton")
     save_data_class.save_skeleton([longest_skeleton], "final_skeleton", invert_color=True)
 
     num_labels, labels = cv2.connectedComponents(skeleton_exc.astype(np.uint8), connectivity)
