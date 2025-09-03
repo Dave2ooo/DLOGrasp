@@ -22,6 +22,9 @@ from pathlib import Path
 from voxel_carving import *
 from scipy.interpolate import BSpline, interp1d
 from scipy.spatial import cKDTree
+import ast
+
+from scipy.interpolate import make_lsq_spline
 
 from guided_bspline_from_voxels import (
     pick_guides_open3d, fit_bspline_guided, GuidedParams, GuideWeights
@@ -398,6 +401,71 @@ def distances_to_reference(rec_spline: BSpline,
 
     return dists
 
+def distances_to_reference_step(rec_spline: BSpline,
+                                ref_spline: BSpline,
+                                step: float = 0.001,
+                                ref_grid_size: int = 10000,
+                                min_samples: int = 2):
+    """
+    Sample the *reconstructed* spline every `step` millimetres (arc-length)
+    and return the distance from each sample point to the nearest point on the
+    *reference* spline.
+
+    Parameters
+    ----------
+    rec_spline : BSpline
+        Shorter, reconstructed spline.
+    ref_spline : BSpline
+        Correct/reference spline.
+    step : float
+        Desired spacing between consecutive samples, in the same units as the
+        spline coordinates (e.g. millimetres).
+    ref_grid_size : int, optional
+        Number of points used to pre-sample the reference spline for the KD-tree.
+    min_samples : int, optional
+        Guarantee at least this many samples (useful if `step` > total length).
+
+    Returns
+    -------
+    np.ndarray
+        1-D array of distances (len ≥ `min_samples`).
+    """
+
+    # ---------- helper: build arc-length ↔ parameter map ----------
+    def _arc_length_param(spl: BSpline, n: int = 4000):
+        t_min, t_max = spl.t[spl.k], spl.t[-spl.k-1]
+        t_dense = np.linspace(t_min, t_max, n)
+        pts = spl(t_dense)
+        dists = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+        s = np.concatenate(([0.0], np.cumsum(dists)))      # cumulative length
+        return s, interp1d(s, t_dense, kind="linear")
+
+    s_rec, s2u = _arc_length_param(rec_spline)
+    L_rec = s_rec[-1]
+    # print(f"Reconstructed length: {L_rec:.3f} (same units as control-points)")
+
+
+    # ---------- arc-length grid: 0, step, 2*step, ... ----------
+    if step <= 0:
+        raise ValueError("step must be positive")
+    n_steps = max(int(np.floor(L_rec / step)) + 1, min_samples)
+    s_target = np.linspace(0.0, min(n_steps - 1, L_rec / step) * step, n_steps)
+
+    # parameter values & sample points on reconstructed spline
+    u_target = s2u(s_target)
+    # print(f"u_target: {u_target}")
+    rec_pts = rec_spline(u_target)                         # (n_steps, dim)
+
+    # ---------- KD-tree on densely sampled reference spline ----------
+    t_min, t_max = ref_spline.t[ref_spline.k], ref_spline.t[-ref_spline.k-1]
+    t_ref = np.linspace(t_min, t_max, ref_grid_size)
+    ref_pts = ref_spline(t_ref)
+    tree = cKDTree(ref_pts)
+
+    # nearest-neighbour distances
+    dists, _ = tree.query(rec_pts, k=1)
+    return dists
+
 
 def save_array(array, folder, save_name, delimiter=","):
     """
@@ -446,6 +514,24 @@ def load_array(folder, file_name, delimiter=","):
     file_path = folder / f"{file_name}.csv"
     return np.loadtxt(file_path, delimiter=delimiter)
 
+def save_grasp_error(diff, dist, folder, filename="grasp_error"):
+    """
+    Save the grasp error vector and distance as a JSON file.
+
+    Args:
+        folder (str): Directory to save the file.
+        filename (str): Filename without .json extension.
+        diff (np.ndarray or list): (3,) vector (x, y, z error)
+        dist (float): Euclidean error
+    """
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, filename + ".json")
+    data = {
+        "diff": [float(x) for x in diff],
+        "dist": float(dist)
+    }
+    with open(path, "w") as f:
+        json.dump(data, f, indent=4)
 
 def calculate_statistics(distances, ignore_nan=True):
     """
@@ -476,9 +562,30 @@ def calculate_statistics(distances, ignore_nan=True):
     q4 = np.max(dist)
     return q0, q1, q2, q3, q4
 
+def calculate_grasp_distance(bs_world, grasp_point, num_samples=10000):
+    """
+    Returns (xyz_diff, euclidean_dist) between grasp_point and the closest point on the sampled B-spline.
 
-import numpy as np
-from scipy.interpolate import make_lsq_spline, BSpline
+    Args:
+        bs_world: scipy.interpolate.BSpline object (3D)
+        grasp_point: np.ndarray, shape (3,)
+        num_samples: Number of points to sample on the spline
+
+    Returns:
+        diff: np.ndarray (3,) = grasp_point - closest_spline_point
+        dist: float = Euclidean distance
+    """
+    t0, t1 = bs_world.t[bs_world.k], bs_world.t[-bs_world.k-1]
+    t_vals = np.linspace(t0, t1, num_samples)
+    points = bs_world(t_vals)  # shape (num_samples, 3)
+    # print(f"points: {points}")
+    dists = np.linalg.norm(points - grasp_point, axis=1)
+    # print(f"dists: {dists}")
+    idx = np.argmin(dists)
+    closest_pt = points[idx]
+    diff = grasp_point - closest_pt
+    dist = np.linalg.norm(diff)
+    return diff, dist
 
 def fit_guided_bspline_to_voxels(
     occupancy: np.ndarray,
@@ -575,13 +682,12 @@ def fit_guided_bspline_to_voxels(
     )
     return spl
 
-
 def carve_bspline(image_folder,
                 mask_folder,
                 pose_folder,
                 voxel_folder,
                 correct_pose_index,
-                bspline_folder,
+                index_array = [0, 1, 2, 3, 4, 5, 6],
                 center = (10.54, 1.4, 0.4),      # meters, in 'map'
                 side_lengths = (1, 1, 1),        # meters
                 voxel_size = 0.002,               # 2 mm voxels
@@ -597,7 +703,7 @@ def carve_bspline(image_folder,
     masks = []
 
 
-    for i in range(7):
+    for i in index_array:
         print(f"i: {i}")
         camera_pose = load_pose_stamped(pose_folder, str(i))
         camera_poses_in_map_frame_from_experiment.append(camera_pose)
@@ -671,20 +777,30 @@ def calculate_distances(experiment_folder, bspline_folder):
     experiment_spline = load_bspline(bspline_folder, '4')
     bs_world = load_bspline(experiment_folder, 'spline_ref_final')  # bs_world
 
-    distances = distances_to_reference(experiment_spline, bs_world, n_samples=50)
+    # distances = distances_to_reference(experiment_spline, bs_world, n_samples=50)
+    distances = distances_to_reference_step(experiment_spline, bs_world)
     save_array(distances, experiment_folder, "distances")
     print(f"distances: {distances}")
 
     statistics = calculate_statistics(distances)
     print(f"min: {statistics[0]:.3f}, q1: {statistics[1]:.3f}, median: {statistics[2]:.3f}, q3: {statistics[3]:.3f}, max: {statistics[4]:.3f}")
 
-def show_carved_bspline(voxel_folder, bspline_folder):
-    # vg = load_voxel_grid(voxel_folder, 'vox_ref_orig', 'vox_ref_orig')
-    vg = load_voxel_grid(voxel_folder, 'vox_ref_mod', 'vox_ref_orig')
-    experiment_spline = load_bspline(bspline_folder, '4')  
-    bs_world = load_bspline(experiment_folder, 'spline_ref_final')  # bs_world 
 
-    show_voxel_grid_with_bspline(vg, bs_world, curve_color=(0, 0, 1), num_samples=400, line_radius=0.007)
+    grasp_point = load_json(experiment_folder, key="grasp_point")
+    grasp_point = np.array(ast.literal_eval(grasp_point))  # convert string to numpy array
+    grasp_point[2] -= 0.083 # Compensate for gripper offset
+    diffs, dists = calculate_grasp_distance(bs_world, grasp_point)
+    print(f"Grasp Point error: diffs: {diffs}, dists: {dists}")
+    save_grasp_error(diffs, dists, experiment_folder)
+
+
+def show_carved_bspline(voxel_folder, bspline_folder):
+    vg = load_voxel_grid(voxel_folder, 'vox_ref_orig', 'vox_ref_orig')
+    # vg = load_voxel_grid(voxel_folder, 'vox_ref_mod', 'vox_ref_orig')
+    experiment_spline = load_bspline(bspline_folder, '4')  
+    # bs_world = load_bspline(experiment_folder, 'spline_ref_final')  # bs_world 
+
+    # show_voxel_grid_with_bspline(vg, bs_world, curve_color=(0, 0, 1), num_samples=400, line_radius=0.007)
     show_voxel_grid_with_bspline(vg, experiment_spline, num_samples=400, line_radius=0.007)
 
 def show_both_splines(experiment_folder, bspline_folder):
@@ -695,15 +811,27 @@ def show_both_splines(experiment_folder, bspline_folder):
 if __name__ == "__main__":
     # rospy.init_node("experiment_results", anonymous=True)
 
+    # Cable Black
     # experiment_timestamp_str = '2025_08_27_11-39'
     # experiment_timestamp_str = '2025_08_27_12-29'
     # experiment_timestamp_str = '2025_08_27_13-03'
     # experiment_timestamp_str = '2025_08_27_13-10'
-    experiment_timestamp_str = '2025_08_27_13-35'
+    # experiment_timestamp_str = '2025_08_27_13-35'
+    # experiment_timestamp_str = '2025_08_27_13-40'
+    # experiment_timestamp_str = '2025_08_27_13-47'
+    # experiment_timestamp_str = '2025_08_27_13-53'
+    # experiment_timestamp_str = '2025_08_27_14-05'
+
+    # Cantle Tablecloth
+    # experiment_timestamp_str = '2025_08_29_09-55'
+    # experiment_timestamp_str = '2025_08_29_10-57'
+    # experiment_timestamp_str = '2025_08_29_11-02'
+    # experiment_timestamp_str = '2025_08_29_11-10'
 
 
     # experiment_folder = '/root/workspace/images/thesis_images/' + experiment_timestamp_str
-    experiment_folder = '/root/workspace/images/experiment_images/' + experiment_timestamp_str
+    experiment_folder = '/root/workspace/images/experiment_images/cable/black/' + experiment_timestamp_str
+    # experiment_folder = '/root/workspace/images/experiment_images/cable/tablecloth/' + experiment_timestamp_str
     pose_folder = experiment_folder + '/camera_pose'
     image_folder = experiment_folder + '/image/'
 
@@ -716,14 +844,15 @@ if __name__ == "__main__":
 
 
 
-
-    
-    # carve_bspline(image_folder, mask_folder, pose_folder, voxel_folder, 4, bspline_folder, tolerance_px=2)
-    show_carved_bspline(voxel_folder, bspline_folder)
+    index_array=[0, 1, 2, 3, 4, 5, 6]
+    voxel_size = 0.002
+    # voxel_size = 0.005
+    # carve_bspline(image_folder, mask_folder, pose_folder, voxel_folder, 4, index_array=index_array, tolerance_px=0)
+    # show_carved_bspline(voxel_folder, bspline_folder)
 
     # fit_bspline_wrapper(voxel_folder, bspline_folder)
-    # calculate_distances(experiment_folder, bspline_folder)
+    calculate_distances(experiment_folder, bspline_folder)
 
-    show_both_splines(experiment_folder, bspline_folder)
+    # show_both_splines(experiment_folder, bspline_folder)
 
     

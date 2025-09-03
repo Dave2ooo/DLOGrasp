@@ -454,6 +454,42 @@ def save_misc_params(target_pose,
 
     return out_path
 
+def load_json(folder, filename="misc_params", key=None):
+    """
+    Loads a JSON file and optionally returns a specific (possibly nested) key.
+    
+    Args:
+        folder (str): Path to the folder containing the file.
+        filename (str): Name of the file (without .json extension).
+        key (str, optional): Dot-separated key for nested lookup. If None, return whole dict.
+        
+    Returns:
+        value: The requested value from the JSON, or the whole dict if key is None.
+        
+    Raises:
+        FileNotFoundError: If the file does not exist.
+        KeyError: If the specified key is not found in the dict.
+    """
+    path = os.path.join(folder, filename + ".json")
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"File not found: {path}")
+
+    with open(path, "r") as f:
+        data = json.load(f)
+    
+    if key is None:
+        return data
+
+    # Support nested keys: e.g. "optimization_cost.fine"
+    keys = key.split(".")
+    val = data
+    for k in keys:
+        if k not in val:
+            raise KeyError(f"Key '{key}' not found (stuck at '{k}').")
+        val = val[k]
+    return val
+
+
 def load_bspline(folder: str, filename: str) -> BSpline:
     """
     Loads a scipy.interpolate.BSpline from a .npz file.
