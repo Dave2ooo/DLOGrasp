@@ -689,7 +689,7 @@ def carve_bspline(image_folder,
                 correct_pose_index,
                 index_array = [0, 1, 2, 3, 4, 5, 6],
                 center = (10.54, 1.4, 0.4),      # meters, in 'map'
-                side_lengths = (1, 1, 1),        # meters
+                side_lengths = (1.2, 1, 1),        # meters
                 voxel_size = 0.002,               # 2 mm voxels
                 tolerance_px = 0
                 ):
@@ -780,7 +780,7 @@ def calculate_distances(experiment_folder, bspline_folder):
     # distances = distances_to_reference(experiment_spline, bs_world, n_samples=50)
     distances = distances_to_reference_step(experiment_spline, bs_world)
     save_array(distances, experiment_folder, "distances")
-    print(f"distances: {distances}")
+    print(f"Num distances: {len(distances)}")
 
     statistics = calculate_statistics(distances)
     print(f"min: {statistics[0]:.3f}, q1: {statistics[1]:.3f}, median: {statistics[2]:.3f}, q3: {statistics[3]:.3f}, max: {statistics[4]:.3f}")
@@ -812,6 +812,7 @@ if __name__ == "__main__":
     # rospy.init_node("experiment_results", anonymous=True)
 
     # Cable Black
+    # experiment_folder = '/root/workspace/images/experiment_images/cable/black/' + experiment_timestamp_str
     # experiment_timestamp_str = '2025_08_27_11-39'
     # experiment_timestamp_str = '2025_08_27_12-29'
     # experiment_timestamp_str = '2025_08_27_13-03'
@@ -822,16 +823,50 @@ if __name__ == "__main__":
     # experiment_timestamp_str = '2025_08_27_13-53'
     # experiment_timestamp_str = '2025_08_27_14-05'
 
-    # Cantle Tablecloth
+    # Cable Tablecloth
+    # experiment_folder = '/root/workspace/images/experiment_images/cable/tablecloth/' + experiment_timestamp_str
     # experiment_timestamp_str = '2025_08_29_09-55'
     # experiment_timestamp_str = '2025_08_29_10-57'
     # experiment_timestamp_str = '2025_08_29_11-02'
     # experiment_timestamp_str = '2025_08_29_11-10'
+    # experiment_timestamp_str = '2025_09_03_08-36'
+    # experiment_timestamp_str = '2025_09_03_08-39'
+
+    # Cable Wood
+    # experiment_folder = '/root/workspace/images/experiment_images/cable/wood/' + experiment_timestamp_str
+    # experiment_timestamp_str = '2025_08_27_14-26'
+    # experiment_timestamp_str = '2025_08_27_14-44'
+    # experiment_timestamp_str = '2025_08_27_14-49'
+    # experiment_timestamp_str = '2025_08_29_09-33'
+    # experiment_timestamp_str = '2025_09_03_08-31'
+    # experiment_timestamp_str = '2025_09_03_08-31'
+
+    # Single Tube Black
+    # experiment_folder = '/root/workspace/images/experiment_images/tube_single/black/' + experiment_timestamp_str
+    # experiment_timestamp_str = '2025_09_01_10-59'
+    # experiment_timestamp_str = '2025_09_01_11-04'
+    # experiment_timestamp_str = '2025_09_01_11-12'
+    # experiment_timestamp_str = '2025_09_01_11-18'
+    # experiment_timestamp_str = '2025_09_01_11-23'
+    # experiment_timestamp_str = '2025_09_01_11-27'
+
+    # Single Tube Wood
+    # experiment_folder = '/root/workspace/images/experiment_images/tube_single/wood/' + experiment_timestamp_str
+    # experiment_timestamp_str = '2025_09_01_09-27'
+    # experiment_timestamp_str = '2025_09_01_10-09'
+    # experiment_timestamp_str = '2025_09_01_10-27'
+    # experiment_timestamp_str = '2025_09_01_10-34'
+    # experiment_timestamp_str = '2025_09_01_10-39'
+    # experiment_timestamp_str = '2025_09_01_10-45'
+    # experiment_timestamp_str = '2025_09_01_10-52'
 
 
-    # experiment_folder = '/root/workspace/images/thesis_images/' + experiment_timestamp_str
-    experiment_folder = '/root/workspace/images/experiment_images/cable/black/' + experiment_timestamp_str
-    # experiment_folder = '/root/workspace/images/experiment_images/cable/tablecloth/' + experiment_timestamp_str
+    # Double Tube Black
+    experiment_folder = '/root/workspace/images/experiment_images/tube_double/black/' + experiment_timestamp_str
+    experiment_timestamp_str = '2025_09_01_10-52' # <- TODO
+
+    
+
     pose_folder = experiment_folder + '/camera_pose'
     image_folder = experiment_folder + '/image/'
 
@@ -844,14 +879,15 @@ if __name__ == "__main__":
 
 
 
-    index_array=[0, 1, 2, 3, 4, 5, 6]
+    index_array=[4,5,6] 
     voxel_size = 0.002
     # voxel_size = 0.005
-    # carve_bspline(image_folder, mask_folder, pose_folder, voxel_folder, 4, index_array=index_array, tolerance_px=0)
-    # show_carved_bspline(voxel_folder, bspline_folder)
+    carve_bspline(image_folder, mask_folder, pose_folder, voxel_folder, 0, index_array=index_array, tolerance_px=0)
+    show_carved_bspline(voxel_folder, bspline_folder)
+
 
     # fit_bspline_wrapper(voxel_folder, bspline_folder)
-    calculate_distances(experiment_folder, bspline_folder)
+    # calculate_distances(experiment_folder, bspline_folder)
 
     # show_both_splines(experiment_folder, bspline_folder)
 
