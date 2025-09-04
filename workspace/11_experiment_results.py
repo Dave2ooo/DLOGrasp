@@ -862,8 +862,21 @@ if __name__ == "__main__":
 
 
     # Double Tube Black
-    experiment_folder = '/root/workspace/images/experiment_images/tube_double/black/' + experiment_timestamp_str
-    experiment_timestamp_str = '2025_09_01_10-52' # <- TODO
+    # experiment_timestamp_str = '2025_09_01_11-36'
+    # experiment_timestamp_str = '2025_09_01_11-40'
+    # experiment_timestamp_str = '2025_09_01_11-45'
+    # # experiment_timestamp_str = '2025_09_01_12-03'
+    # experiment_timestamp_str = '2025_09_01_12-10'
+    # experiment_folder = '/root/workspace/images/experiment_images/tube_double/black/' + experiment_timestamp_str
+
+    # Double Tube Wood
+    # experiment_timestamp_str = '2025_09_01_12-17'
+    # experiment_timestamp_str = '2025_09_01_12-26'
+    # experiment_timestamp_str = '2025_09_01_12-30'
+    # experiment_timestamp_str = '2025_09_01_12-34'
+    # experiment_timestamp_str = '2025_09_01_12-39'
+    experiment_timestamp_str = '2025_09_01_12-43'
+    experiment_folder = '/root/workspace/images/experiment_images/tube_double/wood/' + experiment_timestamp_str
 
     
 
@@ -879,15 +892,15 @@ if __name__ == "__main__":
 
 
 
-    index_array=[4,5,6] 
+    index_array=[4,0,1,5] 
     voxel_size = 0.002
     # voxel_size = 0.005
-    carve_bspline(image_folder, mask_folder, pose_folder, voxel_folder, 0, index_array=index_array, tolerance_px=0)
-    show_carved_bspline(voxel_folder, bspline_folder)
+    # carve_bspline(image_folder, mask_folder, pose_folder, voxel_folder, 0, index_array=index_array, tolerance_px=0)
+    # show_carved_bspline(voxel_folder, bspline_folder)
 
 
-    # fit_bspline_wrapper(voxel_folder, bspline_folder)
-    # calculate_distances(experiment_folder, bspline_folder)
+    fit_bspline_wrapper(voxel_folder, bspline_folder)
+    calculate_distances(experiment_folder, bspline_folder)
 
     # show_both_splines(experiment_folder, bspline_folder)
 
