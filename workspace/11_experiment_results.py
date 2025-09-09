@@ -30,6 +30,8 @@ from guided_bspline_from_voxels import (
     pick_guides_open3d, fit_bspline_guided, GuidedParams, GuideWeights
 )
 
+from skimage.morphology import skeletonize
+
 camera_parameters = (149.09148, 187.64966, 334.87706, 268.23742)
 
 def _dict_from_string(dict_name: str):
@@ -808,6 +810,74 @@ def show_both_splines(experiment_folder, bspline_folder):
     bs_world = load_bspline(experiment_folder, 'spline_ref_final')  # bs_world 
     show_bsplines([experiment_spline, bs_world], num_samples=400, line_radius=0.007, show_axes=True)
 
+def show_depth_with_skeleton(
+    depth_map: np.ndarray,
+    skeleton: np.ndarray,
+    *,
+    skeleton_color: tuple[int, int, int] = (255, 255, 255),  # BGR for red
+    skeleton_alpha: float = 1.0,
+    win_name: str = "Depth + Skeleton",
+    wait_ms: int = 0,
+    save_path: str | None = None,
+) -> None:
+    """
+    Display a depth map with an overlaid skeleton using OpenCV.
+
+    Zero-depth pixels are shown in white.
+
+    Parameters
+    ----------
+    depth_map : np.ndarray
+        2-D depth array.
+    skeleton : np.ndarray
+        Boolean/binary array (same shape) from skimage.morphology.skeletonize.
+    skeleton_color : tuple, optional
+        BGR color for the skeleton. Default is red.
+    skeleton_alpha : float, optional
+        Overlay opacity [0–1]. Default 1 = fully opaque.
+    win_name : str, optional
+        Window title.
+    wait_ms : int, optional
+        cv2.waitKey delay; 0 waits indefinitely.
+    save_path : str | None, optional
+        If given, saves the result to this path.
+    """
+    if depth_map.shape != skeleton.shape:
+        raise ValueError("`depth_map` and `skeleton` must have identical shapes.")
+
+    # --- normalise depth (ignoring zeros) ---
+    depth_f32 = depth_map.astype(np.float32)
+    non_zero_mask = depth_f32 > 0
+
+    depth_norm = np.zeros_like(depth_f32)
+    if np.any(non_zero_mask):
+        d_min, d_max = depth_f32[non_zero_mask].min(), depth_f32[non_zero_mask].max()
+        if d_max > d_min:
+            depth_norm[non_zero_mask] = 255 * (depth_f32[non_zero_mask] - d_min) / (d_max - d_min)
+
+    depth_u8 = depth_norm.astype(np.uint8)
+    depth_bgr = cv2.applyColorMap(depth_u8, cv2.COLORMAP_PLASMA)
+
+    # Set zero-depth pixels to white
+    depth_bgr[~non_zero_mask] = (255, 255, 255)
+
+    # --- build skeleton overlay ---
+    overlay = np.zeros_like(depth_bgr, dtype=np.uint8)
+    overlay[skeleton.astype(bool)] = skeleton_color
+
+    blended = cv2.addWeighted(overlay, skeleton_alpha, depth_bgr, 1.0, 0)
+
+    # --- display & optional save ---
+    cv2.imshow(win_name, blended)
+    if save_path is not None:
+        cv2.imwrite(save_path, blended)
+    cv2.waitKey(wait_ms)
+    cv2.destroyWindow(win_name)
+
+
+
+
+
 if __name__ == "__main__":
     # rospy.init_node("experiment_results", anonymous=True)
 
@@ -875,10 +945,11 @@ if __name__ == "__main__":
     # experiment_timestamp_str = '2025_09_01_12-30'
     # experiment_timestamp_str = '2025_09_01_12-34'
     # experiment_timestamp_str = '2025_09_01_12-39'
-    experiment_timestamp_str = '2025_09_01_12-43'
-    experiment_folder = '/root/workspace/images/experiment_images/tube_double/wood/' + experiment_timestamp_str
+    # experiment_timestamp_str = '2025_09_01_12-43'
+    # experiment_folder = '/root/workspace/images/experiment_images/tube_double/wood/' + experiment_timestamp_str
 
-    
+    experiment_timestamp_str = '2025_08_04_11-17'
+    experiment_folder = '/root/workspace/images/thesis_images/' + experiment_timestamp_str
 
     pose_folder = experiment_folder + '/camera_pose'
     image_folder = experiment_folder + '/image/'
@@ -899,9 +970,27 @@ if __name__ == "__main__":
     # show_carved_bspline(voxel_folder, bspline_folder)
 
 
-    fit_bspline_wrapper(voxel_folder, bspline_folder)
-    calculate_distances(experiment_folder, bspline_folder)
+    # fit_bspline_wrapper(voxel_folder, bspline_folder)
+    # calculate_distances(experiment_folder, bspline_folder)
 
     # show_both_splines(experiment_folder, bspline_folder)
 
-    
+
+    depth_map_folder = experiment_folder + '/depth_orig'
+    depth_map = load_numpy_from_file(depth_map_folder, '1')
+    mask = load_mask(mask_folder, '1')
+    skeleton = skeletonize(mask.astype(bool))
+
+    # # show_masks([mask, skeleton])
+    # show_depth_map(depth_map[100:400, 200:300])
+
+    # show_depth_with_skeleton(depth_map, skeleton)
+
+    width = 640
+    height = 480
+    left = 260
+    right = 130
+    top = 150
+    bottom = 280
+
+    save_depth_map(depth_map[top: width-bottom, left: height-right], depth_map_folder, 'cropped')
