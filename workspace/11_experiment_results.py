@@ -31,6 +31,7 @@ from guided_bspline_from_voxels import (
 )
 
 from skimage.morphology import skeletonize
+from tf.transformations import euler_from_quaternion
 
 camera_parameters = (149.09148, 187.64966, 334.87706, 268.23742)
 
@@ -708,7 +709,6 @@ def carve_bspline(image_folder,
     for i in index_array:
         print(f"i: {i}")
         camera_pose = load_pose_stamped(pose_folder, str(i))
-        camera_poses_in_map_frame_from_experiment.append(camera_pose)
         image = cv2.imread(image_folder + str(i) + '.png')
 
         camera_pose_in_marker_frame = get_camera_pose_from_aruco_marker(image, camera_parameters, marker_length_m=0.150, show=False, dict="DICT_4X4_1000")
@@ -725,6 +725,8 @@ def carve_bspline(image_folder,
         masks.append(mask)
         # show_masks(mask, title=f"Mask {i}")
 
+        camera_poses_in_map_frame_from_experiment.append(camera_pose)
+
     
     marker_pose_in_map_frame = compose_pose_stamped(camera_poses_in_map_frame_from_experiment[correct_pose_index], marker_poses_in_camera_frame[correct_pose_index])
     # marker_pose_in_map_frame = compose_pose_stamped(camera_poses_in_map_frame_from_experiment[0], marker_poses_in_camera_frame[0])
@@ -734,15 +736,16 @@ def carve_bspline(image_folder,
         camera_pose_in_map_frame_corrected = compose_pose_stamped(marker_pose_in_map_frame, camera_pose_in_marker_frame)
         camera_poses_in_map_frame_corrected.append(camera_pose_in_map_frame_corrected)
 
-        # print("-------------------------------------------------------------")
+        print("-------------------------------------------------------------")
+        compare_poses(camera_poses_in_map_frame_from_experiment[i], camera_poses_in_map_frame_corrected[i])
         # print(f"camera_pose_in_map_frame_from_experiment: {camera_poses_in_map_frame_from_experiment[i]}")
-        # print(f"camera_pose_in_map_frame_corrected: {camera_pose_in_map_frame_corrected}")
+        # print(f"camera_pose_in_map_frame_corrected: {camera_poses_in_map_frame_corrected[i]}")
 
 
 
     #region Voxel Carving
     vg = carve_voxels(masks, camera_poses_in_map_frame_corrected, camera_parameters, center, side_lengths, voxel_size, tolerance_px=tolerance_px)
-    # vg = carve_voxels(masks, camera_poses_in_map_frame_from_experiment, camera_parameters, center, side_lengths, voxel_size, tolerance_px=0)
+    # vg = carve_voxels(masks, camera_poses_in_map_frame_from_experiment, camera_parameters, center, side_lengths, voxel_size, tolerance_px=tolerance_px)
 
     save_voxel_grid(vg, voxel_folder, 'vox_ref_orig')
     print(vg.occupancy.shape, vg.origin, vg.voxel_size)
@@ -874,7 +877,47 @@ def show_depth_with_skeleton(
     cv2.waitKey(wait_ms)
     cv2.destroyWindow(win_name)
 
+def compare_poses(pose1, pose2):
+    """
+    Compare two geometry_msgs/PoseStamped poses and print the difference in position and orientation (Euler angles).
+    """
+    # Extract positions
+    p1 = pose1.pose.position
+    p2 = pose2.pose.position
+    pos1 = np.array([p1.x, p1.y, p1.z])
+    pos2 = np.array([p2.x, p2.y, p2.z])
 
+    diff_pos = np.abs(pos1 - pos2)
+    dist_pos = np.linalg.norm(pos1 - pos2)
+
+    print("Position differences (abs):")
+    print(f"  x: {diff_pos[0]:.6f}")
+    print(f"  y: {diff_pos[1]:.6f}")
+    print(f"  z: {diff_pos[2]:.6f}")
+    print(f"  Euclidean distance: {dist_pos:.6f} m")
+
+    # Extract orientations (quaternions)
+    q1 = pose1.pose.orientation
+    q2 = pose2.pose.orientation
+    quat1 = [q1.x, q1.y, q1.z, q1.w]
+    quat2 = [q2.x, q2.y, q2.z, q2.w]
+
+    # Convert to Euler angles (in radians)
+    euler1 = np.array(euler_from_quaternion(quat1))  # roll, pitch, yaw
+    euler2 = np.array(euler_from_quaternion(quat2))
+
+    # Convert to degrees
+    euler1_deg = np.degrees(euler1)
+    euler2_deg = np.degrees(euler2)
+    diff_euler_deg = np.abs(euler1_deg - euler2_deg)
+
+    print("Orientation differences (Euler angles, abs):")
+    print(f"  Roll : {diff_euler_deg[0]:.3f}°")
+    print(f"  Pitch: {diff_euler_deg[1]:.3f}°")
+    print(f"  Yaw  : {diff_euler_deg[2]:.3f}°")
+
+# Example usage:
+# compare_poses(pose1, pose2)
 
 
 
@@ -882,16 +925,16 @@ if __name__ == "__main__":
     # rospy.init_node("experiment_results", anonymous=True)
 
     # Cable Black
-    # experiment_folder = '/root/workspace/images/experiment_images/cable/black/' + experiment_timestamp_str
     # experiment_timestamp_str = '2025_08_27_11-39'
     # experiment_timestamp_str = '2025_08_27_12-29'
     # experiment_timestamp_str = '2025_08_27_13-03'
     # experiment_timestamp_str = '2025_08_27_13-10'
-    # experiment_timestamp_str = '2025_08_27_13-35'
+    experiment_timestamp_str = '2025_08_27_13-35'
     # experiment_timestamp_str = '2025_08_27_13-40'
     # experiment_timestamp_str = '2025_08_27_13-47'
     # experiment_timestamp_str = '2025_08_27_13-53'
     # experiment_timestamp_str = '2025_08_27_14-05'
+    experiment_folder = '/root/workspace/images/experiment_images/cable/black/' + experiment_timestamp_str
 
     # Cable Tablecloth
     # experiment_folder = '/root/workspace/images/experiment_images/cable/tablecloth/' + experiment_timestamp_str
@@ -948,8 +991,8 @@ if __name__ == "__main__":
     # experiment_timestamp_str = '2025_09_01_12-43'
     # experiment_folder = '/root/workspace/images/experiment_images/tube_double/wood/' + experiment_timestamp_str
 
-    experiment_timestamp_str = '2025_08_04_11-17'
-    experiment_folder = '/root/workspace/images/thesis_images/' + experiment_timestamp_str
+    # experiment_timestamp_str = '2025_08_04_11-17'
+    # experiment_folder = '/root/workspace/images/thesis_images/' + experiment_timestamp_str
 
     pose_folder = experiment_folder + '/camera_pose'
     image_folder = experiment_folder + '/image/'
@@ -963,11 +1006,11 @@ if __name__ == "__main__":
 
 
 
-    index_array=[4,0,1,5] 
+    index_array=[4,1,5,6] 
     voxel_size = 0.002
     # voxel_size = 0.005
-    # carve_bspline(image_folder, mask_folder, pose_folder, voxel_folder, 0, index_array=index_array, tolerance_px=0)
-    # show_carved_bspline(voxel_folder, bspline_folder)
+    carve_bspline(image_folder, mask_folder, pose_folder, voxel_folder, 0, index_array=index_array, tolerance_px=0)
+    show_carved_bspline(voxel_folder, bspline_folder)
 
 
     # fit_bspline_wrapper(voxel_folder, bspline_folder)
@@ -976,21 +1019,25 @@ if __name__ == "__main__":
     # show_both_splines(experiment_folder, bspline_folder)
 
 
-    depth_map_folder = experiment_folder + '/depth_orig'
-    depth_map = load_numpy_from_file(depth_map_folder, '1')
-    mask = load_mask(mask_folder, '1')
-    skeleton = skeletonize(mask.astype(bool))
+
+
+
+
+    # depth_map_folder = experiment_folder + '/depth_orig'
+    # depth_map = load_numpy_from_file(depth_map_folder, '1')
+    # mask = load_mask(mask_folder, '1')
+    # skeleton = skeletonize(mask.astype(bool))
 
     # # show_masks([mask, skeleton])
     # show_depth_map(depth_map[100:400, 200:300])
 
     # show_depth_with_skeleton(depth_map, skeleton)
 
-    width = 640
-    height = 480
-    left = 260
-    right = 130
-    top = 150
-    bottom = 280
+    # width = 640
+    # height = 480
+    # left = 260
+    # right = 130
+    # top = 150
+    # bottom = 280
 
-    save_depth_map(depth_map[top: width-bottom, left: height-right], depth_map_folder, 'cropped')
+    # save_depth_map(depth_map[top: width-bottom, left: height-right], depth_map_folder, 'cropped')
