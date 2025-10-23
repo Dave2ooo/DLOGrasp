@@ -25,3 +25,8 @@ cd ~/HSR_workspace/DOPE/ && docker-compose -f docker_compose/gsam2.yml up --buil
 ```bash
 cd ~/HSR_workspace/DOPE/ && docker-compose -f docker_compose/gsam2.yml up
 ```
+
+## Run DLOGrasp
+```bash
+cd ~/HSR_workspace/DOPE/workspace/ && python my_class.py
+```
